@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -5,10 +6,15 @@ from pathlib import Path
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from psycopg_pool import AsyncConnectionPool
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from api.addon.routes import addon_router
+from api.gmail.auth import TokenStore
+from api.gmail.client import GmailClient
+
+logger = logging.getLogger(__name__)
 
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
@@ -23,9 +29,22 @@ sentry_sdk.init(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: init DB pool, Redis, etc.
+    database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
+    pool = AsyncConnectionPool(conninfo=database_url)
+    await pool.open()
+    app.state.db = pool
+
+    encryption_key = os.environ.get("GMAIL_TOKEN_ENCRYPTION_KEY", "")
+    if encryption_key:
+        token_store = TokenStore(db_pool=pool, encryption_key=encryption_key)
+        app.state.gmail = GmailClient(token_store)
+        logger.info("GmailClient initialized with token store")
+    else:
+        logger.warning("GMAIL_TOKEN_ENCRYPTION_KEY not set — GmailClient not available")
+
     yield
-    # Shutdown: close pools
+
+    await pool.close()
 
 
 app = FastAPI(title="LRP Scheduling Agent", lifespan=lifespan)
