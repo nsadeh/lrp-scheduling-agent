@@ -14,4 +14,5 @@ fi
 export DATABASE_URL="${DATABASE_URL:-postgresql://dev:dev@localhost:5432/lrp_dev}"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
 export ENVIRONMENT="development"
+export PYTHONPATH="src:${PYTHONPATH:-}"
 uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000

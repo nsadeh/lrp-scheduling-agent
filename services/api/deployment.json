@@ -1,0 +1,23 @@
+{
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata"
+  ],
+  "addOns": {
+    "common": {
+      "name": "LRP Scheduling Agent",
+      "logoUrl": "https://76ac-71-104-78-246.ngrok-free.app/static/logo.png",
+      "homepageTrigger": {
+        "runFunction": "https://76ac-71-104-78-246.ngrok-free.app/addon/homepage"
+      }
+    },
+    "gmail": {
+      "contextualTriggers": [
+        {
+          "unconditional": {},
+          "onTriggerFunction": "https://76ac-71-104-78-246.ngrok-free.app/addon/on-message"
+        }
+      ]
+    }
+  }
+}
