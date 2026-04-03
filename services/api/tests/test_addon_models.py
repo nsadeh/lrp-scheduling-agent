@@ -6,10 +6,10 @@ from api.addon.models import (
     Card,
     CardHeader,
     CardResponse,
-    PushCard,
     Section,
     TextParagraph,
     TextParagraphWidget,
+    UpdateCard,
 )
 
 
@@ -80,8 +80,8 @@ class TestCardResponse:
         response = CardResponse(
             action=ActionResponse(
                 navigations=[
-                    PushCard(
-                        push_card=Card(
+                    UpdateCard(
+                        update_card=Card(
                             header=CardHeader(
                                 title="Test",
                                 image_url="https://example.com/logo.png",
@@ -105,8 +105,8 @@ class TestCardResponse:
 
         # Verify camelCase keys at every level
         nav = data["action"]["navigations"][0]
-        assert "pushCard" in nav
-        card = nav["pushCard"]
+        assert "updateCard" in nav
+        card = nav["updateCard"]
         assert card["header"]["imageUrl"] == "https://example.com/logo.png"
         assert card["header"]["imageType"] == "CIRCLE"
         assert card["sections"][0]["widgets"][0]["textParagraph"]["text"] == "Hello"
@@ -116,8 +116,8 @@ class TestCardResponse:
         response = CardResponse(
             action=ActionResponse(
                 navigations=[
-                    PushCard(
-                        push_card=Card(
+                    UpdateCard(
+                        update_card=Card(
                             header=CardHeader(title="Test"),
                             sections=[
                                 Section(
@@ -132,6 +132,6 @@ class TestCardResponse:
             )
         )
         data = response.model_dump(by_alias=True, exclude_none=True)
-        header = data["action"]["navigations"][0]["pushCard"]["header"]
+        header = data["action"]["navigations"][0]["updateCard"]["header"]
         assert "imageUrl" not in header
         assert "subtitle" not in header

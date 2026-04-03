@@ -12,10 +12,10 @@ from api.addon.models import (
     Card,
     CardHeader,
     CardResponse,
-    PushCard,
     Section,
     TextParagraph,
     TextParagraphWidget,
+    UpdateCard,
 )
 
 
@@ -38,8 +38,8 @@ def build_homepage_card() -> CardResponse:
     return CardResponse(
         action=ActionResponse(
             navigations=[
-                PushCard(
-                    push_card=Card(
+                UpdateCard(
+                    update_card=Card(
                         header=CardHeader(
                             title="LRP Scheduling Agent",
                             subtitle="Long Ridge Partners",
@@ -69,8 +69,8 @@ def build_message_card(message_id: str) -> CardResponse:
     return CardResponse(
         action=ActionResponse(
             navigations=[
-                PushCard(
-                    push_card=Card(
+                UpdateCard(
+                    update_card=Card(
                         header=CardHeader(
                             title="LRP Scheduling Agent",
                             subtitle="Long Ridge Partners",

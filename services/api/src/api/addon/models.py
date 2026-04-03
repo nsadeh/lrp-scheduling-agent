@@ -73,6 +73,7 @@ class DecoratedText(BaseModel):
     top_label: str | None = Field(default=None, alias="topLabel")
     text: str
     wrap_text: bool | None = Field(default=None, alias="wrapText")
+    on_click: OnClick | None = Field(default=None, alias="onClick")
 
 
 class Image(BaseModel):
@@ -100,7 +101,119 @@ class ImageWidget(BaseModel):
     image: Image
 
 
-Widget = TextParagraphWidget | DecoratedTextWidget | ImageWidget
+# ---------------------------------------------------------------------------
+# Interactive widgets (buttons, inputs)
+# ---------------------------------------------------------------------------
+
+
+class ActionParameter(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    key: str
+    value: str
+
+
+class OnClickAction(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    function: str
+    parameters: list[ActionParameter] | None = None
+    required_widgets: list[str] | None = Field(default=None, alias="requiredWidgets")
+    all_widgets_are_required: bool | None = Field(default=None, alias="allWidgetsAreRequired")
+
+
+class OpenLink(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    url: str
+
+
+class OnClick(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    action: OnClickAction | None = None
+    open_link: OpenLink | None = Field(default=None, alias="openLink")
+
+
+class Button(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    text: str
+    on_click: OnClick = Field(alias="onClick")
+    color: dict[str, float] | None = None  # {"red": 0.0, "green": 0.0, "blue": 0.0}
+    disabled: bool | None = None
+
+
+class ButtonList(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    buttons: list[Button]
+
+
+class ButtonListWidget(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    button_list: ButtonList = Field(alias="buttonList")
+
+
+class TextInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    name: str
+    label: str
+    type: str | None = None  # "SINGLE_LINE" or "MULTIPLE_LINE"
+    value: str | None = None
+    hint_text: str | None = Field(default=None, alias="hintText")
+
+
+class TextInputWidget(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    text_input: TextInput = Field(alias="textInput")
+
+
+class SelectionItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    text: str
+    value: str
+    selected: bool | None = None
+
+
+class SelectionInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    name: str
+    label: str
+    type: str | None = None  # "DROPDOWN", "RADIO_BUTTON", "CHECK_BOX", "SWITCH"
+    items: list[SelectionItem]
+
+
+class SelectionInputWidget(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    selection_input: SelectionInput = Field(alias="selectionInput")
+
+
+class Divider(BaseModel):
+    pass
+
+
+class DividerWidget(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    divider: Divider = Field(default_factory=Divider)
+
+
+Widget = (
+    TextParagraphWidget
+    | DecoratedTextWidget
+    | ImageWidget
+    | ButtonListWidget
+    | TextInputWidget
+    | SelectionInputWidget
+    | DividerWidget
+)
 
 
 class Section(BaseModel):
@@ -109,6 +222,7 @@ class Section(BaseModel):
     header: str | None = None
     widgets: list[Widget]
     collapsible: bool | None = None
+    uncollapsible_widgets_count: int | None = Field(default=None, alias="uncollapsibleWidgetsCount")
 
 
 class CardHeader(BaseModel):
@@ -127,16 +241,16 @@ class Card(BaseModel):
     sections: list[Section]
 
 
-class PushCard(BaseModel):
+class UpdateCard(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
-    push_card: Card = Field(alias="pushCard")
+    update_card: Card = Field(alias="updateCard")
 
 
 class ActionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
-    navigations: list[PushCard]
+    navigations: list[UpdateCard]
 
 
 class CardResponse(BaseModel):

@@ -16,9 +16,7 @@ if TYPE_CHECKING:
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
-_LOAD_SQL = (
-    "SELECT refresh_token_encrypted, scopes" " FROM gmail_tokens WHERE user_email = %(email)s"
-)
+_LOAD_SQL = "SELECT refresh_token_encrypted, scopes FROM gmail_tokens WHERE user_email = %(email)s"
 
 
 class TokenStore:

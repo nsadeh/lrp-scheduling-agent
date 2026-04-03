@@ -1,6 +1,7 @@
 """Integration tests for Google Workspace Add-on endpoints."""
 
 import os
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -9,10 +10,21 @@ from httpx import ASGITransport, AsyncClient
 os.environ["SKIP_ADDON_AUTH"] = "true"
 
 from api.main import app
+from api.scheduling.models import StatusBoard
 
 
 @pytest.fixture
-async def client():
+def mock_scheduling():
+    """Mock the LoopService to avoid needing a real database."""
+    svc = AsyncMock()
+    svc.get_status_board = AsyncMock(return_value=StatusBoard())
+    svc.find_loop_by_thread = AsyncMock(return_value=None)
+    return svc
+
+
+@pytest.fixture
+async def client(mock_scheduling):
+    app.state.scheduling = mock_scheduling
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -42,50 +54,61 @@ class TestHomepage:
         resp = await client.post("/addon/homepage", json=MINIMAL_EVENT)
         assert resp.status_code == 200
         data = resp.json()
-        card = data["action"]["navigations"][0]["pushCard"]
-        assert card["header"]["title"] == "LRP Scheduling Agent"
-        assert card["header"]["subtitle"] == "Long Ridge Partners"
+        card = data["action"]["navigations"][0]["updateCard"]
+        # Header removed — sidebar already shows "LRP Scheduling Agent"
+        assert "header" not in card
 
-    async def test_sections_contain_welcome_text(self, client: AsyncClient):
+    async def test_sections_present(self, client: AsyncClient):
         resp = await client.post("/addon/homepage", json=MINIMAL_EVENT)
         data = resp.json()
-        card = data["action"]["navigations"][0]["pushCard"]
-        text = card["sections"][0]["widgets"][0]["textParagraph"]["text"]
-        assert "scheduling" in text.lower()
+        card = data["action"]["navigations"][0]["updateCard"]
+        assert len(card["sections"]) > 0
 
 
 class TestOnMessage:
-    async def test_returns_card_with_message_id(self, client: AsyncClient):
+    async def test_unlinked_thread_shows_create_prompt(self, client: AsyncClient):
         resp = await client.post("/addon/on-message", json=MESSAGE_EVENT)
         assert resp.status_code == 200
         data = resp.json()
-        card = data["action"]["navigations"][0]["pushCard"]
-        section = card["sections"][0]
-        assert section["header"] == "Message Context"
-        # The message ID should appear somewhere in the card text
-        widget_text = section["widgets"][0]["textParagraph"]["text"]
-        assert "msg-abc-123" in widget_text
+        card = data["action"]["navigations"][0]["updateCard"]
+        # Should show "not linked" message since mock returns None
+        widgets_text = str(card)
+        assert "not linked" in widgets_text.lower() or "create" in widgets_text.lower()
 
-    async def test_falls_back_to_homepage_without_gmail(self, client: AsyncClient):
-        """When no gmail context is present, falls back to homepage card."""
+    async def test_falls_back_to_status_board_without_gmail(self, client: AsyncClient):
+        """When no gmail context is present, falls back to status board."""
         resp = await client.post("/addon/on-message", json=MINIMAL_EVENT)
         assert resp.status_code == 200
         data = resp.json()
-        card = data["action"]["navigations"][0]["pushCard"]
-        # Homepage card has no "Message Context" section header
-        assert card["sections"][0].get("header") is None
+        card = data["action"]["navigations"][0]["updateCard"]
+        assert "header" not in card
 
-    async def test_falls_back_without_message_id(self, client: AsyncClient):
-        """Gmail context present but no messageId falls back to homepage."""
+
+class TestAction:
+    async def test_show_create_form(self, client: AsyncClient):
         event = {
-            "commonEventObject": {"hostApp": "GMAIL", "platform": "WEB"},
-            "gmail": {"threadId": "thread-only"},
+            "commonEventObject": {
+                "hostApp": "GMAIL",
+                "platform": "WEB",
+                "invokedFunction": "show_create_form",
+            }
         }
-        resp = await client.post("/addon/on-message", json=event)
+        resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
         data = resp.json()
-        card = data["action"]["navigations"][0]["pushCard"]
-        assert card["sections"][0].get("header") is None
+        card = data["action"]["navigations"][0]["updateCard"]
+        assert card["header"]["title"] == "New Scheduling Loop"
+
+    async def test_unknown_function_returns_status_board(self, client: AsyncClient):
+        event = {
+            "commonEventObject": {
+                "hostApp": "GMAIL",
+                "platform": "WEB",
+                "invokedFunction": "nonexistent_function",
+            }
+        }
+        resp = await client.post("/addon/action", json=event)
+        assert resp.status_code == 200
 
 
 class TestStaticFiles:

@@ -84,10 +84,9 @@ class GmailClient:
         logger.info("get_message user=%s message_id=%s", user_email, message_id)
         raw = await self._exec(
             user_email,
-            lambda svc: svc.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute(),
+            lambda svc: (
+                svc.users().messages().get(userId="me", id=message_id, format="full").execute()
+            ),
         )
         return parse_message(raw)
 
@@ -96,10 +95,9 @@ class GmailClient:
         logger.info("get_thread user=%s thread_id=%s", user_email, thread_id)
         raw = await self._exec(
             user_email,
-            lambda svc: svc.users()
-            .threads()
-            .get(userId="me", id=thread_id, format="full")
-            .execute(),
+            lambda svc: (
+                svc.users().threads().get(userId="me", id=thread_id, format="full").execute()
+            ),
         )
         messages = [parse_message(m) for m in raw.get("messages", [])]
         messages.sort(key=lambda m: m.date)
@@ -152,10 +150,9 @@ class GmailClient:
 
         raw = await self._exec(
             user_email,
-            lambda svc: svc.users()
-            .drafts()
-            .update(userId="me", id=draft_id, body=draft_body)
-            .execute(),
+            lambda svc: (
+                svc.users().drafts().update(userId="me", id=draft_id, body=draft_body).execute()
+            ),
         )
         return await self._get_draft(user_email, raw["id"])
 

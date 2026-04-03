@@ -3,16 +3,21 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import sentry_sdk
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from psycopg_pool import AsyncConnectionPool
-from sentry_sdk.integrations.asyncio import AsyncioIntegration
-from sentry_sdk.integrations.fastapi import FastApiIntegration
+from dotenv import load_dotenv
 
-from api.addon.routes import addon_router
-from api.gmail.auth import TokenStore
-from api.gmail.client import GmailClient
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+
+import sentry_sdk  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from psycopg_pool import AsyncConnectionPool  # noqa: E402
+from sentry_sdk.integrations.asyncio import AsyncioIntegration  # noqa: E402
+from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
+
+from api.addon.routes import addon_router, oauth_router  # noqa: E402
+from api.gmail.auth import TokenStore  # noqa: E402
+from api.gmail.client import GmailClient  # noqa: E402
+from api.scheduling.service import LoopService  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,10 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("GMAIL_TOKEN_ENCRYPTION_KEY not set — GmailClient not available")
 
+    gmail = getattr(app.state, "gmail", None)
+    app.state.scheduling = LoopService(db_pool=pool, gmail=gmail)
+    logger.info("LoopService initialized")
+
     yield
 
     await pool.close()
@@ -55,6 +64,7 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 app.include_router(addon_router)
+app.include_router(oauth_router)
 
 
 @app.get("/health")
