@@ -6,16 +6,16 @@
   "addOns": {
     "common": {
       "name": "LRP Scheduling Agent",
-      "logoUrl": "https://dd73-71-104-78-246.ngrok-free.app/logo.png",
+      "logoUrl": "https://fb50-71-104-78-246.ngrok-free.app/logo.png",
       "homepageTrigger": {
-        "runFunction": "https://dd73-71-104-78-246.ngrok-free.app/addon/homepage"
+        "runFunction": "https://fb50-71-104-78-246.ngrok-free.app/addon/homepage"
       }
     },
     "gmail": {
       "contextualTriggers": [
         {
           "unconditional": {},
-          "onTriggerFunction": "https://dd73-71-104-78-246.ngrok-free.app/addon/on-message"
+          "onTriggerFunction": "https://fb50-71-104-78-246.ngrok-free.app/addon/on-message"
         }
       ]
     }

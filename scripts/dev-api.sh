@@ -7,7 +7,7 @@ docker compose up -d postgres redis
 # Run migrations if any exist
 cd services/api
 if ls migrations/*.py &>/dev/null; then
-  uv run yoyo apply --database "${DATABASE_URL:-postgresql://dev:dev@localhost:5432/lrp_dev}" ./migrations
+  uv run yoyo apply --batch --database "${DATABASE_URL:-postgresql://dev:dev@localhost:5432/lrp_dev}" ./migrations
 fi
 
 # Start API with hot reload

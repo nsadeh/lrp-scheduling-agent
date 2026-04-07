@@ -15,7 +15,13 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from api.addon.auth import verify_google_addon_token
-from api.addon.models import AddonRequest, CardResponse  # noqa: TC001
+from api.addon.models import (
+    ActionResponse,
+    AddonRequest,
+    CardResponse,
+    PushCard,
+    UpdateCard,
+)
 from api.scheduling.cards import (
     build_add_time_slot_form,
     build_auth_required,
@@ -118,6 +124,15 @@ def _ensure_action_url(request: Request) -> None:
     set_action_url(f"{base}/addon/action")
 
 
+def _as_push(response: CardResponse) -> CardResponse:
+    """Convert updateCard navigations to pushCard for initial triggers."""
+    navigations = [
+        PushCard(push_card=nav.update_card) if isinstance(nav, UpdateCard) else nav
+        for nav in response.action.navigations
+    ]
+    return CardResponse(action=ActionResponse(navigations=navigations))
+
+
 @addon_router.post("/homepage")
 async def addon_homepage(body: AddonRequest, request: Request) -> dict:
     """Homepage trigger — status board showing all active loops."""
@@ -126,12 +141,11 @@ async def addon_homepage(body: AddonRequest, request: Request) -> dict:
 
     auth_card = await _check_gmail_auth(request, email)
     if auth_card:
-        return auth_card.model_dump(by_alias=True, exclude_none=True)
+        return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
     svc = _get_scheduling(request)
     board = await svc.get_status_board(email)
-    card = build_drafts_tab(board)
-    return card.model_dump(by_alias=True, exclude_none=True)
+    return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
 
 
 @addon_router.post("/on-message")
@@ -142,7 +156,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
 
     auth_card = await _check_gmail_auth(request, email)
     if auth_card:
-        return auth_card.model_dump(by_alias=True, exclude_none=True)
+        return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
     svc = _get_scheduling(request)
     thread_id = None
@@ -153,8 +167,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
 
     if not thread_id:
         board = await svc.get_status_board(_get_user_email(body))
-        card = build_drafts_tab(board)
-        return card.model_dump(by_alias=True, exclude_none=True)
+        return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
 
     loop = await svc.find_loop_by_thread(thread_id)
     if loop:
@@ -162,7 +175,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     else:
         card = build_contextual_unlinked(thread_id, message_id=message_id)
 
-    return card.model_dump(by_alias=True, exclude_none=True)
+    return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
 
 @addon_router.post("/action")

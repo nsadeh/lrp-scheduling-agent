@@ -10,7 +10,7 @@ uv sync
 uv run pre-commit install
 if [ -d "migrations" ] && ls migrations/*.py &>/dev/null; then
   echo "==> Running migrations..."
-  uv run yoyo apply --database "${DATABASE_URL:-postgresql://dev:dev@localhost:5432/lrp_dev}" ./migrations
+  uv run yoyo apply --batch --database "${DATABASE_URL:-postgresql://dev:dev@localhost:5432/lrp_dev}" ./migrations
 fi
 cd ../..
 

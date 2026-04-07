@@ -241,6 +241,12 @@ class Card(BaseModel):
     sections: list[Section]
 
 
+class PushCard(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    push_card: Card = Field(alias="pushCard")
+
+
 class UpdateCard(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
@@ -250,7 +256,7 @@ class UpdateCard(BaseModel):
 class ActionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
-    navigations: list[UpdateCard]
+    navigations: list[PushCard | UpdateCard]
 
 
 class CardResponse(BaseModel):
