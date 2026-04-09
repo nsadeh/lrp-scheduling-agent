@@ -95,28 +95,100 @@ async def process_relevant_message(
         # 2. Find matching loop (if any)
         loop = await scheduling.find_loop_by_thread(thread_id)
 
-        # 3. Build agent context
-        _agent_context = {
-            "coordinator_email": coordinator_email,
-            "message": message,
-            "thread": thread,
-            "loop": loop,
-        }
+        # 3. Check if agent engine is available
+        classifier = ctx.get("classifier")
+        drafter = ctx.get("drafter")
+        agent_service = ctx.get("agent_service")
 
-        # TODO: Run agent engine (classification + optional draft)
-        # This will be implemented as part of the agent engine phase.
-        # The agent engine will:
-        #   - Classify the email (new request, availability response, confirmation, etc.)
-        #   - Determine suggested action (draft reply, update stage, create loop, etc.)
-        #   - Generate draft email if applicable
-        #   - Return a structured suggestion
-        logger.info(
-            "Agent engine not yet implemented — skipping classification for message %s",
-            message_id,
+        if not classifier or not drafter or not agent_service:
+            logger.warning("Agent engine not available — skipping for message %s", message_id)
+            return
+
+        # 4. Build agent context
+        coordinator = await scheduling.get_coordinator_by_email(coordinator_email)
+        if not coordinator:
+            logger.warning("Coordinator %s not found in DB", coordinator_email)
+            return
+
+        events = []
+        recruiter = None
+        client_contact = None
+        candidate = None
+        active_stage = None
+
+        if loop:
+            events = await scheduling.get_events(loop.id)
+            if loop.recruiter:
+                recruiter = loop.recruiter
+            if loop.client_contact:
+                client_contact = loop.client_contact
+            if loop.candidate:
+                candidate = loop.candidate
+            if loop.most_urgent_stage:
+                active_stage = loop.most_urgent_stage
+
+        from api.agent.models import AgentContext
+
+        agent_ctx = AgentContext(
+            new_message=message,
+            thread_messages=thread.messages,
+            loop=loop,
+            events=events,
+            coordinator=coordinator,
+            recruiter=recruiter,
+            client_contact=client_contact,
+            candidate=candidate,
         )
 
-        # TODO: Persist suggestion via queries.create_suggestion()
-        # Will be wired once the agent engine returns structured output.
+        # 5. Run agent engine (classification + optional draft)
+        from api.agent.engine import run_agent
+
+        result = await run_agent(agent_ctx, classifier, drafter)
+        logger.info(
+            "Agent classified message %s as %s, action=%s, confidence=%.2f",
+            message_id,
+            result.classification.classification,
+            result.classification.suggested_action,
+            result.classification.confidence,
+        )
+
+        # 6. Validate via guardrails
+        from api.agent.guardrails import validate_action
+
+        violations = validate_action(result, loop)
+        if violations:
+            logger.warning(
+                "Guardrail violations for message %s: %s",
+                message_id,
+                violations,
+            )
+            return
+
+        # 7. Persist suggestion
+        suggestion = await agent_service.create_suggestion(
+            loop_id=loop.id if loop else None,
+            stage_id=active_stage.id if active_stage else None,
+            gmail_message_id=message_id,
+            gmail_thread_id=thread_id,
+            classification=result.classification.classification,
+            suggested_action=result.classification.suggested_action,
+            confidence=result.classification.confidence,
+            reasoning=result.classification.reasoning,
+            questions=result.classification.questions or None,
+            prefilled_data=result.classification.prefilled_data,
+        )
+
+        # 8. Persist draft (if any)
+        if result.draft:
+            await agent_service.create_draft(
+                suggestion_id=suggestion.id,
+                draft_to=result.draft.to,
+                draft_subject=result.draft.subject,
+                draft_body=result.draft.body,
+                in_reply_to=result.draft.in_reply_to,
+            )
+
+        logger.info("Suggestion %s created for message %s", suggestion.id, message_id)
 
     except Exception:
         logger.exception("Error processing message %s for %s", message_id, coordinator_email)

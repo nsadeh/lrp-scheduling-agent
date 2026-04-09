@@ -15,6 +15,8 @@ from arq.connections import RedisSettings
 from dotenv import load_dotenv
 from psycopg_pool import AsyncConnectionPool
 
+from api.agent.llm import AnthropicProvider, LLMRouter, OpenAIProvider
+from api.agent.service import AgentService
 from api.agent.workers import (
     cleanup_old_processed_messages,
     process_gmail_notification,
@@ -58,7 +60,43 @@ async def startup(ctx: dict) -> None:
 
     gmail_client = ctx.get("gmail")
     ctx["scheduling"] = LoopService(db_pool=pool, gmail=gmail_client)
-    logger.info("Worker: LoopService initialized")
+    ctx["agent_service"] = AgentService(db_pool=pool)
+
+    # LLM routers for classification and drafting
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+
+    classifier_primary = (
+        AnthropicProvider(model="claude-haiku-4-5-20251001", api_key=anthropic_key)
+        if anthropic_key
+        else None
+    )
+    classifier_fallback = (
+        OpenAIProvider(model="gpt-4o-mini", api_key=openai_key) if openai_key else None
+    )
+    drafter_primary = (
+        AnthropicProvider(model="claude-sonnet-4-6-20250514", api_key=anthropic_key)
+        if anthropic_key
+        else None
+    )
+    drafter_fallback = OpenAIProvider(model="gpt-4o", api_key=openai_key) if openai_key else None
+
+    if classifier_primary or classifier_fallback:
+        ctx["classifier"] = LLMRouter(
+            primary=classifier_primary or classifier_fallback,
+            fallback=classifier_fallback if classifier_primary else None,
+        )
+        ctx["drafter"] = LLMRouter(
+            primary=drafter_primary or drafter_fallback,
+            fallback=drafter_fallback if drafter_primary else None,
+        )
+        logger.info("Worker: LLM routers initialized")
+    else:
+        ctx["classifier"] = None
+        ctx["drafter"] = None
+        logger.warning("Worker: No LLM API keys set — agent engine unavailable")
+
+    logger.info("Worker: LoopService and AgentService initialized")
 
 
 async def shutdown(ctx: dict) -> None:
