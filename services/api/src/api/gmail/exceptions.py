@@ -23,3 +23,7 @@ class GmailNotFoundError(GmailApiError):
 
 class GmailRateLimitError(GmailApiError):
     """Gmail API quota exceeded."""
+
+
+class GmailValidationError(GmailApiError):
+    """Invalid input (e.g. empty recipients) caught before making an API call."""
