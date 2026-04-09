@@ -17,6 +17,8 @@ from sentry_sdk.integrations.asyncio import AsyncioIntegration  # noqa: E402
 from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
+from api.agent.service import AgentService  # noqa: E402
+from api.agent.webhook import webhook_router  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
 from api.scheduling.service import LoopService  # noqa: E402
@@ -52,7 +54,8 @@ async def lifespan(app: FastAPI):
 
     gmail = getattr(app.state, "gmail", None)
     app.state.scheduling = LoopService(db_pool=pool, gmail=gmail)
-    logger.info("LoopService initialized")
+    app.state.agent_service = AgentService(db_pool=pool)
+    logger.info("LoopService and AgentService initialized")
 
     # arq Redis pool for enqueuing background jobs
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -81,6 +84,7 @@ if static_dir.exists():
 
 app.include_router(addon_router)
 app.include_router(oauth_router)
+app.include_router(webhook_router)
 
 
 @app.get("/health")
