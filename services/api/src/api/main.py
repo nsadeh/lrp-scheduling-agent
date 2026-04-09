@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 import sentry_sdk  # noqa: E402
+from arq import create_pool  # noqa: E402
+from arq.connections import RedisSettings  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI):
     encryption_key = os.environ.get("GMAIL_TOKEN_ENCRYPTION_KEY", "")
     if encryption_key:
         token_store = TokenStore(db_pool=pool, encryption_key=encryption_key)
+        app.state.token_store = token_store
         app.state.gmail = GmailClient(token_store)
         logger.info("GmailClient initialized with token store")
     else:
@@ -51,8 +54,21 @@ async def lifespan(app: FastAPI):
     app.state.scheduling = LoopService(db_pool=pool, gmail=gmail)
     logger.info("LoopService initialized")
 
+    # arq Redis pool for enqueuing background jobs
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    try:
+        app.state.redis = await create_pool(RedisSettings.from_dsn(redis_url))
+        logger.info("arq Redis pool created")
+    except Exception:
+        logger.warning("Failed to connect to Redis — background jobs unavailable", exc_info=True)
+        app.state.redis = None
+
     yield
 
+    # Shutdown
+    redis_pool = getattr(app.state, "redis", None)
+    if redis_pool is not None:
+        await redis_pool.aclose()
     await pool.close()
 
 
