@@ -22,6 +22,7 @@ from api.addon.models import (
     PushCard,
     UpdateCard,
 )
+from api.agent.cards import build_answer_form, build_suggestion_card
 from api.gmail.exceptions import GmailValidationError
 from api.scheduling.cards import (
     build_add_time_slot_form,
@@ -50,6 +51,11 @@ addon_router = APIRouter(
 
 def _get_scheduling(request: Request) -> LoopService:
     return request.app.state.scheduling
+
+
+def _get_agent_service(request: Request):
+    """Get AgentService from app state, or None if not initialized."""
+    return getattr(request.app.state, "agent_service", None)
 
 
 def _get_user_email(body: AddonRequest) -> str:
@@ -172,7 +178,23 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
         return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
 
     loop = await svc.find_loop_by_thread(thread_id)
-    if loop:
+
+    # Check for a pending agent suggestion on this thread
+    agent_svc = _get_agent_service(request)
+    suggestion = None
+    draft = None
+    if agent_svc:
+        suggestion = await agent_svc.get_latest_for_thread(thread_id)
+        if suggestion and suggestion.status == "pending":
+            draft = await agent_svc.get_draft_for_suggestion(suggestion.id)
+        else:
+            suggestion = None  # Only show pending suggestions
+
+    # If there's a pending suggestion, show the suggestion card
+    if suggestion:
+        loop_title = loop.title if loop else None
+        card = build_suggestion_card(suggestion, draft=draft, loop_title=loop_title)
+    elif loop:
         card = build_contextual_linked(loop)
     else:
         card = build_contextual_unlinked(thread_id, message_id=message_id)
@@ -198,9 +220,15 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     if not fn and body.common_event_object:
         fn = body.common_event_object.invoked_function
 
-    handler = _ACTION_HANDLERS.get(fn or "", _handle_unknown)
+    # New suggestion action handlers need request for AgentService access.
+    # Route them separately to avoid modifying all existing handler signatures.
+    suggestion_handler = _SUGGESTION_HANDLERS.get(fn or "")
+    handler = suggestion_handler or _ACTION_HANDLERS.get(fn or "", _handle_unknown)
     try:
-        card = await handler(body, svc, email)
+        if suggestion_handler:
+            card = await handler(body, svc, email, request)
+        else:
+            card = await handler(body, svc, email)
     except GmailValidationError as exc:
         logger.warning("Gmail validation error in action %s: %s", fn, exc)
         card = build_error_card(str(exc))
@@ -620,6 +648,170 @@ _ACTION_HANDLERS = {
     "forward_thread": _handle_forward_thread,
     "send_inline_email": _handle_send_inline_email,
     "edit_actors": _handle_show_drafts_tab,  # TODO: implement edit actors form
+}
+
+
+# ---------------------------------------------------------------------------
+# Agent suggestion action handlers
+# ---------------------------------------------------------------------------
+
+
+async def _handle_approve_suggestion(
+    body: AddonRequest, svc: LoopService, email: str, request: Request
+):
+    """Approve a suggestion: send draft (if any) and mark accepted."""
+    suggestion_id = _get_param(body, "suggestion_id")
+    agent_svc = _get_agent_service(request)
+    if not agent_svc or not suggestion_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    suggestion = await agent_svc.get_suggestion(suggestion_id)
+    if not suggestion:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    # If there's a draft, send it
+    draft = await agent_svc.get_draft_for_suggestion(suggestion_id)
+    if draft and suggestion.loop_id and suggestion.stage_id:
+        await svc.send_email(
+            loop_id=suggestion.loop_id,
+            stage_id=suggestion.stage_id,
+            coordinator_email=email,
+            to=draft.draft_to[0] if draft.draft_to else "",
+            subject=draft.draft_subject,
+            body=draft.draft_body,
+            in_reply_to=draft.in_reply_to,
+        )
+
+    # Mark suggestion as accepted
+    await agent_svc.resolve_suggestion(suggestion_id, status="accepted")
+
+    # Return updated loop view or status board
+    if suggestion.loop_id:
+        loop = await svc.get_loop(suggestion.loop_id)
+        return build_loop_detail(loop)
+    board = await svc.get_status_board(email)
+    return build_drafts_tab(board)
+
+
+async def _handle_edit_suggestion(
+    body: AddonRequest, svc: LoopService, email: str, request: Request
+):
+    """Open compose form pre-filled with agent's draft."""
+    suggestion_id = _get_param(body, "suggestion_id")
+    agent_svc = _get_agent_service(request)
+    if not agent_svc or not suggestion_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    suggestion = await agent_svc.get_suggestion(suggestion_id)
+    draft = await agent_svc.get_draft_for_suggestion(suggestion_id)
+    if not suggestion or not draft:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    # Pre-fill the compose form with the agent's draft
+    return build_compose_email(
+        stage_id=suggestion.stage_id or "",
+        loop_id=suggestion.loop_id or "",
+        to=draft.draft_to[0] if draft.draft_to else "",
+        subject=draft.draft_subject,
+        body=draft.draft_body,
+        gmail_thread_id=suggestion.gmail_thread_id,
+    )
+
+
+async def _handle_reject_suggestion(
+    body: AddonRequest, svc: LoopService, email: str, request: Request
+):
+    """Dismiss a suggestion."""
+    suggestion_id = _get_param(body, "suggestion_id")
+    agent_svc = _get_agent_service(request)
+    if agent_svc and suggestion_id:
+        feedback = _get_form_value(body, "feedback")
+        await agent_svc.resolve_suggestion(
+            suggestion_id, status="rejected", coordinator_feedback=feedback
+        )
+    board = await svc.get_status_board(email)
+    return build_drafts_tab(board)
+
+
+async def _handle_view_suggestion(
+    body: AddonRequest, svc: LoopService, email: str, request: Request
+):
+    """View a specific suggestion card (from Actions tab list)."""
+    suggestion_id = _get_param(body, "suggestion_id")
+    agent_svc = _get_agent_service(request)
+    if not agent_svc or not suggestion_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    suggestion = await agent_svc.get_suggestion(suggestion_id)
+    if not suggestion:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft = await agent_svc.get_draft_for_suggestion(suggestion_id)
+    loop_title = None
+    if suggestion.loop_id:
+        loop = await svc.get_loop(suggestion.loop_id)
+        loop_title = loop.title if loop else None
+
+    return build_suggestion_card(suggestion, draft=draft, loop_title=loop_title)
+
+
+async def _handle_answer_suggestion(
+    body: AddonRequest, svc: LoopService, email: str, request: Request
+):
+    """Show the answer form for an ask_coordinator suggestion."""
+    suggestion_id = _get_param(body, "suggestion_id")
+    agent_svc = _get_agent_service(request)
+    if not agent_svc or not suggestion_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    suggestion = await agent_svc.get_suggestion(suggestion_id)
+    if not suggestion:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    return build_answer_form(suggestion)
+
+
+async def _handle_accept_create_loop(
+    body: AddonRequest, svc: LoopService, email: str, request: Request
+):
+    """Accept a create_loop suggestion — open pre-filled loop form."""
+    suggestion_id = _get_param(body, "suggestion_id")
+    agent_svc = _get_agent_service(request)
+    if not agent_svc or not suggestion_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    suggestion = await agent_svc.get_suggestion(suggestion_id)
+    if not suggestion or not suggestion.prefilled_data:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    prefilled = suggestion.prefilled_data
+    await agent_svc.resolve_suggestion(suggestion_id, status="accepted")
+
+    return build_create_loop_form(
+        gmail_thread_id=suggestion.gmail_thread_id,
+        gmail_subject=prefilled.get("subject"),
+        prefill_client_name=prefilled.get("client_name"),
+        prefill_client_email=prefilled.get("client_email"),
+    )
+
+
+_SUGGESTION_HANDLERS = {
+    "approve_suggestion": _handle_approve_suggestion,
+    "edit_suggestion": _handle_edit_suggestion,
+    "reject_suggestion": _handle_reject_suggestion,
+    "view_suggestion": _handle_view_suggestion,
+    "answer_suggestion": _handle_answer_suggestion,
+    "accept_create_loop": _handle_accept_create_loop,
 }
 
 
