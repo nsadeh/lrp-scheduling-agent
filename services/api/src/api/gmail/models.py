@@ -49,6 +49,13 @@ class Draft(BaseModel):
     message: Message
 
 
+class HistoryRecord(BaseModel):
+    """A single history record from Gmail history.list."""
+
+    messages_added: list[str] = []  # message IDs
+    messages_deleted: list[str] = []  # message IDs
+
+
 # ---------------------------------------------------------------------------
 # Parsing helpers — convert raw Gmail API responses to our models
 # ---------------------------------------------------------------------------

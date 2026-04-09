@@ -17,7 +17,7 @@ from api.gmail.exceptions import (
     GmailRateLimitError,
     GmailValidationError,
 )
-from api.gmail.models import Draft, Message, Thread, parse_message
+from api.gmail.models import Draft, HistoryRecord, Message, Thread, parse_message
 
 if TYPE_CHECKING:
     from api.gmail.auth import TokenStore
@@ -221,3 +221,98 @@ class GmailClient:
             lambda svc: svc.users().messages().send(userId="me", body=msg_body).execute(),
         )
         return await self.get_message(user_email, raw["id"])
+
+    # --- Push Notifications ---
+
+    async def watch(self, user_email: str, topic_name: str) -> dict:
+        """Register Pub/Sub push notifications for a coordinator's mailbox.
+
+        Returns dict with historyId, expiration.
+        """
+        logger.info("watch user=%s topic=%s", user_email, topic_name)
+        body = {
+            "topicName": topic_name,
+            "labelIds": ["INBOX"],
+        }
+        return await self._exec(
+            user_email,
+            lambda svc: svc.users().watch(userId="me", body=body).execute(),
+        )
+
+    async def stop_watch(self, user_email: str) -> None:
+        """Stop push notifications for a coordinator's mailbox."""
+        logger.info("stop_watch user=%s", user_email)
+        await self._exec(
+            user_email,
+            lambda svc: svc.users().stop(userId="me").execute(),
+        )
+
+    async def history_list(
+        self,
+        user_email: str,
+        start_history_id: str,
+        history_types: list[str] | None = None,
+    ) -> dict:
+        """List history records since a given historyId.
+
+        Returns dict with history records and historyId.
+        history_types defaults to ['messageAdded'].
+        """
+        if history_types is None:
+            history_types = ["messageAdded"]
+        logger.info("history_list user=%s start=%s", user_email, start_history_id)
+
+        raw = await self._exec(
+            user_email,
+            lambda svc: (
+                svc.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=history_types,
+                )
+                .execute()
+            ),
+        )
+
+        records: list[HistoryRecord] = []
+        for entry in raw.get("history", []):
+            added = [m["message"]["id"] for m in entry.get("messagesAdded", [])]
+            deleted = [m["message"]["id"] for m in entry.get("messagesDeleted", [])]
+            if added or deleted:
+                records.append(HistoryRecord(messages_added=added, messages_deleted=deleted))
+
+        return {
+            "history": records,
+            "historyId": raw.get("historyId", start_history_id),
+        }
+
+    async def get_message_metadata(self, user_email: str, message_id: str) -> dict:
+        """Get message metadata (headers only, no body) for quick pre-filtering.
+
+        Uses format='metadata' to minimize API quota.
+        """
+        logger.info("get_message_metadata user=%s message_id=%s", user_email, message_id)
+        raw = await self._exec(
+            user_email,
+            lambda svc: (
+                svc.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=message_id,
+                    format="metadata",
+                    metadataHeaders=["From", "To", "Subject", "Date", "Message-ID"],
+                )
+                .execute()
+            ),
+        )
+        headers = raw.get("payload", {}).get("headers", [])
+        header_dict = {h["name"]: h["value"] for h in headers}
+        return {
+            "id": raw["id"],
+            "threadId": raw["threadId"],
+            "labelIds": raw.get("labelIds", []),
+            "headers": header_dict,
+        }
