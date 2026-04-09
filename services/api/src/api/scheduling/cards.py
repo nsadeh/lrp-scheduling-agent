@@ -119,6 +119,22 @@ def _update_card(card: Card) -> CardResponse:
     return CardResponse(action=ActionResponse(navigations=[UpdateCard(update_card=card)]))
 
 
+def build_error_card(message: str) -> CardResponse:
+    """Generic error card shown when an operation fails."""
+    return _update_card(
+        Card(
+            header=CardHeader(title="Error"),
+            sections=[
+                Section(
+                    widgets=[
+                        TextParagraphWidget(text_paragraph=TextParagraph(text=f"<b>{message}</b>")),
+                    ]
+                ),
+            ],
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Authorization Required
 # ---------------------------------------------------------------------------
@@ -549,8 +565,28 @@ def build_create_loop_form(
     prefill_client_email: str | None = None,
     prefill_cm_name: str | None = None,
     prefill_cm_email: str | None = None,
+    prefill_candidate_name: str | None = None,
+    prefill_recruiter_name: str | None = None,
+    prefill_recruiter_email: str | None = None,
+    prefill_client_company: str | None = None,
+    prefill_first_stage: str | None = None,
+    error_message: str | None = None,
 ) -> CardResponse:
     sections = []
+
+    # Error banner (if any)
+    if error_message:
+        sections.append(
+            Section(
+                widgets=[
+                    TextParagraphWidget(
+                        text_paragraph=TextParagraph(
+                            text=f'<b><font color="#cc0000">{error_message}</font></b>'
+                        )
+                    ),
+                ]
+            )
+        )
 
     # Candidate section
     sections.append(
@@ -559,7 +595,10 @@ def build_create_loop_form(
             widgets=[
                 TextInputWidget(
                     text_input=TextInput(
-                        name="candidate_name", label="Candidate Name", type="SINGLE_LINE"
+                        name="candidate_name",
+                        label="Candidate Name",
+                        type="SINGLE_LINE",
+                        value=prefill_candidate_name,
                     )
                 ),
             ],
@@ -588,7 +627,12 @@ def build_create_loop_form(
                     )
                 ),
                 TextInputWidget(
-                    text_input=TextInput(name="client_company", label="Company", type="SINGLE_LINE")
+                    text_input=TextInput(
+                        name="client_company",
+                        label="Company",
+                        type="SINGLE_LINE",
+                        value=prefill_client_company,
+                    )
                 ),
             ],
         )
@@ -600,10 +644,20 @@ def build_create_loop_form(
             header="Recruiter",
             widgets=[
                 TextInputWidget(
-                    text_input=TextInput(name="recruiter_name", label="Name", type="SINGLE_LINE")
+                    text_input=TextInput(
+                        name="recruiter_name",
+                        label="Name",
+                        type="SINGLE_LINE",
+                        value=prefill_recruiter_name,
+                    )
                 ),
                 TextInputWidget(
-                    text_input=TextInput(name="recruiter_email", label="Email", type="SINGLE_LINE")
+                    text_input=TextInput(
+                        name="recruiter_email",
+                        label="Email",
+                        type="SINGLE_LINE",
+                        value=prefill_recruiter_email,
+                    )
                 ),
             ],
         )
@@ -646,7 +700,7 @@ def build_create_loop_form(
                         name="first_stage_name",
                         label="First Stage Name",
                         type="SINGLE_LINE",
-                        value="Round 1",
+                        value=prefill_first_stage or "Round 1",
                     )
                 ),
             ],

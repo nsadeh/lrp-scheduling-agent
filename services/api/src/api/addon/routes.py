@@ -22,6 +22,7 @@ from api.addon.models import (
     PushCard,
     UpdateCard,
 )
+from api.gmail.exceptions import GmailValidationError
 from api.scheduling.cards import (
     build_add_time_slot_form,
     build_auth_required,
@@ -30,6 +31,7 @@ from api.scheduling.cards import (
     build_contextual_unlinked,
     build_create_loop_form,
     build_drafts_tab,
+    build_error_card,
     build_loop_detail,
     build_revive_form,
     build_status_board,
@@ -197,7 +199,11 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
         fn = body.common_event_object.invoked_function
 
     handler = _ACTION_HANDLERS.get(fn or "", _handle_unknown)
-    card = await handler(body, svc, email)
+    try:
+        card = await handler(body, svc, email)
+    except GmailValidationError as exc:
+        logger.warning("Gmail validation error in action %s: %s", fn, exc)
+        card = build_error_card(str(exc))
     return card.model_dump(by_alias=True, exclude_none=True)
 
 
@@ -248,16 +254,30 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str):
     recruiter_name = _get_form_value(body, "recruiter_name") or "Unknown"
     recruiter_email = (_get_form_value(body, "recruiter_email") or "").strip()
 
-    if not client_email or not recruiter_email:
-        return build_create_loop_form(
-            gmail_thread_id=_get_param(body, "gmail_thread_id"),
-            gmail_subject=_get_param(body, "gmail_subject"),
-            prefill_client_name=client_name if client_name != "Unknown" else None,
-            prefill_client_email=client_email or None,
-        )
     cm_name = _get_form_value(body, "cm_name")
     cm_email = _get_form_value(body, "cm_email")
     first_stage = _get_form_value(body, "first_stage_name") or "Round 1"
+
+    if not client_email or not recruiter_email:
+        missing = []
+        if not client_email:
+            missing.append("Client Email")
+        if not recruiter_email:
+            missing.append("Recruiter Email")
+        return build_create_loop_form(
+            gmail_thread_id=_get_param(body, "gmail_thread_id"),
+            gmail_subject=_get_param(body, "gmail_subject"),
+            prefill_candidate_name=candidate_name if candidate_name != "Unknown" else None,
+            prefill_client_name=client_name if client_name != "Unknown" else None,
+            prefill_client_email=client_email or None,
+            prefill_client_company=client_company or None,
+            prefill_recruiter_name=recruiter_name if recruiter_name != "Unknown" else None,
+            prefill_recruiter_email=recruiter_email or None,
+            prefill_cm_name=cm_name,
+            prefill_cm_email=cm_email,
+            prefill_first_stage=first_stage,
+            error_message=f"Required: {', '.join(missing)}",
+        )
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     gmail_subject = _get_param(body, "gmail_subject")
 
@@ -383,10 +403,14 @@ async def _handle_compose_email(body: AddonRequest, svc: LoopService, email: str
         return build_loop_detail(loop)
 
     # Determine recipient based on state
-    if stage.state == StageState.NEW and loop.recruiter:
+    if stage.state == StageState.NEW and loop.recruiter and loop.recruiter.email:
         to_email = loop.recruiter.email
         subject = f"Re: {loop.title} - Availability Request"
-    elif stage.state == StageState.AWAITING_CANDIDATE and loop.client_contact:
+    elif (
+        stage.state == StageState.AWAITING_CANDIDATE
+        and loop.client_contact
+        and loop.client_contact.email
+    ):
         to_email = loop.client_contact.email
         subject = f"Re: {loop.title} - Candidate Availability"
     else:

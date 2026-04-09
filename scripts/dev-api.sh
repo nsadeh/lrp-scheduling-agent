@@ -23,11 +23,19 @@ gcloud workspace-add-ons deployments replace "$STAGING_DEPLOYMENT_NAME" \
 restore_staging() {
   echo ""
   echo "==> Restoring staging add-on to Railway..."
-  gcloud workspace-add-ons deployments replace "$STAGING_DEPLOYMENT_NAME" \
+  if gcloud workspace-add-ons deployments replace "$STAGING_DEPLOYMENT_NAME" \
     --project="$STAGING_GCP_PROJECT" \
-    --deployment-file="$API_DIR/deployment.staging.json" 2>&1
+    --deployment-file="$API_DIR/deployment.staging.json" 2>&1; then
+    echo "==> Staging restored."
+  else
+    echo ""
+    echo "ERROR: Failed to restore staging add-on! It may still point at the dead ngrok URL."
+    echo "  Run manually:"
+    echo "  gcloud workspace-add-ons deployments replace $STAGING_DEPLOYMENT_NAME \\"
+    echo "    --project=$STAGING_GCP_PROJECT \\"
+    echo "    --deployment-file=$API_DIR/deployment.staging.json"
+  fi
   rm -f "$DEPLOYMENT_DEV"
-  echo "==> Staging restored."
 }
 trap restore_staging EXIT
 

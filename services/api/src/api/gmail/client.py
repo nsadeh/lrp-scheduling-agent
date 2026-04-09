@@ -15,6 +15,7 @@ from api.gmail.exceptions import (
     GmailAuthError,
     GmailNotFoundError,
     GmailRateLimitError,
+    GmailValidationError,
 )
 from api.gmail.models import Draft, Message, Thread, parse_message
 
@@ -115,6 +116,10 @@ class GmailClient:
         in_reply_to: str | None = None,
     ) -> Draft:
         """Create a draft. If thread_id is set, creates it as a reply in that thread."""
+        if not to or not all(addr.strip() for addr in to):
+            raise GmailValidationError(
+                "create_draft requires at least one non-empty recipient address"
+            )
         logger.info("create_draft user=%s thread_id=%s", user_email, thread_id)
         raw_msg = _build_raw_message(
             from_email=user_email,
@@ -195,7 +200,9 @@ class GmailClient:
     ) -> Message:
         """Compose and send a message directly (no draft step)."""
         if not to or not all(addr.strip() for addr in to):
-            raise ValueError("send_message requires at least one non-empty recipient address")
+            raise GmailValidationError(
+                "send_message requires at least one non-empty recipient address"
+            )
         logger.info("send_message user=%s to=%s", user_email, to)
         raw_msg = _build_raw_message(
             from_email=user_email,
