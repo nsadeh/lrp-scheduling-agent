@@ -24,6 +24,9 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "python-dotenv>=1.0",
     "requests>=2.33.1",
+    "anthropic>=0.52.0",
+    "openai>=1.82.0",
+    "langfuse>=2.0",
 ]
 
 [tool.uv]
