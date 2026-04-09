@@ -1,13 +1,13 @@
 # RFC: Gmail Workspace Add-on — Sidebar MVP
 
-| Field          | Value                                      |
-|----------------|--------------------------------------------|
-| **Author(s)**  | Kinematic Labs                             |
-| **Status**     | Draft                                      |
-| **Created**    | 2026-03-30                                 |
-| **Updated**    | 2026-03-30                                 |
-| **Reviewers**  | LRP Engineering, LRP Coordinator team      |
-| **Decider**    | Nadav Sadeh                                |
+| Field         | Value                                 |
+| ------------- | ------------------------------------- |
+| **Author(s)** | Kinematic Labs                        |
+| **Status**    | Draft                                 |
+| **Created**   | 2026-03-30                            |
+| **Updated**   | 2026-03-30                            |
+| **Reviewers** | LRP Engineering, LRP Coordinator team |
+| **Decider**   | Nim Sadeh                             |
 
 ## Context and Scope
 
@@ -121,11 +121,11 @@ graph TB
 
 Three new routes under `/addon/`:
 
-| Route | Trigger | Purpose |
-|-------|---------|---------|
-| `POST /addon/homepage` | User clicks add-on icon (no message open) | Returns branded homepage card with LRP logo and placeholder text |
-| `POST /addon/on-message` | User has an email message open | Returns contextual card showing the message subject line |
-| `POST /addon/action` | User clicks a button in the sidebar | Future-proofing: handles interactive actions. For MVP, unused. |
+| Route                    | Trigger                                   | Purpose                                                          |
+| ------------------------ | ----------------------------------------- | ---------------------------------------------------------------- |
+| `POST /addon/homepage`   | User clicks add-on icon (no message open) | Returns branded homepage card with LRP logo and placeholder text |
+| `POST /addon/on-message` | User has an email message open            | Returns contextual card showing the message subject line         |
+| `POST /addon/action`     | User clicks a button in the sidebar       | Future-proofing: handles interactive actions. For MVP, unused.   |
 
 **Request verification**: Every request from Google includes an `Authorization: Bearer <id_token>` header. The backend verifies this token using Google's `google-auth` library to confirm the request originates from Google and identifies the calling user. Unverified requests receive a 401. Verification is implemented as a **FastAPI dependency on the `/addon/` router**, not per-handler — this ensures every add-on route is protected automatically and new routes cannot accidentally skip verification.
 
@@ -168,27 +168,29 @@ Registered via the Google Workspace Add-ons API (`gsuiteaddons.googleapis.com`):
 
 ```json
 {
-    "oauthScopes": [
-        "https://www.googleapis.com/auth/gmail.addons.execute",
-        "https://www.googleapis.com/auth/gmail.addons.current.message.metadata"
-    ],
-    "addOns": {
-        "common": {
-            "name": "LRP Scheduling Agent",
-            "logoUrl": "https://<backend-host>/static/logo.png",
-            "homepageTrigger": {
-                "runFunction": "https://<backend-host>/addon/homepage"
-            }
-        },
-        "gmail": {
-            "contextualTriggers": [{
-                "unconditional": {},
-                "onTriggerFunction": {
-                    "runFunction": "https://<backend-host>/addon/on-message"
-                }
-            }]
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata"
+  ],
+  "addOns": {
+    "common": {
+      "name": "LRP Scheduling Agent",
+      "logoUrl": "https://<backend-host>/static/logo.png",
+      "homepageTrigger": {
+        "runFunction": "https://<backend-host>/addon/homepage"
+      }
+    },
+    "gmail": {
+      "contextualTriggers": [
+        {
+          "unconditional": {},
+          "onTriggerFunction": {
+            "runFunction": "https://<backend-host>/addon/on-message"
+          }
         }
+      ]
     }
+  }
 }
 ```
 
@@ -275,13 +277,13 @@ Coordinators continue scheduling interviews manually — tracking threads mental
 
 ### Definition of Success
 
-| Criterion | Metric | Target | Measurement Method |
-|-----------|--------|--------|--------------------|
-| Sidebar visibility | Add-on icon appears in Gmail for test group members | 100% of test group members see the icon | Manual verification by each test user |
-| Sidebar load time | Time from icon click to sidebar rendered | < 3 seconds | Chrome DevTools network panel / backend request logs |
-| Contextual trigger | Message subject appears in sidebar when email is open | Works for all standard email threads | Manual testing across 10+ email threads |
-| Access control | Non-group members cannot see the add-on | 0% visibility for non-members | Manual verification with a non-member account |
-| Backend stability | Add-on endpoints return valid card JSON | 0 errors in test session | Sentry + backend request logs |
+| Criterion          | Metric                                                | Target                                  | Measurement Method                                   |
+| ------------------ | ----------------------------------------------------- | --------------------------------------- | ---------------------------------------------------- |
+| Sidebar visibility | Add-on icon appears in Gmail for test group members   | 100% of test group members see the icon | Manual verification by each test user                |
+| Sidebar load time  | Time from icon click to sidebar rendered              | < 3 seconds                             | Chrome DevTools network panel / backend request logs |
+| Contextual trigger | Message subject appears in sidebar when email is open | Works for all standard email threads    | Manual testing across 10+ email threads              |
+| Access control     | Non-group members cannot see the add-on               | 0% visibility for non-members           | Manual verification with a non-member account        |
+| Backend stability  | Add-on endpoints return valid card JSON               | 0 errors in test session                | Sentry + backend request logs                        |
 
 ### Definition of Failure
 
@@ -299,16 +301,17 @@ Coordinators continue scheduling interviews manually — tracking threads mental
 
 ### Metrics
 
-| Metric | Source | Dashboard/Alert | Threshold for Alert |
-|--------|--------|-----------------|---------------------|
-| Add-on request latency (p95) | FastAPI request logs | Sentry Performance | > 3s for 5 minutes |
-| Add-on error rate | Sentry | Sentry Issues | Any 5xx response |
-| Token verification failures | Application logs | Sentry | > 0 in test period (unexpected) |
-| Group membership check failures | Application logs | Sentry | > 0 for known group members |
+| Metric                          | Source               | Dashboard/Alert    | Threshold for Alert             |
+| ------------------------------- | -------------------- | ------------------ | ------------------------------- |
+| Add-on request latency (p95)    | FastAPI request logs | Sentry Performance | > 3s for 5 minutes              |
+| Add-on error rate               | Sentry               | Sentry Issues      | Any 5xx response                |
+| Token verification failures     | Application logs     | Sentry             | > 0 in test period (unexpected) |
+| Group membership check failures | Application logs     | Sentry             | > 0 for known group members     |
 
 ### Logging
 
 All `/addon/*` requests are logged with:
+
 - User email (from verified ID token)
 - Trigger type (homepage vs contextual)
 - Response time
@@ -351,9 +354,9 @@ No data from this add-on is sent to Anthropic or any third party. The LLM integr
 
 ## Milestones and Timeline
 
-| Phase | Description | Estimated Duration |
-|-------|-------------|--------------------|
-| Phase 1 | GCP project setup, Workspace Add-ons API enabled, OAuth consent screen configured | 1 session (requires LRP admin) |
-| Phase 2 | FastAPI `/addon/*` routes with token verification, card JSON responses, static logo serving | 1-2 sessions |
-| Phase 3 | Deployment descriptor registered, add-on installed for test group, end-to-end verification | 1 session |
-| Phase 4 | Testing with 2-3 coordinators, feedback collection | 1 week |
+| Phase   | Description                                                                                 | Estimated Duration             |
+| ------- | ------------------------------------------------------------------------------------------- | ------------------------------ |
+| Phase 1 | GCP project setup, Workspace Add-ons API enabled, OAuth consent screen configured           | 1 session (requires LRP admin) |
+| Phase 2 | FastAPI `/addon/*` routes with token verification, card JSON responses, static logo serving | 1-2 sessions                   |
+| Phase 3 | Deployment descriptor registered, add-on installed for test group, end-to-end verification  | 1 session                      |
+| Phase 4 | Testing with 2-3 coordinators, feedback collection                                          | 1 week                         |

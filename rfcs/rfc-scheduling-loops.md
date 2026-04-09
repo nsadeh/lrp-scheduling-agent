@@ -1,13 +1,13 @@
 # RFC: Scheduling Loops — Manual Interview Coordination
 
-| Field          | Value                                      |
-|----------------|--------------------------------------------|
-| **Author(s)**  | Kinematic Labs                             |
-| **Status**     | Draft                                      |
-| **Created**    | 2026-03-31                                 |
-| **Updated**    | 2026-03-31                                 |
-| **Reviewers**  | LRP Engineering, LRP Coordinator team      |
-| **Decider**    | Nadav Sadeh                                |
+| Field         | Value                                 |
+| ------------- | ------------------------------------- |
+| **Author(s)** | Kinematic Labs                        |
+| **Status**    | Draft                                 |
+| **Created**   | 2026-03-31                            |
+| **Updated**   | 2026-03-31                            |
+| **Reviewers** | LRP Engineering, LRP Coordinator team |
+| **Decider**   | Nim Sadeh                             |
 
 ## Context and Scope
 
@@ -25,11 +25,11 @@ This RFC proposes the data model, state machine, and sidebar UI for **scheduling
 
 ## Non-Goals
 
-- **AI-powered draft generation or email classification** — this RFC builds the manual coordination tool. The agent will layer on top of this data model in a future phase. *Rationale:* we need to validate the data model and UX with real coordinator workflows before automating them. Building the manual tool first ensures the abstractions match reality.
-- **Candidate email capture or direct candidate communication** — coordinators don't know candidate emails and don't communicate with candidates. The recruiter is the intermediary. *Rationale:* capturing candidate email would require a workflow with no payoff until ATS integration, and coordinators literally don't have this information.
-- **Calendar integration (creating events, Zoom links)** — scheduling loops track the coordination process, not the calendar mechanics. Calendar integration is a separate concern. *Rationale:* calendar event creation involves Zoom API integration, timezone handling, and invitation management — each a substantial feature. Coordinators already know how to create calendar events; what they lack is process tracking.
-- **ATS/Encore updates** — updating candidate records in Encore after interviews is out of scope. *Rationale:* Encore integration via Cluein is a separate integration surface. The loop model will eventually feed Encore updates, but the data model doesn't depend on it.
-- **Reporting or analytics dashboards** — no aggregate views across coordinators or time-based reporting. *Rationale:* premature until we have real usage data. The data model supports future reporting, but building dashboards before validation is waste.
+- **AI-powered draft generation or email classification** — this RFC builds the manual coordination tool. The agent will layer on top of this data model in a future phase. _Rationale:_ we need to validate the data model and UX with real coordinator workflows before automating them. Building the manual tool first ensures the abstractions match reality.
+- **Candidate email capture or direct candidate communication** — coordinators don't know candidate emails and don't communicate with candidates. The recruiter is the intermediary. _Rationale:_ capturing candidate email would require a workflow with no payoff until ATS integration, and coordinators literally don't have this information.
+- **Calendar integration (creating events, Zoom links)** — scheduling loops track the coordination process, not the calendar mechanics. Calendar integration is a separate concern. _Rationale:_ calendar event creation involves Zoom API integration, timezone handling, and invitation management — each a substantial feature. Coordinators already know how to create calendar events; what they lack is process tracking.
+- **ATS/Encore updates** — updating candidate records in Encore after interviews is out of scope. _Rationale:_ Encore integration via Cluein is a separate integration surface. The loop model will eventually feed Encore updates, but the data model doesn't depend on it.
+- **Reporting or analytics dashboards** — no aggregate views across coordinators or time-based reporting. _Rationale:_ premature until we have real usage data. The data model supports future reporting, but building dashboards before validation is waste.
 
 ## Background
 
@@ -209,7 +209,7 @@ erDiagram
 
 **Email threads link to loops, not stages.** A single email conversation can advance multiple stages simultaneously. The `loop_email_threads` join table allows multiple threads per loop (for cases where conversations fork) and keeps email association at the right granularity.
 
-**Event-sourced action log, not just state transitions.** Every action — not just state changes — is recorded as an event in `loop_events`. A stage transition like `new → awaiting_candidate` might involve multiple events: `email_drafted`, `email_sent`, `stage_advanced`. Actions that don't change state (adding a note, editing actors, linking a thread) are also captured. This gives the AI agent a complete picture of *what the coordinator did*, not just *what state the stage ended up in*. The `stages.state` column is a denormalized read cache updated on state-changing events; the event log is the source of truth.
+**Event-sourced action log, not just state transitions.** Every action — not just state changes — is recorded as an event in `loop_events`. A stage transition like `new → awaiting_candidate` might involve multiple events: `email_drafted`, `email_sent`, `stage_advanced`. Actions that don't change state (adding a note, editing actors, linking a thread) are also captured. This gives the AI agent a complete picture of _what the coordinator did_, not just _what state the stage ended up in_. The `stages.state` column is a denormalized read cache updated on state-changing events; the event log is the source of truth.
 
 #### Stage State Machine
 
@@ -236,14 +236,14 @@ stateDiagram-v2
 
 **States:**
 
-| State | Meaning | Coordinator's Next Action |
-|-------|---------|---------------------------|
-| `new` | Client has requested an interview | Email the recruiter to collect candidate availability |
-| `awaiting_candidate` | Waiting for candidate availability (via recruiter) | Monitor for recruiter reply |
-| `awaiting_client` | Candidate availability sent to client, waiting for client to pick times | Monitor for client reply |
-| `scheduled` | Interview time confirmed, details sent | Verify interview occurs |
-| `complete` | Interview finished | None (or create next stage) |
-| `cold` | Process stalled — candidate declined, client cancelled, or went silent | Optionally revive |
+| State                | Meaning                                                                 | Coordinator's Next Action                             |
+| -------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------- |
+| `new`                | Client has requested an interview                                       | Email the recruiter to collect candidate availability |
+| `awaiting_candidate` | Waiting for candidate availability (via recruiter)                      | Monitor for recruiter reply                           |
+| `awaiting_client`    | Candidate availability sent to client, waiting for client to pick times | Monitor for client reply                              |
+| `scheduled`          | Interview time confirmed, details sent                                  | Verify interview occurs                               |
+| `complete`           | Interview finished                                                      | None (or create next stage)                           |
+| `cold`               | Process stalled — candidate declined, client cancelled, or went silent  | Optionally revive                                     |
 
 **Transition rules:**
 
@@ -258,13 +258,13 @@ stateDiagram-v2
 
 While state lives on stages, coordinators need a loop-level summary. The loop's computed state is derived from its stages:
 
-| Loop Status | Condition |
-|-------------|-----------|
-| **Active** | At least one stage is in `new`, `awaiting_candidate`, `awaiting_client`, or `scheduled` |
-| **All Scheduled** | All stages are `scheduled` (none still in progress) |
-| **Complete** | All stages are `complete` |
-| **Cold** | All stages are `cold` |
-| **Mixed** | Combination (some complete, some cold, etc.) — shown with per-stage breakdown |
+| Loop Status       | Condition                                                                               |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| **Active**        | At least one stage is in `new`, `awaiting_candidate`, `awaiting_client`, or `scheduled` |
+| **All Scheduled** | All stages are `scheduled` (none still in progress)                                     |
+| **Complete**      | All stages are `complete`                                                               |
+| **Cold**          | All stages are `cold`                                                                   |
+| **Mixed**         | Combination (some complete, some cold, etc.) — shown with per-stage breakdown           |
 
 The loop's **next action** is the most urgent next action across its active stages, prioritized by state (closer to `new` = more urgent, because it's earlier in the process and blocking downstream stages).
 
@@ -412,27 +412,27 @@ Google Workspace Add-ons support **contextual triggers** and **universal actions
 
 New routes under `/addon/` extending the existing router:
 
-| Route | Trigger | Purpose |
-|-------|---------|---------|
-| `POST /addon/homepage` | Add-on icon clicked (no message) | Status board card |
-| `POST /addon/on-message` | Message open | Contextual view (linked loop or create/link prompt) |
-| `POST /addon/action` | Button clicks | Dispatches to specific handlers via `invokedFunction` |
+| Route                    | Trigger                          | Purpose                                               |
+| ------------------------ | -------------------------------- | ----------------------------------------------------- |
+| `POST /addon/homepage`   | Add-on icon clicked (no message) | Status board card                                     |
+| `POST /addon/on-message` | Message open                     | Contextual view (linked loop or create/link prompt)   |
+| `POST /addon/action`     | Button clicks                    | Dispatches to specific handlers via `invokedFunction` |
 
 The `/addon/action` endpoint uses Google's `invokedFunction` parameter to route to specific handlers:
 
-| invokedFunction | Action |
-|-----------------|--------|
-| `create_loop` | Create a new loop from form inputs |
-| `link_thread` | Link current email thread to an existing loop |
-| `view_loop` | Push loop detail card |
-| `advance_stage` | Transition a stage to the next state |
-| `mark_cold` | Move a stage to cold |
-| `revive_stage` | Revive a cold stage to a chosen state |
-| `add_stage` | Add a new stage to a loop |
-| `edit_actors` | Update loop actors |
-| `compose_email` | Show the email compose card |
-| `send_email` | Send email via Gmail API and advance stage |
-| `add_time_slot` | Record a scheduled time slot |
+| invokedFunction | Action                                        |
+| --------------- | --------------------------------------------- |
+| `create_loop`   | Create a new loop from form inputs            |
+| `link_thread`   | Link current email thread to an existing loop |
+| `view_loop`     | Push loop detail card                         |
+| `advance_stage` | Transition a stage to the next state          |
+| `mark_cold`     | Move a stage to cold                          |
+| `revive_stage`  | Revive a cold stage to a chosen state         |
+| `add_stage`     | Add a new stage to a loop                     |
+| `edit_actors`   | Update loop actors                            |
+| `compose_email` | Show the email compose card                   |
+| `send_email`    | Send email via Gmail API and advance stage    |
+| `add_time_slot` | Record a scheduled time slot                  |
 
 Each handler returns a card JSON response (push a new card, update the current card, or pop back).
 
@@ -543,26 +543,26 @@ Events in `loop_events` use a `event_type` discriminator with a JSONB `data` pay
 
 **Stage-level events** (have a `stage_id`):
 
-| Event Type | Data Payload | State Change? |
-|------------|-------------|---------------|
-| `stage_created` | `{name, ordinal}` | Sets initial state `new` |
-| `stage_advanced` | `{from_state, to_state}` | Yes |
-| `stage_marked_cold` | `{from_state, reason}` | Yes → `cold` |
-| `stage_revived` | `{to_state}` | Yes, from `cold` |
-| `email_drafted` | `{to, subject, body, gmail_draft_id}` | No |
-| `email_sent` | `{to, subject, gmail_message_id, gmail_thread_id}` | No |
-| `time_slot_added` | `{start_time, duration_minutes, timezone, zoom_link}` | No |
-| `time_slot_removed` | `{time_slot_id}` | No |
+| Event Type          | Data Payload                                          | State Change?            |
+| ------------------- | ----------------------------------------------------- | ------------------------ |
+| `stage_created`     | `{name, ordinal}`                                     | Sets initial state `new` |
+| `stage_advanced`    | `{from_state, to_state}`                              | Yes                      |
+| `stage_marked_cold` | `{from_state, reason}`                                | Yes → `cold`             |
+| `stage_revived`     | `{to_state}`                                          | Yes, from `cold`         |
+| `email_drafted`     | `{to, subject, body, gmail_draft_id}`                 | No                       |
+| `email_sent`        | `{to, subject, gmail_message_id, gmail_thread_id}`    | No                       |
+| `time_slot_added`   | `{start_time, duration_minutes, timezone, zoom_link}` | No                       |
+| `time_slot_removed` | `{time_slot_id}`                                      | No                       |
 
 **Loop-level events** (`stage_id` is null):
 
-| Event Type | Data Payload | State Change? |
-|------------|-------------|---------------|
-| `loop_created` | `{title, candidate_name, client_contact, recruiter}` | N/A |
-| `thread_linked` | `{gmail_thread_id, subject}` | No |
-| `thread_unlinked` | `{gmail_thread_id}` | No |
-| `actor_updated` | `{field, old_value, new_value}` | No |
-| `note_added` | `{text}` | No |
+| Event Type        | Data Payload                                         | State Change? |
+| ----------------- | ---------------------------------------------------- | ------------- |
+| `loop_created`    | `{title, candidate_name, client_contact, recruiter}` | N/A           |
+| `thread_linked`   | `{gmail_thread_id, subject}`                         | No            |
+| `thread_unlinked` | `{gmail_thread_id}`                                  | No            |
+| `actor_updated`   | `{field, old_value, new_value}`                      | No            |
+| `note_added`      | `{text}`                                             | No            |
 
 **Deriving current state:** The current state of a stage can always be reconstructed by replaying its events in order, filtering for state-changing events (`stage_advanced`, `stage_marked_cold`, `stage_revived`). In practice, `stages.state` is kept in sync as a read optimization — every state-changing event updates the column in the same transaction.
 
@@ -572,13 +572,13 @@ Events in `loop_events` use a `event_type` discriminator with a JSONB `data` pay
 
 - **`contacts.role` for recruiter vs client_manager** rather than separate tables: Unlike client contacts, recruiters and CMs have identical attributes and often overlap (a person might be a recruiter on one loop and a CM on another, though this is rare). A shared table with a role field is simpler.
 
-- **Event-sourced `loop_events` over simple transition log**: A transition log (recording only state A → state B) loses the intermediate actions. A coordinator advancing a stage from `new` to `awaiting_candidate` actually performs multiple discrete actions: drafting an email, reviewing it, sending it, then advancing the stage. The event log captures all of these. This is critical for the AI agent — it needs to learn the *sequence of actions* coordinators take, not just the state changes. The `stages.state` column remains as a denormalized read cache for fast queries; `loop_events` is the authoritative history. Events are append-only (never updated or deleted).
+- **Event-sourced `loop_events` over simple transition log**: A transition log (recording only state A → state B) loses the intermediate actions. A coordinator advancing a stage from `new` to `awaiting_candidate` actually performs multiple discrete actions: drafting an email, reviewing it, sending it, then advancing the stage. The event log captures all of these. This is critical for the AI agent — it needs to learn the _sequence of actions_ coordinators take, not just the state changes. The `stages.state` column remains as a denormalized read cache for fast queries; `loop_events` is the authoritative history. Events are append-only (never updated or deleted).
 
 - **`time_slots` on stages, not loops**: Each interview stage has its own scheduled time. A loop with three stages might have three different time slots. This also allows a stage to have multiple time slots (e.g., a panel interview with two back-to-back meetings).
 
 ### Key Trade-offs
 
-**Event-sourced action log over simple state transition log.** We record every coordinator action (email drafted, email sent, note added, actor updated) as an event, not just the resulting state transitions. This is more complex to implement — we need an event catalog, JSONB payloads per event type, and queries that aggregate events for display. The payoff is substantial: the AI agent will need to understand *how* coordinators work (the sequence of actions they take), not just *what state things end up in*. A transition log that says "new → awaiting_candidate" tells the agent nothing about the email that was sent or the draft that was revised three times. The event log also captures non-transition actions (notes, actor changes, thread linking) that a transition log would miss entirely. The `stages.state` column stays as a denormalized cache — the event log is the source of truth, but reads don't need to replay events.
+**Event-sourced action log over simple state transition log.** We record every coordinator action (email drafted, email sent, note added, actor updated) as an event, not just the resulting state transitions. This is more complex to implement — we need an event catalog, JSONB payloads per event type, and queries that aggregate events for display. The payoff is substantial: the AI agent will need to understand _how_ coordinators work (the sequence of actions they take), not just _what state things end up in_. A transition log that says "new → awaiting_candidate" tells the agent nothing about the email that was sent or the draft that was revised three times. The event log also captures non-transition actions (notes, actor changes, thread linking) that a transition log would miss entirely. The `stages.state` column stays as a denormalized cache — the event log is the source of truth, but reads don't need to replay events.
 
 **Manual state transitions over automated classification.** The coordinator explicitly clicks "Mark as Awaiting Client" rather than the system parsing email content to infer the state. This is the core trade-off of the manual tool: higher coordinator effort, but zero risk of misclassification. The AI agent will add automated classification later, using the same state machine. Building manual-first means we validate the states and transitions are correct before automating them.
 
@@ -633,15 +633,15 @@ The scheduling tool is the bridge between "we have infrastructure" and "coordina
 
 ### Definition of Success
 
-| Criterion | Metric | Target | Measurement Method |
-|-----------|--------|--------|--------------------|
-| Loop creation | Coordinators can create a loop from an email in the sidebar | 100% success for test users | Manual testing, user feedback |
-| State tracking accuracy | Stage states match the coordinator's mental model of where each process stands | > 90% agreement (surveyed) | Coordinator survey after 2-week pilot |
-| Next action clarity | Coordinators report they can identify their next action from the status board | > 80% "agree" or "strongly agree" | Coordinator survey |
-| Time saved | Coordinators report spending less time reconstructing scheduling state | Qualitative improvement reported by > 50% of pilot users | Post-pilot interviews |
-| Recruiter DB growth | Contacts table grows as coordinators create loops | > 20 unique contacts after 2-week pilot | Database query |
-| Status board load time | Homepage status board renders in sidebar | < 3 seconds | Backend request latency logs |
-| Email send from sidebar | Coordinator can compose and send a scheduling email from the sidebar | Works for all test users | Manual testing |
+| Criterion               | Metric                                                                         | Target                                                   | Measurement Method                    |
+| ----------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------- | ------------------------------------- |
+| Loop creation           | Coordinators can create a loop from an email in the sidebar                    | 100% success for test users                              | Manual testing, user feedback         |
+| State tracking accuracy | Stage states match the coordinator's mental model of where each process stands | > 90% agreement (surveyed)                               | Coordinator survey after 2-week pilot |
+| Next action clarity     | Coordinators report they can identify their next action from the status board  | > 80% "agree" or "strongly agree"                        | Coordinator survey                    |
+| Time saved              | Coordinators report spending less time reconstructing scheduling state         | Qualitative improvement reported by > 50% of pilot users | Post-pilot interviews                 |
+| Recruiter DB growth     | Contacts table grows as coordinators create loops                              | > 20 unique contacts after 2-week pilot                  | Database query                        |
+| Status board load time  | Homepage status board renders in sidebar                                       | < 3 seconds                                              | Backend request latency logs          |
+| Email send from sidebar | Coordinator can compose and send a scheduling email from the sidebar           | Works for all test users                                 | Manual testing                        |
 
 ### Definition of Failure
 
@@ -660,18 +660,19 @@ The scheduling tool is the bridge between "we have infrastructure" and "coordina
 
 ### Metrics
 
-| Metric | Source | Dashboard/Alert | Linked Criterion |
-|--------|--------|-----------------|------------------|
-| Status board latency (p95) | FastAPI request logs | Sentry Performance | Status board < 3s |
-| Loop creation rate | Application logs | PostHog | Coordinator adoption |
-| Loop events per day (by type) | Application logs / loop_events table | PostHog | State tracking usage |
-| Email sends from sidebar | Application logs | PostHog | Email send functionality |
-| Error rate on /addon/* endpoints | Sentry | Sentry Issues | All views render correctly |
-| Contact autocomplete hit rate | Application logs | PostHog | Recruiter DB growth |
+| Metric                            | Source                               | Dashboard/Alert    | Linked Criterion           |
+| --------------------------------- | ------------------------------------ | ------------------ | -------------------------- |
+| Status board latency (p95)        | FastAPI request logs                 | Sentry Performance | Status board < 3s          |
+| Loop creation rate                | Application logs                     | PostHog            | Coordinator adoption       |
+| Loop events per day (by type)     | Application logs / loop_events table | PostHog            | State tracking usage       |
+| Email sends from sidebar          | Application logs                     | PostHog            | Email send functionality   |
+| Error rate on /addon/\* endpoints | Sentry                               | Sentry Issues      | All views render correctly |
+| Contact autocomplete hit rate     | Application logs                     | PostHog            | Recruiter DB growth        |
 
 ### Logging
 
 All loop operations are logged with:
+
 - Coordinator email
 - Operation type (create_loop, advance_stage, send_email, etc.)
 - Loop ID, stage ID (when applicable)
@@ -682,7 +683,7 @@ Logs are structured JSON, consistent with existing API logging.
 
 ### Alerting
 
-- **Any 5xx on /addon/* endpoints**: Sentry alert → dev team. The sidebar should never error.
+- **Any 5xx on /addon/\* endpoints**: Sentry alert → dev team. The sidebar should never error.
 - **p95 latency > 5s on /addon/homepage**: Sentry alert → dev team. Status board is the primary view.
 
 During pilot, alerts go to the dev team via Sentry. No on-call — coordinators fall back to manual scheduling.
@@ -690,6 +691,7 @@ During pilot, alerts go to the dev team via Sentry. No on-call — coordinators 
 ### Dashboards
 
 **PostHog dashboard: "Scheduling Loop Adoption"**
+
 - Daily active coordinators using the sidebar
 - Loops created per day
 - Loop events per day (by type)
@@ -734,10 +736,10 @@ Coordinator email addresses are stored as identifiers. Contact emails are stored
 
 ## Milestones and Timeline
 
-| Phase | Description | Estimated Duration |
-|-------|-------------|--------------------|
-| Phase 1 | Database migrations for all new tables. Pydantic models for loops, stages, contacts, candidates. Basic CRUD operations. | 1 week |
-| Phase 2 | Status board card (homepage view). Loop detail card. Stage state machine with transition logging. | 1 week |
-| Phase 3 | Create loop form with actor autocomplete. Contextual view (message open). Email thread linking. | 1 week |
-| Phase 4 | Email compose and send from sidebar. Stage auto-advance on send. Time slot entry. | 1 week |
-| Phase 5 | Coordinator pilot (2 weeks). Feedback collection, iteration. | 2 weeks |
+| Phase   | Description                                                                                                             | Estimated Duration |
+| ------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| Phase 1 | Database migrations for all new tables. Pydantic models for loops, stages, contacts, candidates. Basic CRUD operations. | 1 week             |
+| Phase 2 | Status board card (homepage view). Loop detail card. Stage state machine with transition logging.                       | 1 week             |
+| Phase 3 | Create loop form with actor autocomplete. Contextual view (message open). Email thread linking.                         | 1 week             |
+| Phase 4 | Email compose and send from sidebar. Stage auto-advance on send. Time slot entry.                                       | 1 week             |
+| Phase 5 | Coordinator pilot (2 weeks). Feedback collection, iteration.                                                            | 2 weeks            |

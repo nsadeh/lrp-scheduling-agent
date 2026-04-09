@@ -5,17 +5,17 @@
   ],
   "addOns": {
     "common": {
-      "name": "LRP Scheduling Agent",
-      "logoUrl": "https://prod-api-production-6a67.up.railway.app/static/logo.png",
+      "name": "LRP Scheduling Agent [STAGING]",
+      "logoUrl": "https://api-staging-545f.up.railway.app/static/logo.png",
       "homepageTrigger": {
-        "runFunction": "https://prod-api-production-6a67.up.railway.app/addon/homepage"
+        "runFunction": "https://api-staging-545f.up.railway.app/addon/homepage"
       }
     },
     "gmail": {
       "contextualTriggers": [
         {
           "unconditional": {},
-          "onTriggerFunction": "https://prod-api-production-6a67.up.railway.app/addon/on-message"
+          "onTriggerFunction": "https://api-staging-545f.up.railway.app/addon/on-message"
         }
       ]
     }

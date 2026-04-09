@@ -194,6 +194,8 @@ class GmailClient:
         in_reply_to: str | None = None,
     ) -> Message:
         """Compose and send a message directly (no draft step)."""
+        if not to or not all(addr.strip() for addr in to):
+            raise ValueError("send_message requires at least one non-empty recipient address")
         logger.info("send_message user=%s to=%s", user_email, to)
         raw_msg = _build_raw_message(
             from_email=user_email,

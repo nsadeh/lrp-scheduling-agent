@@ -243,10 +243,18 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
 async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str):
     candidate_name = _get_form_value(body, "candidate_name") or "Unknown"
     client_name = _get_form_value(body, "client_name") or "Unknown"
-    client_email = _get_form_value(body, "client_email") or ""
+    client_email = (_get_form_value(body, "client_email") or "").strip()
     client_company = _get_form_value(body, "client_company") or ""
     recruiter_name = _get_form_value(body, "recruiter_name") or "Unknown"
-    recruiter_email = _get_form_value(body, "recruiter_email") or ""
+    recruiter_email = (_get_form_value(body, "recruiter_email") or "").strip()
+
+    if not client_email or not recruiter_email:
+        return build_create_loop_form(
+            gmail_thread_id=_get_param(body, "gmail_thread_id"),
+            gmail_subject=_get_param(body, "gmail_subject"),
+            prefill_client_name=client_name if client_name != "Unknown" else None,
+            prefill_client_email=client_email or None,
+        )
     cm_name = _get_form_value(body, "cm_name")
     cm_email = _get_form_value(body, "cm_email")
     first_stage = _get_form_value(body, "first_stage_name") or "Round 1"
@@ -510,7 +518,7 @@ async def _handle_forward_thread(body: AddonRequest, svc: LoopService, email: st
         return build_drafts_tab(board)
 
     loop = await svc.get_loop(loop_id)
-    if not loop.recruiter:
+    if not loop.recruiter or not loop.recruiter.email:
         return build_loop_detail(loop)
 
     gmail_thread_id = loop.email_threads[0].gmail_thread_id if loop.email_threads else None
@@ -540,7 +548,7 @@ async def _handle_send_inline_email(body: AddonRequest, svc: LoopService, email:
         return build_drafts_tab(board)
 
     loop = await svc.get_loop(loop_id)
-    if not loop.client_contact:
+    if not loop.client_contact or not loop.client_contact.email:
         return build_loop_detail(loop)
 
     email_body = _get_form_value(body, "email_body") or ""
