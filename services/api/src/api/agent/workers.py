@@ -15,7 +15,9 @@ from api.agent.queries import queries
 
 logger = logging.getLogger(__name__)
 
-PUBSUB_TOPIC = os.environ.get("GMAIL_PUBSUB_TOPIC", "projects/lrp-scheduling/topics/gmail-push")
+PUBSUB_TOPIC = os.environ.get(
+    "GMAIL_PUBSUB_TOPIC", "projects/ai-agents-dev-492713/topics/gmail-push"
+)
 
 
 async def process_gmail_notification(ctx: dict, coordinator_email: str, history_id: str) -> None:
