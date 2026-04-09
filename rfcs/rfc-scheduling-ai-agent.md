@@ -255,6 +255,15 @@ The agent is a **single-shot reasoning function**: it takes a fully assembled co
 
 The agent must not be tightly coupled to a single LLM provider. We introduce a thin abstraction that supports Anthropic as primary and OpenAI as fallback, ensuring the agent stays operational even during provider outages.
 
+**Two-model pipeline:** The agent uses different models for classification vs. drafting to optimize cost:
+
+| Step | Primary Model | Fallback Model | Rationale |
+| ---- | ------------- | -------------- | --------- |
+| Classification | Claude Haiku | GPT-4o-mini | Fast, cheap. Classification is structured output, not creative. ~$0.001/call. |
+| Draft generation | Claude Sonnet | GPT-4o | Only runs when a draft is needed (~40% of classified emails). These are simple scheduling emails, not nuanced writing. ~$0.01/call. |
+
+This two-step approach roughly halves LLM cost: emails classified as `unrelated`, `informational`, or `no_action` never hit the more expensive drafting model.
+
 ```python
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -281,7 +290,7 @@ class AnthropicProvider(LLMProvider):
 
     async def complete(self, system, user, max_tokens, temperature) -> LLMResponse:
         response = await self.client.messages.create(
-            model=self.model,  # e.g. "claude-sonnet-4-20250514"
+            model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
             system=system,
@@ -297,11 +306,11 @@ class AnthropicProvider(LLMProvider):
 
 
 class OpenAIProvider(LLMProvider):
-    """Fallback provider: GPT-4o via OpenAI API."""
+    """Fallback provider: OpenAI API."""
 
     async def complete(self, system, user, max_tokens, temperature) -> LLMResponse:
         response = await self.client.chat.completions.create(
-            model=self.model,  # e.g. "gpt-4o"
+            model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
             messages=[
@@ -329,7 +338,7 @@ class LLMRouter:
             return await self.fallback.complete(**kwargs)
 ```
 
-**Configuration:** The `LLMRouter` is initialized at app startup from environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). If only one key is present, no fallback is configured. The sidebar shows "Agent unavailable — manual workflow active" when both providers are down.
+**Configuration:** Two `LLMRouter` instances are initialized at startup — one for classification (Haiku/4o-mini) and one for drafting (Sonnet/4o) — from environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). If only one key is present, no fallback is configured. The sidebar shows "Agent unavailable — manual workflow active" when both providers are down.
 
 ##### 3.3 Agent Context and Output
 
@@ -416,37 +425,47 @@ class DraftEmail:
 
 ##### 3.4 Agent Implementation
 
-The agent is a single LLM call with a carefully constructed system prompt. The prompt includes:
-- The scheduling workflow rules (state machine, who talks to whom, LRP conventions)
-- The current loop state and event history
-- The email thread content
-- Output format instructions (structured JSON)
+The agent runs as a two-step pipeline: classify first (cheap model), then draft if needed (capable model).
+
+**Step 1 — Classification (Haiku/4o-mini):** Determines what happened and what to do next. The prompt includes the scheduling workflow rules, current loop state, event history, and the email thread. Returns structured JSON: classification, suggested action, confidence, reasoning, and any questions.
+
+**Step 2 — Draft generation (Sonnet/4o):** Only runs when the suggested action requires an email draft (`draft_to_recruiter`, `draft_to_client`, `draft_confirmation`, `draft_follow_up`, `request_new_availability`). The prompt includes the classification result, thread context, and LRP communication style guidelines. Returns the draft email (to, subject, body).
 
 ```python
 @observe()  # Langfuse trace
-async def run_agent(ctx: AgentContext, llm: LLMRouter) -> AgentSuggestion:
-    """Run the scheduling agent on a new email."""
-    system_prompt = build_system_prompt(ctx)
-    user_prompt = build_user_prompt(ctx)
+async def run_agent(
+    ctx: AgentContext,
+    classifier: LLMRouter,  # Haiku / 4o-mini
+    drafter: LLMRouter,     # Sonnet / 4o
+) -> tuple[AgentSuggestion, DraftEmail | None]:
+    """Run the scheduling agent: classify, then draft if needed."""
 
-    response = await llm.complete(
-        system=system_prompt,
-        user=user_prompt,
-        max_tokens=2048,
-        temperature=0.2,
+    # Step 1: Classify (cheap, fast)
+    classification_prompt = build_classification_prompt(ctx)
+    classify_response = await classifier.complete(
+        system=classification_prompt.system,
+        user=classification_prompt.user,
+        max_tokens=1024,
+        temperature=0.1,
     )
+    suggestion = parse_classification_response(classify_response.content)
 
-    suggestion = parse_agent_response(response.content)
+    # Step 2: Draft (only if action requires it)
+    draft = None
+    if suggestion.suggested_action in ACTIONS_REQUIRING_DRAFT:
+        draft_prompt = build_draft_prompt(ctx, suggestion)
+        draft_response = await drafter.complete(
+            system=draft_prompt.system,
+            user=draft_prompt.user,
+            max_tokens=2048,
+            temperature=0.3,
+        )
+        draft = parse_draft_response(draft_response.content)
 
-    # Log to Langfuse for observability
-    langfuse_context.update_current_observation(
-        input={"classification": ctx.new_message.subject},
-        output={"action": suggestion.suggested_action, "confidence": suggestion.confidence},
-        metadata={"model": response.model, "tokens": response.input_tokens + response.output_tokens},
-    )
-
-    return suggestion
+    return suggestion, draft
 ```
+
+Actions that skip the drafting step entirely: `mark_cold`, `create_loop`, `ask_coordinator`, `no_action`. For these, the classification model's output is the final result.
 
 **Prompt management:** System prompts are versioned in Langfuse's prompt management system, not hardcoded. This allows prompt iteration without code deploys:
 
@@ -507,9 +526,9 @@ Following the Agent Development Life Cycle, we define evals before building:
 | Draft acceptance rate (sent as-is) | > 60% | Production Langfuse scores |
 | Agent suggestion acceptance rate | > 80% | Production Langfuse scores |
 | Time-to-suggestion | < 10 seconds | Langfuse trace latency |
-| Cost per suggestion | < $0.05 | Langfuse token tracking |
+| Cost per suggestion | < $0.02 | Langfuse token tracking (Haiku classify + Sonnet draft) |
 
-**Eval dataset:** Start with 50 real email threads from coordinator archives (anonymized), each labeled with expected classification, expected action, and a reference draft. Expand to 200+ as production data flows in.
+**Eval dataset:** Start with 5 real scheduling threads from the existing MTTI computation archive, each labeled with expected classification, expected action, and a reference draft. Expand to 50+ as production data flows in and the flywheel matures.
 
 **Unsupervised evals (run continuously on production traces):**
 
@@ -849,13 +868,14 @@ We could hardcode the Anthropic SDK and skip the abstraction layer.
 1. Create `src/api/agent/` module with `llm.py`, `engine.py`, `prompts.py`, `models.py`
 2. Implement `LLMProvider` abstraction with Anthropic and OpenAI implementations
 3. Implement `LLMRouter` with fallback logic
-4. Define `AgentContext` and `AgentSuggestion` Pydantic models
-5. Implement scheduling relevance pre-filter
-6. Build initial system prompt encoding scheduling workflow rules
-7. Implement `run_agent()` function with structured output parsing
-8. Add Langfuse tracing to all agent operations
-9. Set up prompt management in Langfuse (staging/production labels)
-10. Write integration tests with fixture emails
+4. Configure two router instances: classifier (Haiku/4o-mini) and drafter (Sonnet/4o)
+5. Define `AgentContext`, `AgentSuggestion`, and `DraftEmail` Pydantic models
+6. Implement scheduling relevance pre-filter
+7. Build classification prompt and draft generation prompt
+8. Implement two-step `run_agent()` pipeline with structured output parsing
+9. Add Langfuse tracing to all agent operations
+10. Set up prompt management in Langfuse (staging/production labels)
+11. Write integration tests with fixture emails
 
 ### Phase 3: Suggestion Persistence + Webhook Wiring
 
@@ -878,7 +898,7 @@ We could hardcode the Anthropic SDK and skip the abstraction layer.
 
 ### Phase 5: Eval Flywheel + Production Hardening
 
-1. Build initial eval dataset (50 labeled email threads)
+1. Seed eval dataset from MTTI scheduling thread archive (start with 5 labeled threads)
 2. Configure Langfuse unsupervised evals (classification relevance, draft quality)
 3. Set up supervised eval pipeline (run against dataset on prompt changes)
 4. Configure Langfuse dashboard alerts (rejection rate, edit rate, error rate, latency)
@@ -886,10 +906,16 @@ We could hardcode the Anthropic SDK and skip the abstraction layer.
 6. Add input guardrails (PII stripping, content length gate)
 7. Load test with simulated email volume
 
-## Open Questions
+## Resolved Decisions
 
-1. **Which LLM models?** Sonnet is fast and cheap for classification; Opus is better for nuanced draft writing. Should we use a cheaper model (Haiku/GPT-4o-mini) for the pre-filter + classification step and a more capable model (Sonnet/GPT-4o) for draft generation, or a single model for both? Two models adds complexity but could halve LLM costs.
+Decisions made during review that shaped the design:
 
-2. **What's the fallback when the agent is down?** Resolved: surface "Agent unavailable — manual workflow active" banner in the Actions tab. Coordinators revert to their existing manual workflow. When the agent recovers, pull sync catches missed emails and suggestions appear. Should we also queue failed agent jobs for retry, or just let the next pull sync handle it?
+1. **LLM models:** Haiku (primary) / GPT-4o-mini (fallback) for classification. Sonnet (primary) / GPT-4o (fallback) for draft generation. These are simple scheduling emails — no need for Opus-class reasoning.
 
-3. **How do we seed the eval dataset?** We need 50+ real scheduling email threads for the initial eval dataset. Options: (a) coordinators export threads manually, (b) we use the Gmail API to pull recent threads matching scheduling keywords, (c) we synthesize realistic test emails. Option (b) is fastest but needs coordinator consent.
+2. **Agent downtime:** Surface "Agent unavailable — manual workflow active" banner in the Actions tab. Coordinators revert to their existing manual workflow. Failed agent jobs re-enqueue via arq with exponential backoff; the pull sync also catches missed emails when the provider recovers.
+
+3. **Eval dataset:** Seed from the existing bank of scheduling threads from the MTTI computation (stored locally). Start with 5 labeled threads and expand as production data flows in.
+
+4. **Email scope:** Process from all labels, not just INBOX (scheduling replies may be auto-archived by Gmail filters).
+
+5. **Sidebar structure:** Two tabs — Actions (agent suggestions + pending manual items) and Status Board (loop statuses). No new UI modes.
