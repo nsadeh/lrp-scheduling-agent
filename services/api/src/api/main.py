@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
 
 import sentry_sdk  # noqa: E402
 from arq import create_pool  # noqa: E402

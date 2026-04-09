@@ -28,7 +28,7 @@ from api.gmail.auth import TokenStore
 from api.gmail.client import GmailClient
 from api.scheduling.service import LoopService
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env", override=True)
 
 logger = logging.getLogger(__name__)
 
