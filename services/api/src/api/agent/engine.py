@@ -38,11 +38,15 @@ async def run_agent(
     ctx: AgentContext,
     classifier: LLMRouter,
     drafter: LLMRouter,
+    parent_trace=None,
 ) -> AgentResult:
     """Run the two-step scheduling agent: classify, then draft if needed.
 
     Creates Langfuse spans for each step so that token usage, latency,
     and classification results are observable.
+
+    If *parent_trace* is provided (e.g. from the worker), the pipeline span
+    is created as a child of that trace instead of a new top-level trace.
     """
     langfuse = _get_langfuse()
 
@@ -55,8 +59,17 @@ async def run_agent(
     }
 
     # --- Parent span for the full agent pipeline ---
+    # Use the caller's trace if provided; otherwise create a standalone trace.
     pipeline_span = None
-    if langfuse:
+    if parent_trace:
+        try:
+            pipeline_span = parent_trace.span(
+                name="agent-pipeline",
+                input=trace_input,
+            )
+        except Exception:
+            logger.debug("Failed to create Langfuse span under parent", exc_info=True)
+    elif langfuse:
         try:
             pipeline_span = langfuse.trace(
                 name="agent-pipeline",

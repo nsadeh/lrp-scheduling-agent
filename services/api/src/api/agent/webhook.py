@@ -1,7 +1,8 @@
 """Gmail Pub/Sub webhook endpoint.
 
 Receives push notifications when new emails arrive in coordinator inboxes.
-Validates the Pub/Sub message, then enqueues an arq job for processing.
+Validates the Pub/Sub OIDC bearer token, parses the message, then enqueues
+an arq job for processing.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import base64
 import binascii
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
@@ -17,6 +19,46 @@ from fastapi import APIRouter, Request, Response
 logger = logging.getLogger(__name__)
 
 webhook_router = APIRouter(tags=["webhook"])
+
+# The service account email configured on the Pub/Sub push subscription.
+# Pub/Sub signs an OIDC token using this identity; we verify it matches.
+PUBSUB_SERVICE_ACCOUNT = os.environ.get("PUBSUB_SERVICE_ACCOUNT", "")
+
+
+async def _verify_pubsub_token(request: Request) -> bool:
+    """Verify the Pub/Sub OIDC bearer token from the Authorization header.
+
+    Returns True if the token is valid and comes from the expected service account,
+    or if PUBSUB_SERVICE_ACCOUNT is not configured (permissive in dev).
+    """
+    if not PUBSUB_SERVICE_ACCOUNT:
+        logger.warning("PUBSUB_SERVICE_ACCOUNT not set — skipping webhook auth (dev only)")
+        return True
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        logger.warning("Webhook request missing Bearer token")
+        return False
+
+    token = auth_header[len("Bearer ") :]
+
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+
+        claims = id_token.verify_oauth2_token(token, google_requests.Request())
+        token_email = claims.get("email", "")
+        if token_email != PUBSUB_SERVICE_ACCOUNT:
+            logger.warning(
+                "Pub/Sub token email mismatch: got %s, expected %s",
+                token_email,
+                PUBSUB_SERVICE_ACCOUNT,
+            )
+            return False
+        return True
+    except Exception:
+        logger.warning("Failed to verify Pub/Sub OIDC token", exc_info=True)
+        return False
 
 
 class PubSubMessage:
@@ -76,7 +118,11 @@ async def gmail_webhook(request: Request) -> Response:
     enqueue background processing.
 
     Always returns 200 to acknowledge receipt (prevents Pub/Sub retries).
+    Returns 401 if the Pub/Sub OIDC token is invalid.
     """
+    if not await _verify_pubsub_token(request):
+        return Response(status_code=401)
+
     body = await request.json()
 
     pubsub_msg = PubSubMessage.from_request_body(body)

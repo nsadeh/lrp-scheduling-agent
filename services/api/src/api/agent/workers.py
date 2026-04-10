@@ -11,6 +11,9 @@ import logging
 import os
 from datetime import UTC, datetime
 
+from api.agent.engine import run_agent
+from api.agent.guardrails import validate_action
+from api.agent.models import AgentContext
 from api.agent.prefilter import is_scheduling_relevant
 from api.agent.queries import queries
 
@@ -174,8 +177,6 @@ async def process_relevant_message(
                     },
                 )
 
-        from api.agent.models import AgentContext
-
         agent_ctx = AgentContext(
             new_message=message,
             thread_messages=thread.messages,
@@ -188,9 +189,7 @@ async def process_relevant_message(
         )
 
         # 5. Run agent engine (classification + optional draft)
-        from api.agent.engine import run_agent
-
-        result = await run_agent(agent_ctx, classifier, drafter)
+        result = await run_agent(agent_ctx, classifier, drafter, parent_trace=trace)
         logger.info(
             "Agent classified message %s as %s, action=%s, confidence=%.2f",
             message_id,
@@ -201,8 +200,6 @@ async def process_relevant_message(
 
         # 6. Validate via guardrails
         guard_span = trace.span(name="validate-guardrails") if trace else None
-
-        from api.agent.guardrails import validate_action
 
         violations = validate_action(result, loop)
 
@@ -409,14 +406,9 @@ async def _process_history(
                     conn, gmail_message_id=msg_id, coordinator_email=coordinator_email
                 )
 
-            # Fetch metadata (fast, headers only)
-            metadata = await gmail.get_message_metadata(coordinator_email, msg_id)
-            thread_id = metadata["threadId"]
-
-            # Build a lightweight Message for the pre-filter
-            # get_message_metadata returns headers dict; we need a full Message
-            # for the pre-filter. Fetch full message for pre-filtering.
+            # Fetch full message (pre-filter needs headers + body content)
             message = await gmail.get_message(coordinator_email, msg_id)
+            thread_id = message.thread_id
 
             # Run pre-filter
             relevant, reason = await is_scheduling_relevant(

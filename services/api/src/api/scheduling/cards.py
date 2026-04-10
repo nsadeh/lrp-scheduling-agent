@@ -5,6 +5,8 @@ Pure functions returning CardResponse models for the Gmail sidebar.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from api.addon.models import (
     ActionParameter,
     ActionResponse,
@@ -43,19 +45,18 @@ from api.scheduling.models import (
 # ---------------------------------------------------------------------------
 
 # Per-request state set by the routes module before building cards.
-# Access via getters — never import these variables directly.
-_action_url: str = ""
+# Uses ContextVar for async-safe per-request isolation.
+_action_url_var: ContextVar[str] = ContextVar("action_url", default="")
 
 
 def set_action_url(url: str) -> None:
     """Set the base URL for action callbacks (e.g. https://xxx.ngrok-free.app/addon/action)."""
-    global _action_url
-    _action_url = url
+    _action_url_var.set(url)
 
 
 def get_action_url() -> str:
     """Return the current action callback URL."""
-    return _action_url
+    return _action_url_var.get()
 
 
 LRP_HEADER = CardHeader(

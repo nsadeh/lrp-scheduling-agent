@@ -67,6 +67,12 @@ class GmailClient:
     def __init__(self, token_store: TokenStore):
         self._token_store = token_store
 
+    async def has_credentials(self, user_email: str) -> bool:
+        """Check whether stored credentials exist for a user."""
+        if not self._token_store:
+            return False
+        return await self._token_store.has_token(user_email)
+
     async def _get_creds(self, user_email: str):
         return await self._token_store.load_credentials(user_email)
 

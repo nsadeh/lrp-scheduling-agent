@@ -19,39 +19,80 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Column names as returned by RETURNING / SELECT in agent.sql.
+# Used to map positional tuples to named fields.
+_SUGGESTION_COLUMNS = (
+    "id",
+    "loop_id",
+    "stage_id",
+    "gmail_message_id",
+    "gmail_thread_id",
+    "classification",
+    "suggested_action",
+    "questions",
+    "reasoning",
+    "confidence",
+    "prefilled_data",
+    "status",
+    "coordinator_feedback",
+    "created_at",
+    "resolved_at",
+    "coordinator_email",
+)
+
+_DRAFT_COLUMNS = (
+    "id",
+    "suggestion_id",
+    "draft_to",
+    "draft_subject",
+    "draft_body",
+    "in_reply_to",
+    "created_at",
+)
+
+
+def _row_to_dict(row: Any, columns: tuple[str, ...]) -> dict[str, Any]:
+    """Convert a positional tuple row to a dict using known column names."""
+    if isinstance(row, dict):
+        return row
+    return {col: row[i] for i, col in enumerate(columns) if i < len(row)}
+
+
 class Suggestion:
     """Lightweight suggestion data from the database."""
 
     def __init__(self, row: Any):
-        self.id: str = row[0]
-        self.loop_id: str | None = row[1]
-        self.stage_id: str | None = row[2]
-        self.gmail_message_id: str = row[3]
-        self.gmail_thread_id: str = row[4]
-        self.classification: str = row[5]
-        self.suggested_action: str = row[6]
-        self.questions: list[str] = row[7] or []
-        self.reasoning: str | None = row[8]
-        self.confidence: float = row[9]
-        self.prefilled_data: dict | None = row[10]
-        self.status: str = row[11]
-        self.coordinator_feedback: str | None = row[12]
-        self.created_at = row[13]
-        self.resolved_at = row[14]
-        self.coordinator_email: str = row[15] if len(row) > 15 else ""
+        d = _row_to_dict(row, _SUGGESTION_COLUMNS)
+        self.id: str = d["id"]
+        self.loop_id: str | None = d.get("loop_id")
+        self.stage_id: str | None = d.get("stage_id")
+        self.gmail_message_id: str = d["gmail_message_id"]
+        self.gmail_thread_id: str = d["gmail_thread_id"]
+        self.classification: str = d["classification"]
+        self.suggested_action: str = d["suggested_action"]
+        self.questions: list[str] = d.get("questions") or []
+        self.reasoning: str | None = d.get("reasoning")
+        self.confidence: float = d["confidence"]
+        self.prefilled_data: dict | None = d.get("prefilled_data")
+        self.status: str = d["status"]
+        self.coordinator_feedback: str | None = d.get("coordinator_feedback")
+        self.created_at = d.get("created_at")
+        self.resolved_at = d.get("resolved_at")
+        self.coordinator_email: str = d.get("coordinator_email", "")
 
 
 class SuggestionDraft:
     """Lightweight draft data from the database."""
 
     def __init__(self, row: Any):
-        self.id: str = row[0]
-        self.suggestion_id: str = row[1]
-        self.draft_to: list[str] = row[2]
-        self.draft_subject: str = row[3]
-        self.draft_body: str = row[4]
-        self.in_reply_to: str | None = row[5]
-        self.created_at = row[6]
+        d = _row_to_dict(row, _DRAFT_COLUMNS)
+        self.id: str = d["id"]
+        self.suggestion_id: str = d["suggestion_id"]
+        self.draft_to: list[str] = d.get("draft_to") or []
+        self.draft_subject: str = d["draft_subject"]
+        self.draft_body: str = d["draft_body"]
+        self.in_reply_to: str | None = d.get("in_reply_to")
+        self.created_at = d.get("created_at")
 
 
 class AgentService:

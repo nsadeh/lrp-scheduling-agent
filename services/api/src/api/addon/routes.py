@@ -65,25 +65,26 @@ def _get_user_email(body: AddonRequest) -> str | None:
     on ALL request types (homepage, on-message, actions) when the deployment
     manifest includes the ``userinfo.email`` scope.
 
-    Returns None if the token is missing or malformed.
+    The token signature is verified against Google's public keys to prevent
+    coordinator impersonation via a forged JWT.
+
+    Returns None if the token is missing, malformed, or fails verification.
     """
     auth = body.authorization_event_object
     if not auth or not auth.user_id_token:
         return None
 
-    import base64
-    import json
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
 
-    parts = auth.user_id_token.split(".")
-    if len(parts) < 2:
-        return None
     try:
-        payload = parts[1]
-        payload += "=" * (4 - len(payload) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
+        claims = id_token.verify_oauth2_token(
+            auth.user_id_token,
+            google_requests.Request(),
+        )
         return claims.get("email")
     except Exception:
-        logger.warning("Could not decode userIdToken", exc_info=True)
+        logger.warning("Could not verify userIdToken", exc_info=True)
         return None
 
 
@@ -137,9 +138,7 @@ async def _check_gmail_auth(request: Request, user_email: str | None) -> CardRes
     gmail = getattr(request.app.state, "gmail", None)
     if not gmail:
         return None  # GmailClient not configured — skip auth check
-    if not gmail._token_store:
-        return None
-    has = await gmail._token_store.has_token(user_email)
+    has = await gmail.has_credentials(user_email)
     if has:
         return None
     # Build the OAuth authorization URL
@@ -705,12 +704,12 @@ async def _handle_approve_suggestion(
 
     # If there's a draft, send it
     draft = await agent_svc.get_draft_for_suggestion(suggestion_id)
-    if draft and suggestion.loop_id and suggestion.stage_id:
+    if draft and draft.draft_to and suggestion.loop_id and suggestion.stage_id:
         await svc.send_email(
             loop_id=suggestion.loop_id,
             stage_id=suggestion.stage_id,
             coordinator_email=email,
-            to=draft.draft_to[0] if draft.draft_to else "",
+            to=draft.draft_to,
             subject=draft.draft_subject,
             body=draft.draft_body,
             in_reply_to=draft.in_reply_to,
