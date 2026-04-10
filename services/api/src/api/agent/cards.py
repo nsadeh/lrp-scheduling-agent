@@ -33,8 +33,7 @@ from api.addon.models import (
 if TYPE_CHECKING:
     from api.agent.service import Suggestion, SuggestionDraft
 
-# Reuse action URL from scheduling cards
-from api.scheduling.cards import _action_url
+from api.scheduling.cards import get_action_url
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,7 +72,7 @@ def _suggestion_action(
     parameters = [ActionParameter(key=k, value=v) for k, v in all_params.items()]
     return OnClick(
         action=OnClickAction(
-            function=_action_url,
+            function=get_action_url(),
             parameters=parameters,
         )
     )

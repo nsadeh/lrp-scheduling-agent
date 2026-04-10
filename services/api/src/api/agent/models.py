@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-if TYPE_CHECKING:
-    from api.gmail.models import Message
-    from api.scheduling.models import (
-        Candidate,
-        ClientContact,
-        Contact,
-        Coordinator,
-        Loop,
-        LoopEvent,
-    )
+# These imports MUST be at runtime (not under TYPE_CHECKING) because
+# Pydantic needs the actual classes to validate AgentContext fields.
+from api.gmail.models import Message  # noqa: TC001
+from api.scheduling.models import (  # noqa: TC001
+    Candidate,
+    ClientContact,
+    Contact,
+    Coordinator,
+    Loop,
+    LoopEvent,
+)
 
 
 class EmailClassification(StrEnum):

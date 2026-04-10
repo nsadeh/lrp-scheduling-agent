@@ -6,6 +6,7 @@ watch renewal, and the agent processing pipeline.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from datetime import UTC, datetime
@@ -18,6 +19,16 @@ logger = logging.getLogger(__name__)
 PUBSUB_TOPIC = os.environ.get(
     "GMAIL_PUBSUB_TOPIC", "projects/ai-agents-dev-492713/topics/gmail-push"
 )
+
+
+def _get_langfuse():
+    """Return the Langfuse singleton, or None if unavailable."""
+    try:
+        from langfuse import get_client
+
+        return get_client()
+    except Exception:
+        return None
 
 
 async def process_gmail_notification(ctx: dict, coordinator_email: str, history_id: str) -> None:
@@ -65,8 +76,7 @@ async def process_relevant_message(
     5. Run agent (classification + optional draft)
     6. Persist suggestion
 
-    The agent engine is built separately — this wires together fetching,
-    context assembly, and suggestion persistence.
+    Creates a top-level Langfuse trace with child spans for each step.
     """
     gmail = ctx["gmail"]
     redis = ctx["redis"]
@@ -89,8 +99,29 @@ async def process_relevant_message(
         coordinator_email,
     )
 
+    # Set up Langfuse trace for the full pipeline
+    langfuse = _get_langfuse()
+    trace = None
+    if langfuse:
+        try:
+            trace = langfuse.trace(
+                name="process-message",
+                user_id=coordinator_email,
+                session_id=thread_id,
+                tags=["agent", "scheduling"],
+                input={
+                    "coordinator_email": coordinator_email,
+                    "message_id": message_id,
+                    "thread_id": thread_id,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to create Langfuse trace", exc_info=True)
+
     try:
         # 1. Fetch full message and thread
+        fetch_span = trace.span(name="fetch-context") if trace else None
+
         message = await gmail.get_message(coordinator_email, message_id)
         thread = await gmail.get_thread(coordinator_email, thread_id)
 
@@ -106,11 +137,14 @@ async def process_relevant_message(
             logger.warning("Agent engine not available — skipping for message %s", message_id)
             return
 
-        # 4. Build agent context
+        # 4. Build agent context — auto-create coordinator if needed.
+        # Anyone who completed the OAuth flow is a coordinator by definition.
         coordinator = await scheduling.get_coordinator_by_email(coordinator_email)
         if not coordinator:
-            logger.warning("Coordinator %s not found in DB", coordinator_email)
-            return
+            fallback_name = coordinator_email.split("@")[0].replace(".", " ").title()
+            coordinator = await scheduling.get_or_create_coordinator(
+                name=fallback_name, email=coordinator_email
+            )
 
         events = []
         recruiter = None
@@ -128,6 +162,17 @@ async def process_relevant_message(
                 candidate = loop.candidate
             if loop.most_urgent_stage:
                 active_stage = loop.most_urgent_stage
+
+        if fetch_span:
+            with contextlib.suppress(Exception):
+                fetch_span.end(
+                    output={
+                        "has_loop": loop is not None,
+                        "loop_id": loop.id if loop else None,
+                        "thread_messages": len(thread.messages),
+                        "events": len(events),
+                    },
+                )
 
         from api.agent.models import AgentContext
 
@@ -155,9 +200,16 @@ async def process_relevant_message(
         )
 
         # 6. Validate via guardrails
+        guard_span = trace.span(name="validate-guardrails") if trace else None
+
         from api.agent.guardrails import validate_action
 
         violations = validate_action(result, loop)
+
+        if guard_span:
+            with contextlib.suppress(Exception):
+                guard_span.end(output={"violations": violations or []})
+
         if violations:
             logger.warning(
                 "Guardrail violations for message %s: %s",
@@ -167,7 +219,10 @@ async def process_relevant_message(
             return
 
         # 7. Persist suggestion
+        persist_span = trace.span(name="persist-suggestion") if trace else None
+
         suggestion = await agent_service.create_suggestion(
+            coordinator_email=coordinator_email,
             loop_id=loop.id if loop else None,
             stage_id=active_stage.id if active_stage else None,
             gmail_message_id=message_id,
@@ -190,11 +245,42 @@ async def process_relevant_message(
                 in_reply_to=result.draft.in_reply_to,
             )
 
+        if persist_span:
+            with contextlib.suppress(Exception):
+                persist_span.end(
+                    output={
+                        "suggestion_id": suggestion.id,
+                        "has_draft": result.draft is not None,
+                    },
+                )
+
         logger.info("Suggestion %s created for message %s", suggestion.id, message_id)
+
+        # Set output on the top-level trace
+        if trace:
+            with contextlib.suppress(Exception):
+                trace.update(
+                    output={
+                        "classification": result.classification.classification.value,
+                        "action": result.classification.suggested_action.value,
+                        "confidence": result.classification.confidence,
+                        "suggestion_id": suggestion.id,
+                        "has_draft": result.draft is not None,
+                    },
+                )
 
     except Exception:
         logger.exception("Error processing message %s for %s", message_id, coordinator_email)
+        if trace:
+            with contextlib.suppress(Exception):
+                trace.update(level="ERROR", status_message="Exception during processing")
         raise
+    finally:
+        if langfuse:
+            try:
+                langfuse.flush()
+            except Exception:
+                logger.debug("Failed to flush Langfuse", exc_info=True)
 
 
 async def renew_gmail_watches(ctx: dict) -> None:

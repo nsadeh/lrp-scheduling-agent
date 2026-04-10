@@ -42,7 +42,8 @@ from api.scheduling.models import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Set by the routes module at startup with the backend's public URL
+# Per-request state set by the routes module before building cards.
+# Access via getters — never import these variables directly.
 _action_url: str = ""
 
 
@@ -50,6 +51,11 @@ def set_action_url(url: str) -> None:
     """Set the base URL for action callbacks (e.g. https://xxx.ngrok-free.app/addon/action)."""
     global _action_url
     _action_url = url
+
+
+def get_action_url() -> str:
+    """Return the current action callback URL."""
+    return _action_url
 
 
 LRP_HEADER = CardHeader(
@@ -72,7 +78,7 @@ def _action(
     parameters = [ActionParameter(key=k, value=v) for k, v in all_params.items()]
     return OnClick(
         action=OnClickAction(
-            function=_action_url,
+            function=get_action_url(),
             parameters=parameters,
             required_widgets=required_widgets,
         )
@@ -280,9 +286,17 @@ def _action_needed_widgets(s: LoopSummary) -> list:
     return widgets
 
 
-def build_drafts_tab(board: StatusBoard) -> CardResponse:
+def build_drafts_tab(board: StatusBoard, pending_suggestions: list | None = None) -> CardResponse:
     """Drafts/action queue tab — shows action-needed items with inline actions."""
     sections = [_tab_buttons("drafts")]
+
+    # Agent suggestions at the top
+    if pending_suggestions:
+        from api.agent.cards import build_pending_suggestions_section
+
+        suggestion_section = build_pending_suggestions_section(pending_suggestions)
+        if suggestion_section:
+            sections.append(suggestion_section)
 
     if board.action_needed:
         for s in board.action_needed:
@@ -292,7 +306,7 @@ def build_drafts_tab(board: StatusBoard) -> CardResponse:
         for s in board.waiting:
             sections.append(Section(widgets=_action_needed_widgets(s)))
 
-    if not board.action_needed and not board.waiting:
+    if not board.action_needed and not board.waiting and not pending_suggestions:
         has_other = board.scheduled or board.complete or board.cold
         if has_other:
             sections.append(

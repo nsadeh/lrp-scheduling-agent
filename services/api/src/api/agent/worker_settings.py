@@ -17,6 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from api.agent.llm import AnthropicProvider, LLMRouter, OpenAIProvider
 from api.agent.service import AgentService
+from api.agent.tracing import init_tracing
 from api.agent.workers import (
     cleanup_old_processed_messages,
     process_gmail_notification,
@@ -30,6 +31,13 @@ from api.scheduling.service import LoopService
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env", override=True)
 
+# Configure logging so worker output is visible
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +49,10 @@ def _redis_settings() -> RedisSettings:
 
 async def startup(ctx: dict) -> None:
     """Initialize shared resources for the worker process."""
+    # Initialise Langfuse tracing before creating LLM clients so that
+    # the AnthropicInstrumentor can patch the SDK before first use.
+    init_tracing()
+
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
     pool = AsyncConnectionPool(conninfo=database_url)
     await pool.open()
@@ -75,7 +87,7 @@ async def startup(ctx: dict) -> None:
         OpenAIProvider(model="gpt-4o-mini", api_key=openai_key) if openai_key else None
     )
     drafter_primary = (
-        AnthropicProvider(model="claude-sonnet-4-6-20250514", api_key=anthropic_key)
+        AnthropicProvider(model="claude-sonnet-4-20250514", api_key=anthropic_key)
         if anthropic_key
         else None
     )

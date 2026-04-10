@@ -24,6 +24,7 @@ def _make_suggestion_row(
     coordinator_feedback=None,
     created_at="2026-04-09T00:00:00Z",
     resolved_at=None,
+    coordinator_email="nim@longridgepartners.com",
 ):
     return (
         id_,
@@ -41,6 +42,7 @@ def _make_suggestion_row(
         coordinator_feedback,
         created_at,
         resolved_at,
+        coordinator_email,
     )
 
 
@@ -117,6 +119,7 @@ class TestAgentService:
                 AsyncMock(return_value=expected_row),
             )
             s = await service.create_suggestion(
+                coordinator_email="nim@longridgepartners.com",
                 loop_id="lop_test",
                 stage_id="stg_test",
                 gmail_message_id="msg_123",
@@ -154,7 +157,7 @@ class TestAgentService:
                 "api.agent.service.queries.get_latest_suggestion_for_thread",
                 AsyncMock(return_value=expected_row),
             )
-            s = await service.get_latest_for_thread("thread_123")
+            s = await service.get_latest_for_thread("thread_123", "nim@longridgepartners.com")
         assert s is not None
         assert s.gmail_thread_id == "thread_123"
 
@@ -165,7 +168,7 @@ class TestAgentService:
                 "api.agent.service.queries.get_latest_suggestion_for_thread",
                 AsyncMock(return_value=None),
             )
-            s = await service.get_latest_for_thread("unknown")
+            s = await service.get_latest_for_thread("unknown", "nim@longridgepartners.com")
         assert s is None
 
     async def test_resolve_suggestion(self, service, mock_pool):

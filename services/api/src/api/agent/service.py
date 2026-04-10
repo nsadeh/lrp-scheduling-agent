@@ -38,6 +38,7 @@ class Suggestion:
         self.coordinator_feedback: str | None = row[12]
         self.created_at = row[13]
         self.resolved_at = row[14]
+        self.coordinator_email: str = row[15] if len(row) > 15 else ""
 
 
 class SuggestionDraft:
@@ -62,6 +63,7 @@ class AgentService:
     async def create_suggestion(
         self,
         *,
+        coordinator_email: str,
         loop_id: str | None,
         stage_id: str | None,
         gmail_message_id: str,
@@ -79,6 +81,7 @@ class AgentService:
             row = await queries.create_suggestion(
                 conn,
                 id=suggestion_id,
+                coordinator_email=coordinator_email,
                 loop_id=loop_id,
                 stage_id=stage_id,
                 gmail_message_id=gmail_message_id,
@@ -127,11 +130,15 @@ class AgentService:
             row = await queries.get_draft_for_suggestion(conn, suggestion_id=suggestion_id)
             return SuggestionDraft(row) if row else None
 
-    async def get_latest_for_thread(self, gmail_thread_id: str) -> Suggestion | None:
-        """Get the most recent suggestion for a Gmail thread."""
+    async def get_latest_for_thread(
+        self, gmail_thread_id: str, coordinator_email: str
+    ) -> Suggestion | None:
+        """Get the most recent suggestion for a Gmail thread, scoped to a coordinator."""
         async with self._pool.connection() as conn:
             row = await queries.get_latest_suggestion_for_thread(
-                conn, gmail_thread_id=gmail_thread_id
+                conn,
+                gmail_thread_id=gmail_thread_id,
+                coordinator_email=coordinator_email,
             )
             return Suggestion(row) if row else None
 

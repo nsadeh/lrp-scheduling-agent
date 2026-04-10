@@ -58,29 +58,50 @@ def _get_agent_service(request: Request):
     return getattr(request.app.state, "agent_service", None)
 
 
-def _get_user_email(body: AddonRequest) -> str:
+def _get_user_email(body: AddonRequest) -> str | None:
     """Extract coordinator email from the add-on request.
 
-    Google's add-on framework sends a user ID token in the authorization event object.
-    We decode it (without verification — it's already been verified by our auth dependency)
-    to get the user's email.
-    """
-    if body.authorization_event_object and body.authorization_event_object.user_id_token:
-        import base64
-        import json
+    Google sends a ``userIdToken`` (OIDC JWT) in the ``authorizationEventObject``
+    on ALL request types (homepage, on-message, actions) when the deployment
+    manifest includes the ``userinfo.email`` scope.
 
-        # JWT is header.payload.signature — we just need the payload
-        token = body.authorization_event_object.user_id_token
-        try:
-            payload = token.split(".")[1]
-            # Add padding if needed
-            payload += "=" * (4 - len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            if "email" in claims:
-                return claims["email"]
-        except Exception:
-            logger.warning("Could not decode user ID token for email", exc_info=True)
-    return "coordinator@longridgepartners.com"
+    Returns None if the token is missing or malformed.
+    """
+    auth = body.authorization_event_object
+    if not auth or not auth.user_id_token:
+        return None
+
+    import base64
+    import json
+
+    parts = auth.user_id_token.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        payload = parts[1]
+        payload += "=" * (4 - len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims.get("email")
+    except Exception:
+        logger.warning("Could not decode userIdToken", exc_info=True)
+        return None
+
+
+def _normalize_gmail_id(raw_id: str | None) -> str | None:
+    """Convert Google add-on IDs to Gmail API hex format.
+
+    Google's add-on framework sends IDs like ``thread-f:1862089055444310745``
+    and ``msg-f:1862089055444310745`` (decimal), but the Gmail API uses hex
+    strings like ``19d7782151e69ad9``. Our database stores the hex format.
+    """
+    if not raw_id:
+        return None
+    # Already hex format (from Gmail API or our own test requests)
+    if not raw_id.startswith(("thread-f:", "msg-f:", "msg-a:")):
+        return raw_id
+    # Extract decimal part and convert to hex
+    decimal_str = raw_id.split(":", 1)[1]
+    return format(int(decimal_str), "x")
 
 
 def _get_form_value(body: AddonRequest, field: str) -> str | None:
@@ -103,11 +124,16 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
     return body.common_event_object.parameters.get(key)
 
 
-async def _check_gmail_auth(request: Request, user_email: str) -> CardResponse | None:
+async def _check_gmail_auth(request: Request, user_email: str | None) -> CardResponse | None:
     """Check if the coordinator has stored Gmail credentials.
 
-    Returns an auth-required card if not, or None if authorized.
+    Returns an auth-required card if not authenticated, or None if authorized.
+    If user_email is None (couldn't identify user), returns auth card.
     """
+    if not user_email:
+        base = str(request.url).rsplit("/addon/", 1)[0]
+        auth_url = f"{base}/addon/oauth/start"
+        return build_auth_required(auth_url)
     gmail = getattr(request.app.state, "gmail", None)
     if not gmail:
         return None  # GmailClient not configured — skip auth check
@@ -153,7 +179,13 @@ async def addon_homepage(body: AddonRequest, request: Request) -> dict:
 
     svc = _get_scheduling(request)
     board = await svc.get_status_board(email)
-    return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
+
+    agent_svc = _get_agent_service(request)
+    pending = await agent_svc.get_pending_for_coordinator(email) if agent_svc else []
+
+    return _as_push(build_drafts_tab(board, pending_suggestions=pending)).model_dump(
+        by_alias=True, exclude_none=True
+    )
 
 
 @addon_router.post("/on-message")
@@ -170,11 +202,11 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     thread_id = None
     message_id = None
     if body.gmail:
-        thread_id = body.gmail.thread_id
-        message_id = body.gmail.message_id
+        thread_id = _normalize_gmail_id(body.gmail.thread_id)
+        message_id = _normalize_gmail_id(body.gmail.message_id)
 
     if not thread_id:
-        board = await svc.get_status_board(_get_user_email(body))
+        board = await svc.get_status_board(email)
         return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
 
     loop = await svc.find_loop_by_thread(thread_id)
@@ -184,7 +216,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     suggestion = None
     draft = None
     if agent_svc:
-        suggestion = await agent_svc.get_latest_for_thread(thread_id)
+        suggestion = await agent_svc.get_latest_for_thread(thread_id, email)
         if suggestion and suggestion.status == "pending":
             draft = await agent_svc.get_draft_for_suggestion(suggestion.id)
         else:
@@ -797,11 +829,20 @@ async def _handle_accept_create_loop(
     prefilled = suggestion.prefilled_data
     await agent_svc.resolve_suggestion(suggestion_id, status="accepted")
 
+    # Map agent-extracted fields to the form's prefill parameters.
+    # The agent may not have all fields — the coordinator fills in the rest.
     return build_create_loop_form(
         gmail_thread_id=suggestion.gmail_thread_id,
         gmail_subject=prefilled.get("subject"),
-        prefill_client_name=prefilled.get("client_name"),
+        prefill_candidate_name=prefilled.get("candidate_name"),
+        prefill_client_name=prefilled.get("client_name") or prefilled.get("client_contact"),
         prefill_client_email=prefilled.get("client_email"),
+        prefill_client_company=prefilled.get("client_company"),
+        prefill_recruiter_name=prefilled.get("recruiter_name"),
+        prefill_recruiter_email=prefilled.get("recruiter_email"),
+        prefill_cm_name=prefilled.get("cm_name"),
+        prefill_cm_email=prefilled.get("cm_email"),
+        prefill_first_stage=prefilled.get("round"),
     )
 
 

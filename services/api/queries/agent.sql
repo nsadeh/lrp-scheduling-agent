@@ -27,34 +27,35 @@ WHERE processed_at < now() - INTERVAL '30 days';
 INSERT INTO agent_suggestions (
     id, loop_id, stage_id, gmail_message_id, gmail_thread_id,
     classification, suggested_action, questions, reasoning,
-    confidence, prefilled_data, status
+    confidence, prefilled_data, status, coordinator_email
 )
 VALUES (
     :id, :loop_id, :stage_id, :gmail_message_id, :gmail_thread_id,
     :classification, :suggested_action, :questions, :reasoning,
-    :confidence, :prefilled_data, 'pending'
+    :confidence, :prefilled_data, 'pending', :coordinator_email
 )
 RETURNING id, loop_id, stage_id, gmail_message_id, gmail_thread_id,
           classification, suggested_action, questions, reasoning,
           confidence, prefilled_data, status, coordinator_feedback,
-          created_at, resolved_at;
+          created_at, resolved_at, coordinator_email;
 
 -- name: get_suggestion^
 SELECT id, loop_id, stage_id, gmail_message_id, gmail_thread_id,
        classification, suggested_action, questions, reasoning,
        confidence, prefilled_data, status, coordinator_feedback,
-       created_at, resolved_at
+       created_at, resolved_at, coordinator_email
 FROM agent_suggestions
 WHERE id = :id;
 
 -- name: get_latest_suggestion_for_thread^
--- Most recent suggestion for a Gmail thread.
+-- Most recent suggestion for a Gmail thread, scoped to a coordinator.
 SELECT id, loop_id, stage_id, gmail_message_id, gmail_thread_id,
        classification, suggested_action, questions, reasoning,
        confidence, prefilled_data, status, coordinator_feedback,
-       created_at, resolved_at
+       created_at, resolved_at, coordinator_email
 FROM agent_suggestions
 WHERE gmail_thread_id = :gmail_thread_id
+  AND coordinator_email = :coordinator_email
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -63,24 +64,22 @@ LIMIT 1;
 SELECT id, loop_id, stage_id, gmail_message_id, gmail_thread_id,
        classification, suggested_action, questions, reasoning,
        confidence, prefilled_data, status, coordinator_feedback,
-       created_at, resolved_at
+       created_at, resolved_at, coordinator_email
 FROM agent_suggestions
 WHERE loop_id = :loop_id
 ORDER BY created_at DESC
 LIMIT 1;
 
 -- name: get_pending_suggestions_for_coordinator
--- All pending suggestions for loops owned by a coordinator.
-SELECT s.id, s.loop_id, s.stage_id, s.gmail_message_id, s.gmail_thread_id,
-       s.classification, s.suggested_action, s.questions, s.reasoning,
-       s.confidence, s.prefilled_data, s.status, s.coordinator_feedback,
-       s.created_at, s.resolved_at
-FROM agent_suggestions s
-LEFT JOIN loops l ON l.id = s.loop_id
-LEFT JOIN coordinators c ON c.id = l.coordinator_id
-WHERE s.status = 'pending'
-  AND (c.email = :coordinator_email OR s.loop_id IS NULL)
-ORDER BY s.created_at DESC;
+-- All pending suggestions for a coordinator.
+SELECT id, loop_id, stage_id, gmail_message_id, gmail_thread_id,
+       classification, suggested_action, questions, reasoning,
+       confidence, prefilled_data, status, coordinator_feedback,
+       created_at, resolved_at, coordinator_email
+FROM agent_suggestions
+WHERE status = 'pending'
+  AND coordinator_email = :coordinator_email
+ORDER BY created_at DESC;
 
 -- name: resolve_suggestion!
 -- Mark a suggestion as accepted/edited/rejected.

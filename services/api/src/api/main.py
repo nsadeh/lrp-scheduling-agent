@@ -18,6 +18,7 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
 from api.agent.service import AgentService  # noqa: E402
+from api.agent.tracing import init_tracing  # noqa: E402
 from api.agent.webhook import webhook_router  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
@@ -38,6 +39,9 @@ sentry_sdk.init(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialise Langfuse tracing before creating any LLM clients
+    init_tracing()
+
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
     pool = AsyncConnectionPool(conninfo=database_url)
     await pool.open()
