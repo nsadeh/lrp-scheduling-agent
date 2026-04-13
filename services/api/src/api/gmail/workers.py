@@ -10,15 +10,20 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
-from arq import cron
-from arq.connections import RedisSettings
-from psycopg_pool import AsyncConnectionPool
+from dotenv import load_dotenv
 
-from api.gmail.auth import TokenStore
-from api.gmail.client import GmailClient
-from api.gmail.exceptions import GmailNotFoundError, GmailScopeError
-from api.gmail.hooks import (
+load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+
+from arq import cron  # noqa: E402
+from arq.connections import RedisSettings  # noqa: E402
+from psycopg_pool import AsyncConnectionPool  # noqa: E402
+
+from api.gmail.auth import TokenStore  # noqa: E402
+from api.gmail.client import GmailClient  # noqa: E402
+from api.gmail.exceptions import GmailNotFoundError, GmailScopeError  # noqa: E402
+from api.gmail.hooks import (  # noqa: E402
     EmailEvent,
     LoggingHook,
     classify_direction,
@@ -34,6 +39,7 @@ DEBOUNCE_TTL = 60  # seconds
 
 async def startup(ctx: dict) -> None:
     """Initialize shared resources for all worker jobs."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
     pool = AsyncConnectionPool(conninfo=database_url)
     await pool.open()

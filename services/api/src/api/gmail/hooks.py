@@ -52,12 +52,46 @@ class LoggingHook:
     """Default hook — logs every event. Replaced by agent in production."""
 
     async def on_email(self, event: EmailEvent) -> None:
+        msg = event.message
+        participants = ", ".join(a.email for a in event.new_participants)
+        to_list = ", ".join(a.email for a in msg.to)
+        cc_list = ", ".join(a.email for a in msg.cc)
+
         logger.info(
-            "email_event direction=%s type=%s thread=%s subject=%s",
+            "\n"
+            "╔══════════════════════════════════════════════════\n"
+            "║ EMAIL EVENT\n"
+            "╠══════════════════════════════════════════════════\n"
+            "║ Direction:    %s\n"
+            "║ Type:         %s\n"
+            "║ Coordinator:  %s\n"
+            "╠──────────────────────────────────────────────────\n"
+            "║ From:         %s\n"
+            "║ To:           %s\n"
+            "║ CC:           %s\n"
+            "║ Subject:      %s\n"
+            "║ Date:         %s\n"
+            "║ Thread ID:    %s\n"
+            "║ Message ID:   %s\n"
+            "║ Labels:       %s\n"
+            "╠──────────────────────────────────────────────────\n"
+            "║ Body:\n%s\n"
+            "╠──────────────────────────────────────────────────\n"
+            "║ New participants: %s\n"
+            "╚══════════════════════════════════════════════════",
             event.direction.value,
             event.message_type.value,
-            event.message.thread_id,
-            event.message.subject,
+            event.coordinator_email,
+            f"{msg.from_.name} <{msg.from_.email}>" if msg.from_.name else msg.from_.email,
+            to_list,
+            cc_list or "(none)",
+            msg.subject,
+            msg.date.isoformat(),
+            msg.thread_id,
+            msg.message_id_header or "(none)",
+            ", ".join(msg.label_ids) or "(none)",
+            "\n".join(f"║   {line}" for line in msg.body_text.splitlines()) or "║   (empty)",
+            participants or "(none)",
         )
 
 
