@@ -10,20 +10,15 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
-from pathlib import Path
 
-from dotenv import load_dotenv
+from arq import cron
+from arq.connections import RedisSettings
+from psycopg_pool import AsyncConnectionPool
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
-
-from arq import cron  # noqa: E402
-from arq.connections import RedisSettings  # noqa: E402
-from psycopg_pool import AsyncConnectionPool  # noqa: E402
-
-from api.gmail.auth import TokenStore  # noqa: E402
-from api.gmail.client import GmailClient  # noqa: E402
-from api.gmail.exceptions import GmailNotFoundError, GmailScopeError  # noqa: E402
-from api.gmail.hooks import (  # noqa: E402
+from api.gmail.auth import TokenStore
+from api.gmail.client import GmailClient
+from api.gmail.exceptions import GmailNotFoundError, GmailScopeError
+from api.gmail.hooks import (
     EmailEvent,
     LoggingHook,
     classify_direction,

@@ -22,7 +22,7 @@ from api.addon.models import (
     PushCard,
     UpdateCard,
 )
-from api.gmail.exceptions import GmailValidationError
+from api.gmail.exceptions import GmailScopeError, GmailValidationError
 from api.scheduling.cards import (
     build_add_time_slot_form,
     build_auth_required,
@@ -105,9 +105,7 @@ async def _check_gmail_auth(request: Request, user_email: str) -> CardResponse |
     gmail = getattr(request.app.state, "gmail", None)
     if not gmail:
         return None  # GmailClient not configured — skip auth check
-    if not gmail._token_store:
-        return None
-    has = await gmail._token_store.has_token(user_email)
+    has = await gmail.has_token(user_email)
     if has:
         return None
     # Build the OAuth authorization URL
@@ -201,6 +199,11 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     handler = _ACTION_HANDLERS.get(fn or "", _handle_unknown)
     try:
         card = await handler(body, svc, email)
+    except GmailScopeError as exc:
+        logger.warning("Gmail scope error in action %s: %s", fn, exc)
+        base = str(request.url).rsplit("/addon/", 1)[0]
+        auth_url = f"{base}/addon/oauth/start?user_email={email}"
+        card = build_auth_required(auth_url)
     except GmailValidationError as exc:
         logger.warning("Gmail validation error in action %s: %s", fn, exc)
         card = build_error_card(str(exc))

@@ -9,16 +9,17 @@ SET last_history_id = :last_history_id, updated_at = now()
 WHERE user_email = :user_email;
 
 -- name: update_watch_state(user_email, last_history_id, watch_expiry)!
--- Update both history cursor and watch expiration after watch registration.
+-- Update watch expiration and advance history cursor (never backward).
 UPDATE gmail_tokens
-SET last_history_id = :last_history_id,
+SET last_history_id = GREATEST(last_history_id, :last_history_id),
     watch_expiry = :watch_expiry,
     updated_at = now()
 WHERE user_email = :user_email;
 
 -- name: get_all_watched_emails
--- List all coordinator emails with stored tokens (for poll fallback).
-SELECT user_email FROM gmail_tokens;
+-- List coordinator emails with active watches (for poll fallback and watch renewal).
+SELECT user_email FROM gmail_tokens
+WHERE watch_expiry IS NOT NULL AND watch_expiry > now();
 
 -- name: is_message_processed(gmail_message_id)$
 -- Check if a message has already been processed (dedup).

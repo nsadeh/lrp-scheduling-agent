@@ -6,6 +6,7 @@ OIDC bearer token, and enqueues an arq job for background processing.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -40,11 +41,18 @@ async def _verify_pubsub_token(request: Request) -> dict:
     if not auth_header.startswith("Bearer "):
         raise ValueError("Missing bearer token")
 
+    if not EXPECTED_AUDIENCE:
+        raise ValueError(
+            "PUBSUB_WEBHOOK_AUDIENCE is not configured — "
+            "refusing to verify token without audience validation"
+        )
+
     token = auth_header[7:]
-    claims = id_token.verify_oauth2_token(
+    claims = await asyncio.to_thread(
+        id_token.verify_oauth2_token,
         token,
         google_requests.Request(),
-        audience=EXPECTED_AUDIENCE or None,
+        audience=EXPECTED_AUDIENCE,
     )
 
     if claims.get("email") != PUBSUB_SERVICE_ACCOUNT:
@@ -89,8 +97,11 @@ async def gmail_webhook(request: Request) -> Response:
         return Response(status_code=200)
 
     # Check if we have credentials for this coordinator
-    token_store = request.app.state.gmail._token_store
-    if not await token_store.has_token(coordinator_email):
+    gmail = getattr(request.app.state, "gmail", None)
+    if not gmail:
+        logger.warning("GmailClient not initialized — cannot process webhook")
+        return Response(status_code=200)
+    if not await gmail.has_token(coordinator_email):
         logger.debug("webhook for unknown coordinator: %s", coordinator_email)
         return Response(status_code=200)
 
