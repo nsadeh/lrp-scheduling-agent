@@ -8,12 +8,15 @@ from typing import TYPE_CHECKING
 from cryptography.fernet import Fernet, InvalidToken
 from google.oauth2.credentials import Credentials
 
-from api.gmail.exceptions import GmailAuthError, GmailUserNotAuthorizedError
+from api.gmail.exceptions import GmailAuthError, GmailScopeError, GmailUserNotAuthorizedError
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from psycopg_pool import AsyncConnectionPool
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+_DEFAULT_SCOPES = "https://www.googleapis.com/auth/gmail.modify"
+SCOPES = os.environ.get("REQUIRED_SCOPES", _DEFAULT_SCOPES).split(",")
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 _LOAD_SQL = "SELECT refresh_token_encrypted, scopes FROM gmail_tokens WHERE user_email = %(email)s"
@@ -56,7 +59,11 @@ class TokenStore:
             )
 
     async def load_credentials(self, user_email: str) -> Credentials:
-        """Load a user's stored token and return Google OAuth Credentials."""
+        """Load a user's stored token and return Google OAuth Credentials.
+
+        Validates that stored scopes cover all REQUIRED_SCOPES. Raises
+        GmailScopeError if re-authorization is needed.
+        """
         async with self._pool.connection() as conn:
             cur = await conn.execute(_LOAD_SQL, {"email": user_email})
             row = await cur.fetchone()
@@ -64,6 +71,15 @@ class TokenStore:
         if row is None:
             raise GmailUserNotAuthorizedError(
                 f"No stored token for {user_email}. User must authorize via the add-on first."
+            )
+
+        granted = set(row[1])
+        required = set(SCOPES)
+        missing = required - granted
+        if missing:
+            raise GmailScopeError(
+                f"User {user_email} is missing scopes: {missing}. Re-authorization required.",
+                missing_scopes=list(missing),
             )
 
         refresh_token = self._decrypt(row[0])
@@ -93,3 +109,54 @@ class TokenStore:
             )
             row = await cur.fetchone()
             return row[0] if row else False
+
+    # --- Push pipeline state ---
+
+    async def get_history_id(self, user_email: str) -> str | None:
+        """Load the last-processed Gmail history ID for incremental sync."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT last_history_id FROM gmail_tokens WHERE user_email = %(email)s",
+                {"email": user_email},
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    async def update_history_id(self, user_email: str, history_id: str) -> None:
+        """Advance the history cursor after successful sync."""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                """
+                UPDATE gmail_tokens
+                SET last_history_id = %(history_id)s, updated_at = now()
+                WHERE user_email = %(email)s
+                """,
+                {"email": user_email, "history_id": history_id},
+            )
+
+    async def update_watch_state(
+        self, user_email: str, history_id: str, watch_expiry: datetime
+    ) -> None:
+        """Update both history cursor and watch expiration after watch registration."""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                """
+                UPDATE gmail_tokens
+                SET last_history_id = %(history_id)s,
+                    watch_expiry = %(watch_expiry)s,
+                    updated_at = now()
+                WHERE user_email = %(email)s
+                """,
+                {
+                    "email": user_email,
+                    "history_id": history_id,
+                    "watch_expiry": watch_expiry,
+                },
+            )
+
+    async def get_all_watched_emails(self) -> list[str]:
+        """List all coordinator emails with stored tokens."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("SELECT user_email FROM gmail_tokens")
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]

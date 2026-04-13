@@ -39,6 +39,11 @@ A human-in-the-loop scheduling agent for Long Ridge Partners, an executive searc
 - `ENCORE_API_URL` — Cluein data connector endpoint for Encore
 - `ENCORE_API_KEY` — Cluein API key
 - `ANTHROPIC_API_KEY` — Claude API key for agent reasoning
+- `PUBSUB_TOPIC` — Google Cloud Pub/Sub topic for Gmail push notifications (e.g., `projects/my-project/topics/gmail-push`)
+- `PUBSUB_WEBHOOK_AUDIENCE` — Expected OIDC audience for verifying Pub/Sub push tokens (must be set in production)
+- `PUBSUB_SERVICE_ACCOUNT` — Email of the service account that signs Pub/Sub push messages (default: `gmail-api-push@system.gserviceaccount.com`)
+- `GMAIL_TOKEN_ENCRYPTION_KEY` — Fernet key for encrypting stored Gmail OAuth refresh tokens
+- `REQUIRED_SCOPES` — Comma-separated list of Gmail OAuth scopes required for coordinator tokens
 
 ## Metrics (Business Impact)
 - **Mean Time to Interview (MTTI):** Hours from client request to interview (lower is better)

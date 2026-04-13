@@ -8,8 +8,12 @@ docker compose up -d
 ./scripts/dev-api.sh &
 API_PID=$!
 
-# Trap to clean up on exit
-trap "kill $API_PID 2>/dev/null; docker compose stop" EXIT
+# Run arq worker (push pipeline)
+./scripts/dev-worker.sh &
+WORKER_PID=$!
 
-echo "All services running. Press Ctrl+C to stop."
+# Trap to clean up on exit
+trap "kill $API_PID $WORKER_PID 2>/dev/null; docker compose stop" EXIT
+
+echo "All services running (API + worker). Press Ctrl+C to stop."
 wait
