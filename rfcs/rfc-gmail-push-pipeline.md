@@ -563,6 +563,46 @@ It does **not** store email subjects, bodies, sender addresses, or any email con
 
 The encrypted refresh token storage in `TokenStore` (Fernet encryption, Postgres storage) is unchanged. The new `last_history_id` and `watch_expiry` columns contain non-sensitive operational state.
 
+### Configurable Scope Checking and Re-Auth
+
+The push pipeline itself does not require new OAuth scopes — `gmail.modify` covers `users.watch()`, `users.history.list()`, and `users.messages.get()`. However, the application will need additional scopes as we add Calendar, Encore, and other integrations. Rather than hardcoding scopes as a Python constant, we introduce a configurable scope system that detects stale grants and prompts re-authorization.
+
+**Design:**
+
+1. **`.env` declares required scopes:**
+
+```
+REQUIRED_SCOPES=https://www.googleapis.com/auth/gmail.modify
+```
+
+Comma-separated. As features are added (Calendar, Encore), new scopes are appended here. The Python constant `SCOPES` in `auth.py` reads from this env var instead of being hardcoded.
+
+2. **`TokenStore` validates scope coverage on credential load:**
+
+When `load_credentials()` is called, compare the user's stored scopes (already in the `scopes TEXT[]` column of `gmail_tokens`) against `REQUIRED_SCOPES`. If any required scope is missing from the stored grant, raise a new `GmailScopeError` (subclass of `GmailAuthError`) instead of returning credentials.
+
+```python
+required = set(REQUIRED_SCOPES)
+granted = set(row[1])  # scopes column from gmail_tokens
+missing = required - granted
+if missing:
+    raise GmailScopeError(
+        f"User {user_email} is missing scopes: {missing}. Re-authorization required.",
+        missing_scopes=list(missing),
+    )
+```
+
+3. **Callers handle `GmailScopeError` as a re-auth prompt:**
+
+- **Add-on sidebar:** Catches `GmailScopeError` and renders the existing auth-required card, directing the coordinator to re-authorize.
+- **Push pipeline workers:** Catches `GmailScopeError`, logs a warning, and skips processing for that coordinator. The coordinator will be prompted to re-auth next time they open the sidebar.
+
+4. **OAuth consent flow uses configured scopes:**
+
+The `oauth_start` endpoint already reads `SCOPES` from `auth.py`. By changing that constant to read from `.env`, the consent screen automatically requests the current required scopes when a coordinator re-authorizes.
+
+**Why this matters now:** Google OAuth refresh tokens are scoped to the grant that created them. When we add Calendar scopes later, every coordinator will need to re-consent. Having the system detect this automatically (instead of silently failing with 403s) prevents a class of "the agent stopped working" support tickets.
+
 ## File Summary
 
 | File | Status | Purpose |
@@ -570,7 +610,8 @@ The encrypted refresh token storage in `TokenStore` (Fernet encryption, Postgres
 | `services/api/migrations/0003_gmail_push_pipeline.py` | New | Schema for history tracking + dedup |
 | `services/api/queries/gmail_push.sql` | New | aiosql queries for push pipeline tables |
 | `services/api/src/api/gmail/client.py` | Modified | Add `watch`, `stop_watch`, `history_list`, `get_profile` |
-| `services/api/src/api/gmail/auth.py` | Modified | Add history/watch state methods to TokenStore |
+| `services/api/src/api/gmail/auth.py` | Modified | Add history/watch state methods, scope validation, `GmailScopeError` |
+| `services/api/src/api/gmail/exceptions.py` | Modified | Add `GmailScopeError` exception |
 | `services/api/src/api/gmail/hooks.py` | New | EmailEvent model, EmailHook protocol, classification logic |
 | `services/api/src/api/gmail/webhook.py` | New | Authenticated Pub/Sub webhook endpoint |
 | `services/api/src/api/gmail/workers.py` | New | arq worker functions (push, poll, renewal, cleanup) |
