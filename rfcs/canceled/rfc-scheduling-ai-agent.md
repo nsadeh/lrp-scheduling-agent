@@ -3,7 +3,7 @@
 | Field         | Value                                 |
 | ------------- | ------------------------------------- |
 | **Author(s)** | Kinematic Labs                        |
-| **Status**    | Draft                                 |
+| **Status**    | Canceled                              |
 | **Created**   | 2026-04-09                            |
 | **Updated**   | 2026-04-09                            |
 | **Reviewers** | LRP Engineering, LRP Coordinator team |
@@ -183,13 +183,13 @@ The Gmail API has per-user rate limits (250 quota units/second per user) and per
 
 **Rate limit strategy:**
 
-| Concern | Mitigation |
-| ------- | ---------- |
+| Concern                                              | Mitigation                                                                                                                                                                                 |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Burst push notifications (rapid-fire thread replies) | Deduplicate by `gmail_thread_id` with a Redis debounce lock: at most one agent run per thread per 60 seconds. Later messages in the burst are deferred, then caught by the next pull sync. |
-| Per-user quota exhaustion | arq job queue with per-user concurrency limit of 1. Jobs for the same coordinator serialize. |
-| Per-project quota exhaustion | Exponential backoff on 429 responses (1s → 2s → 4s → ... → 60s cap). Jobs re-enqueue themselves on transient failures. |
-| Gmail API outage | Jobs fail and re-enqueue with backoff. Pull sync catches missed messages when API recovers. |
-| Stale OAuth tokens | On 401, attempt a single token refresh. If refresh fails, mark coordinator as needing re-auth and surface in sidebar. |
+| Per-user quota exhaustion                            | arq job queue with per-user concurrency limit of 1. Jobs for the same coordinator serialize.                                                                                               |
+| Per-project quota exhaustion                         | Exponential backoff on 429 responses (1s → 2s → 4s → ... → 60s cap). Jobs re-enqueue themselves on transient failures.                                                                     |
+| Gmail API outage                                     | Jobs fail and re-enqueue with backoff. Pull sync catches missed messages when API recovers.                                                                                                |
+| Stale OAuth tokens                                   | On 401, attempt a single token refresh. If refresh fails, mark coordinator as needing re-auth and surface in sidebar.                                                                      |
 
 **Error budget:** We log all Gmail API errors to Langfuse as trace events (see Observability section). If error rate exceeds 5% of requests over a 15-minute window, an alert fires.
 
@@ -240,12 +240,14 @@ The agent is the core of this system. We follow the Agent Development Life Cycle
 The agent is a **single-shot reasoning function**: it takes a fully assembled context (email + thread + loop state + contacts) and returns a structured suggestion (classification + action + optional draft). It does not maintain conversation state, does not call tools, and does not iterate. Every invocation is independent.
 
 **What it does:**
+
 - Classifies incoming emails into scheduling categories
 - Determines the next action based on the loop's state machine
 - Drafts response emails matching LRP's communication style
 - Identifies when it's uncertain and asks the coordinator
 
 **What it does NOT do:**
+
 - Send emails (no send capability in its tools)
 - Create or modify loops directly (suggestions are proposals, not actions)
 - Access external systems (no Encore, no Calendar — all context is pre-assembled)
@@ -257,10 +259,10 @@ The agent must not be tightly coupled to a single LLM provider. We introduce a t
 
 **Two-model pipeline:** The agent uses different models for classification vs. drafting to optimize cost:
 
-| Step | Primary Model | Fallback Model | Rationale |
-| ---- | ------------- | -------------- | --------- |
-| Classification | Claude Haiku | GPT-4o-mini | Fast, cheap. Classification is structured output, not creative. ~$0.001/call. |
-| Draft generation | Claude Sonnet | GPT-4o | Only runs when a draft is needed (~40% of classified emails). These are simple scheduling emails, not nuanced writing. ~$0.01/call. |
+| Step             | Primary Model | Fallback Model | Rationale                                                                                                                           |
+| ---------------- | ------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Classification   | Claude Haiku  | GPT-4o-mini    | Fast, cheap. Classification is structured output, not creative. ~$0.001/call.                                                       |
+| Draft generation | Claude Sonnet | GPT-4o         | Only runs when a draft is needed (~40% of classified emails). These are simple scheduling emails, not nuanced writing. ~$0.01/call. |
 
 This two-step approach roughly halves LLM cost: emails classified as `unrelated`, `informational`, or `no_action` never hit the more expensive drafting model.
 
@@ -398,30 +400,30 @@ class DraftEmail:
 
 **Email classification categories:**
 
-| Classification             | Description                                       | Example                                                 |
-| -------------------------- | ------------------------------------------------- | ------------------------------------------------------- |
-| `new_interview_request`    | Client asking to interview a candidate             | "I'd like to meet John Smith for a first round"         |
-| `availability_response`    | Recruiter/candidate providing available times      | "John is free Tuesday 2-4pm and Thursday 10am-12pm"     |
-| `time_confirmation`        | Client confirming a specific interview time        | "Tuesday 2pm works for us"                              |
-| `reschedule_request`       | Any party asking to move a scheduled interview     | "Something came up, can we move to next week?"          |
-| `cancellation`             | Interview being cancelled                          | "We've decided not to proceed with this candidate"      |
-| `follow_up_needed`         | A reply that needs coordinator attention but isn't a clear state transition | "Let me check and get back to you" |
-| `informational`            | No action needed                                   | "Thanks for confirming!"                                |
-| `unrelated`                | Not about scheduling                               | "Can you update the JD for this role?"                  |
+| Classification          | Description                                                                 | Example                                             |
+| ----------------------- | --------------------------------------------------------------------------- | --------------------------------------------------- |
+| `new_interview_request` | Client asking to interview a candidate                                      | "I'd like to meet John Smith for a first round"     |
+| `availability_response` | Recruiter/candidate providing available times                               | "John is free Tuesday 2-4pm and Thursday 10am-12pm" |
+| `time_confirmation`     | Client confirming a specific interview time                                 | "Tuesday 2pm works for us"                          |
+| `reschedule_request`    | Any party asking to move a scheduled interview                              | "Something came up, can we move to next week?"      |
+| `cancellation`          | Interview being cancelled                                                   | "We've decided not to proceed with this candidate"  |
+| `follow_up_needed`      | A reply that needs coordinator attention but isn't a clear state transition | "Let me check and get back to you"                  |
+| `informational`         | No action needed                                                            | "Thanks for confirming!"                            |
+| `unrelated`             | Not about scheduling                                                        | "Can you update the JD for this role?"              |
 
 **Suggested actions:**
 
-| Action                     | Stage Transition                              | Includes Draft? |
-| -------------------------- | --------------------------------------------- | --------------- |
-| `draft_to_recruiter`       | NEW → AWAITING_CANDIDATE                      | Yes             |
-| `draft_to_client`          | AWAITING_CANDIDATE → AWAITING_CLIENT          | Yes             |
-| `draft_confirmation`       | AWAITING_CLIENT → SCHEDULED                   | Yes             |
-| `draft_follow_up`          | (no transition)                                | Yes             |
-| `request_new_availability` | AWAITING_CLIENT → AWAITING_CANDIDATE          | Yes             |
-| `mark_cold`                | Any → COLD                                    | No              |
-| `create_loop`              | (new loop)                                    | No (pre-fills loop form) |
-| `ask_coordinator`          | (no transition)                                | No              |
-| `no_action`                | (no transition)                                | No              |
+| Action                     | Stage Transition                     | Includes Draft?          |
+| -------------------------- | ------------------------------------ | ------------------------ |
+| `draft_to_recruiter`       | NEW → AWAITING_CANDIDATE             | Yes                      |
+| `draft_to_client`          | AWAITING_CANDIDATE → AWAITING_CLIENT | Yes                      |
+| `draft_confirmation`       | AWAITING_CLIENT → SCHEDULED          | Yes                      |
+| `draft_follow_up`          | (no transition)                      | Yes                      |
+| `request_new_availability` | AWAITING_CLIENT → AWAITING_CANDIDATE | Yes                      |
+| `mark_cold`                | Any → COLD                           | No                       |
+| `create_loop`              | (new loop)                           | No (pre-fills loop form) |
+| `ask_coordinator`          | (no transition)                      | No                       |
+| `no_action`                | (no transition)                      | No                       |
 
 ##### 3.4 Agent Implementation
 
@@ -490,14 +492,14 @@ Every agent run produces a Langfuse trace. This is non-negotiable — we cannot 
 
 **What we trace:**
 
-| Observation | Type | Data |
-| ----------- | ---- | ---- |
-| `agent-run` | Trace | email subject, thread ID, loop ID, coordinator |
-| `pre-filter` | Span | pass/fail, reason, latency |
-| `context-assembly` | Span | loop state, actor count, thread message count |
-| `llm-call` | Generation | model, prompt, response, tokens, latency, cost |
-| `response-parsing` | Span | success/fail, classification, action |
-| `suggestion-persist` | Span | suggestion ID, status |
+| Observation          | Type       | Data                                           |
+| -------------------- | ---------- | ---------------------------------------------- |
+| `agent-run`          | Trace      | email subject, thread ID, loop ID, coordinator |
+| `pre-filter`         | Span       | pass/fail, reason, latency                     |
+| `context-assembly`   | Span       | loop state, actor count, thread message count  |
+| `llm-call`           | Generation | model, prompt, response, tokens, latency, cost |
+| `response-parsing`   | Span       | success/fail, classification, action           |
+| `suggestion-persist` | Span       | suggestion ID, status                          |
 
 **Scores attached to each trace:**
 
@@ -520,13 +522,13 @@ Following the Agent Development Life Cycle, we define evals before building:
 
 **Success KPIs:**
 
-| KPI | Target | How Measured |
-| --- | ------ | ------------ |
-| Classification accuracy | > 90% | Supervisor eval against labeled dataset |
-| Draft acceptance rate (sent as-is) | > 60% | Production Langfuse scores |
-| Agent suggestion acceptance rate | > 80% | Production Langfuse scores |
-| Time-to-suggestion | < 10 seconds | Langfuse trace latency |
-| Cost per suggestion | < $0.02 | Langfuse token tracking (Haiku classify + Sonnet draft) |
+| KPI                                | Target       | How Measured                                            |
+| ---------------------------------- | ------------ | ------------------------------------------------------- |
+| Classification accuracy            | > 90%        | Supervisor eval against labeled dataset                 |
+| Draft acceptance rate (sent as-is) | > 60%        | Production Langfuse scores                              |
+| Agent suggestion acceptance rate   | > 80%        | Production Langfuse scores                              |
+| Time-to-suggestion                 | < 10 seconds | Langfuse trace latency                                  |
+| Cost per suggestion                | < $0.02      | Langfuse token tracking (Haiku classify + Sonnet draft) |
 
 **Eval dataset:** Start with 5 real scheduling threads from the existing MTTI computation archive, each labeled with expected classification, expected action, and a reference draft. Expand to 50+ as production data flows in and the flywheel matures.
 
@@ -534,10 +536,10 @@ Following the Agent Development Life Cycle, we define evals before building:
 
 ```json
 {
-    "name": "classification_relevance",
-    "type": "llm_judge",
-    "prompt": "Email: {{email_subject}}\nClassification: {{classification}}\n\nIs this classification correct for the email? Answer PASS or FAIL, then explain.",
-    "model": "claude-haiku"
+  "name": "classification_relevance",
+  "type": "llm_judge",
+  "prompt": "Email: {{email_subject}}\nClassification: {{classification}}\n\nIs this classification correct for the email? Answer PASS or FAIL, then explain.",
+  "model": "claude-haiku"
 }
 ```
 
@@ -713,13 +715,13 @@ When the coordinator opens a specific email, the sidebar shows the suggestion fo
 
 **Action buttons:**
 
-| Button       | Behavior                                                              |
-| ------------ | --------------------------------------------------------------------- |
-| **Send / Approve** | Creates Gmail draft then sends it. Records `accepted` on suggestion. Advances stage. |
-| **Edit**     | Opens compose card (existing) pre-filled with agent's draft. After send, records `edited` + captures diff as feedback. |
-| **Reject / Dismiss** | Marks suggestion `rejected`. Optionally captures feedback text. |
-| **Answer** (for `ask_coordinator`) | Free-text response field. Agent re-runs with coordinator's answer as additional context. |
-| **Create Loop** (for `create_loop`) | Opens create-loop form pre-filled with agent's extracted data. |
+| Button                              | Behavior                                                                                                               |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Send / Approve**                  | Creates Gmail draft then sends it. Records `accepted` on suggestion. Advances stage.                                   |
+| **Edit**                            | Opens compose card (existing) pre-filled with agent's draft. After send, records `edited` + captures diff as feedback. |
+| **Reject / Dismiss**                | Marks suggestion `rejected`. Optionally captures feedback text.                                                        |
+| **Answer** (for `ask_coordinator`)  | Free-text response field. Agent re-runs with coordinator's answer as additional context.                               |
+| **Create Loop** (for `create_loop`) | Opens create-loop form pre-filled with agent's extracted data.                                                         |
 
 **Agent unavailable:** When both LLM providers are down, the Actions tab shows a non-intrusive banner: "Agent unavailable — manual workflow active." All manual controls (create loop, send email, advance stage) continue to work normally. The coordinator reverts to their pre-agent workflow. When the agent recovers, it processes any missed emails via the pull sync and suggestions appear.
 
@@ -735,32 +737,32 @@ Since we don't currently have Encore/Cluein integration, the agent relies on:
 
 **Pre-fill strategy for `create_loop` suggestions:**
 
-| Field | Source | Confidence |
-| ----- | ------ | ---------- |
-| Client contact | Sender email matched to `client_contacts` table | High (if match found) |
-| Client company | From matched client contact record | High |
-| Candidate name | Parsed from email body by agent | Medium |
-| Recruiter | Matched from `contacts` table by candidate/company context | Low — often left blank for coordinator to fill |
-| Title | Generated by agent (e.g., "Smith → Acme Capital") | Medium |
+| Field          | Source                                                     | Confidence                                     |
+| -------------- | ---------------------------------------------------------- | ---------------------------------------------- |
+| Client contact | Sender email matched to `client_contacts` table            | High (if match found)                          |
+| Client company | From matched client contact record                         | High                                           |
+| Candidate name | Parsed from email body by agent                            | Medium                                         |
+| Recruiter      | Matched from `contacts` table by candidate/company context | Low — often left blank for coordinator to fill |
+| Title          | Generated by agent (e.g., "Smith → Acme Capital")          | Medium                                         |
 
-The recruiter is typically *not* identifiable from the initial client email. The agent pre-fills everything it can and leaves the recruiter field for the coordinator. This is fine — the coordinator knows which recruiter owns each candidate.
+The recruiter is typically _not_ identifiable from the initial client email. The agent pre-fills everything it can and leaves the recruiter field for the coordinator. This is fine — the coordinator knows which recruiter owns each candidate.
 
 ### Error Handling
 
-| Failure Mode                        | Handling                                                      |
-| ----------------------------------- | ------------------------------------------------------------- |
-| Gmail push delayed or missing       | Pull sync every 5 min catches missed messages                 |
-| Gmail API rate limit (429)          | Exponential backoff, re-enqueue job via arq                   |
-| Gmail API outage                    | Jobs re-enqueue with backoff; pull sync recovers on restore   |
-| OAuth token expired                 | Auto-refresh; if fails, mark coordinator for re-auth          |
-| LLM primary provider down           | Automatic fallback to OpenAI; if both down, skip agent, surface banner |
-| LLM returns unparseable response    | Schema validation guardrail catches it; log to Langfuse; no suggestion created |
-| Agent misclassifies email           | Coordinator rejects; feedback stored as Langfuse score        |
-| Agent suggests invalid transition   | Action validation guardrail catches it; log mismatch          |
-| Duplicate push notifications        | Idempotent: `processed_messages` table deduplicates           |
-| Coordinator deletes email/thread    | No impact — our DB is source of truth; loop state preserved   |
-| Thread matches multiple loops       | Present all matches to coordinator; agent picks most likely    |
-| History ID becomes invalid          | Fall back to full sync of last 24 hours                       |
+| Failure Mode                      | Handling                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| Gmail push delayed or missing     | Pull sync every 5 min catches missed messages                                  |
+| Gmail API rate limit (429)        | Exponential backoff, re-enqueue job via arq                                    |
+| Gmail API outage                  | Jobs re-enqueue with backoff; pull sync recovers on restore                    |
+| OAuth token expired               | Auto-refresh; if fails, mark coordinator for re-auth                           |
+| LLM primary provider down         | Automatic fallback to OpenAI; if both down, skip agent, surface banner         |
+| LLM returns unparseable response  | Schema validation guardrail catches it; log to Langfuse; no suggestion created |
+| Agent misclassifies email         | Coordinator rejects; feedback stored as Langfuse score                         |
+| Agent suggests invalid transition | Action validation guardrail catches it; log mismatch                           |
+| Duplicate push notifications      | Idempotent: `processed_messages` table deduplicates                            |
+| Coordinator deletes email/thread  | No impact — our DB is source of truth; loop state preserved                    |
+| Thread matches multiple loops     | Present all matches to coordinator; agent picks most likely                    |
+| History ID becomes invalid        | Fall back to full sync of last 24 hours                                        |
 
 ### Data Flow: End-to-End Example
 
