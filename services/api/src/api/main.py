@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
 
     redis = getattr(app.state, "redis", None)
     if redis:
-        redis.close()
+        await redis.close()
     await pool.close()
 
 
