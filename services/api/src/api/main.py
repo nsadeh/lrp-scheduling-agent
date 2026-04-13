@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 import sentry_sdk  # noqa: E402
+from arq import create_pool  # noqa: E402
+from arq.connections import RedisSettings  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
@@ -17,6 +19,8 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
+from api.gmail.hooks import LoggingHook  # noqa: E402
+from api.gmail.webhook import webhook_router  # noqa: E402
 from api.scheduling.service import LoopService  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -51,8 +55,24 @@ async def lifespan(app: FastAPI):
     app.state.scheduling = LoopService(db_pool=pool, gmail=gmail)
     logger.info("LoopService initialized")
 
+    # Redis for arq job queue (push pipeline)
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    try:
+        redis = await create_pool(RedisSettings.from_dsn(redis_url))
+        app.state.redis = redis
+        logger.info("Redis pool connected for push pipeline")
+    except Exception:
+        app.state.redis = None
+        logger.warning("Redis not available — push pipeline disabled, poll fallback only")
+
+    # Email hook — default is logging, replaced by agent in production
+    app.state.email_hook = LoggingHook()
+
     yield
 
+    redis = getattr(app.state, "redis", None)
+    if redis:
+        redis.close()
     await pool.close()
 
 
@@ -65,6 +85,7 @@ if static_dir.exists():
 
 app.include_router(addon_router)
 app.include_router(oauth_router)
+app.include_router(webhook_router)
 
 
 @app.get("/health")
