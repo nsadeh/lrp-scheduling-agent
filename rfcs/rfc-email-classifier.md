@@ -264,26 +264,24 @@ The user prompt assembles the classification context. Key changes from v1:
 
 **Additions:**
 - `{{active_loops_summary}}` — coordinator's currently active loops (for thread matching on unlinked threads)
-- `{{coordinator_context}}` — coordinator name and email (for direction inference)
+- `{{direction}}` — whether the email is incoming or outgoing (for state sync)
+
+**Simplification:** The v1 prompt had separate template variables for every email field (`{{from_name}}`, `{{from_email}}`, `{{subject}}`, `{{date}}`, `{{body}}`, `{{to_emails}}`, `{{cc_emails}}`). The v2 prompt replaces these with a single `{{email}}` variable. Formatting the email into a human-readable block (headers + body) is the code's responsibility, not the template's. This keeps the prompt template stable when the email model changes and avoids tight coupling between the LangFuse prompt and the `Message` Pydantic schema.
 
 **Template variables:**
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `{{from_name}}` | `message.from_.name` | Sender display name |
-| `{{from_email}}` | `message.from_.email` | Sender email address |
-| `{{to_emails}}` | `message.to` | Recipient list |
-| `{{cc_emails}}` | `message.cc` | CC list |
-| `{{subject}}` | `message.subject` | Email subject line |
-| `{{date}}` | `message.date` | Message timestamp |
-| `{{body}}` | `message.body_text` | Email body (plain text) |
-| `{{thread_history}}` | Thread messages, newest first | Prior messages (truncated from oldest) |
-| `{{loop_state}}` | Linked loop's stages/actors/events | Current state if thread is linked |
-| `{{active_loops_summary}}` | Coordinator's active loops | For matching unlinked threads |
-| `{{events}}` | Recent `loop_events` | Last 10 events for context |
-| `{{coordinator_context}}` | Coordinator record | Name and email |
+| `{{email}}` | `format_email(message)` | Pre-formatted email block: From, To, CC, Subject, Date, Direction, Body |
+| `{{thread_history}}` | `format_thread_history(messages)` | Prior messages, newest first (truncated from oldest) |
+| `{{loop_state}}` | `format_loop_state(loop)` | Linked loop's stages, actors, events; or "No matching loop" |
+| `{{active_loops_summary}}` | `format_active_loops(loops)` | Coordinator's active loops for thread matching |
+| `{{events}}` | `format_events(events)` | Last 10 loop events for context |
+| `{{direction}}` | `EmailEvent.direction` | `"incoming"` or `"outgoing"` |
 
-**Outgoing email context:** When classifying an outgoing email (coordinator sent), the user prompt includes an additional `{{direction}}` variable set to `"outgoing"` and the system prompt instructs the classifier to answer "what action did the coordinator just take?" rather than "what should happen next?" The classifier should infer the state transition from the email content (e.g., coordinator forwarding times to a client implies `AWAITING_CANDIDATE → AWAITING_CLIENT`) and emit an `ADVANCE_STAGE` suggestion with `auto_advance: true`. If the outgoing email doesn't map to a clear state transition, no suggestion is created.
+Each `format_*` function lives in the prompt builder module and is responsible for rendering its domain object into a human-readable text block. The LangFuse template only knows about these pre-formatted strings — it never references `message.from_.email` or `loop.stages[0].state` directly. This means the prompt template can be iterated in LangFuse without code changes, and the code can refactor data models without breaking the template.
+
+**Outgoing email context:** When `{{direction}}` is `"outgoing"`, the system prompt instructs the classifier to answer "what action did the coordinator just take?" rather than "what should happen next?" The classifier should infer the state transition from the email content (e.g., coordinator forwarding times to a client implies `AWAITING_CANDIDATE → AWAITING_CLIENT`) and emit an `ADVANCE_STAGE` suggestion with `auto_advance: true`. If the outgoing email doesn't map to a clear state transition, no suggestion is created.
 
 **Thread history truncation:** The full thread is included newest-first. If the thread exceeds a configurable token budget (default: 3000 tokens, ~12,000 characters), older messages are truncated with a `[...N earlier messages truncated...]` marker. This keeps the most decision-relevant context (recent replies) while bounding input size.
 
