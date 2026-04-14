@@ -14,4 +14,9 @@ async def client():
 async def test_health(client: AsyncClient):
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    data = resp.json()
+    assert data["status"] == "ok"
+    # AI components report their status (disabled when keys not set in tests)
+    assert "ai" in data
+    assert isinstance(data["ai"]["langfuse"], bool)
+    assert isinstance(data["ai"]["llm_service"], bool)

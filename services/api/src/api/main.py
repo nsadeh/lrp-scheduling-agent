@@ -10,13 +10,14 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 import sentry_sdk  # noqa: E402
 from arq import create_pool  # noqa: E402
 from arq.connections import RedisSettings  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
 from sentry_sdk.integrations.asyncio import AsyncioIntegration  # noqa: E402
 from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
+from api.ai import LangfuseFlushMiddleware, init_langfuse, init_llm_service  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
 from api.gmail.hooks import LoggingHook  # noqa: E402
@@ -68,7 +69,18 @@ async def lifespan(app: FastAPI):
     # Email hook — default is logging, replaced by agent in production
     app.state.email_hook = LoggingHook()
 
+    # AI infrastructure — degrades gracefully when keys not set
+    langfuse = init_langfuse()
+    llm_service = init_llm_service()
+    app.state.langfuse = langfuse
+    app.state.llm_service = llm_service
+
     yield
+
+    # Cleanup — flush LangFuse traces before shutdown
+    if langfuse:
+        langfuse.flush()
+        langfuse.shutdown()
 
     redis = getattr(app.state, "redis", None)
     if redis:
@@ -83,11 +95,17 @@ static_dir = Path(__file__).resolve().parent.parent.parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+app.add_middleware(LangfuseFlushMiddleware)
+
 app.include_router(addon_router)
 app.include_router(oauth_router)
 app.include_router(webhook_router)
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(request: Request):
+    components = {
+        "langfuse": getattr(request.app.state, "langfuse", None) is not None,
+        "llm_service": getattr(request.app.state, "llm_service", None) is not None,
+    }
+    return {"status": "ok", "ai": components}
