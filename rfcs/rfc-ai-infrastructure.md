@@ -147,11 +147,13 @@ The `LLMService` wraps LiteLLM's `Router` to provide multi-provider LLM calls wi
 
 **Provider chain:**
 
-| Priority | Provider  | Models Available              | Use Case                      |
-| -------- | --------- | ----------------------------- | ----------------------------- |
-| Primary  | Anthropic | claude-sonnet-4-20250514, claude-haiku-4-5-20251001 | Default for all calls         |
-| Secondary| OpenAI    | gpt-4o, gpt-4o-mini          | Failover on Anthropic failure |
-| Tertiary | Google    | gemini-2.0-flash, gemini-2.5-pro | Failover on OpenAI failure    |
+| Priority | Provider  | Use Case                      |
+| -------- | --------- | ----------------------------- |
+| Primary  | Anthropic | Default for all calls         |
+| Secondary| OpenAI    | Failover on Anthropic failure |
+| Tertiary | Google    | Failover on OpenAI failure    |
+
+Any model available from a configured provider can be used — the specific model is defined in the LangFuse prompt config's `model` field (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.5-pro`). The provider chain above only determines failover priority; it does not restrict which models are available.
 
 **Latency budget:** Total wall-clock time for any single LLM call (including all retries and failovers) is capped at **15 seconds**. The budget is allocated as:
 
@@ -211,9 +213,18 @@ router = Router(
 )
 ```
 
-**Model resolution:** When a typed endpoint specifies a model (via LangFuse prompt config or code), the service resolves it to a LiteLLM model list entry. If the specified model's provider is down, failover uses the equivalent-tier model from the next provider (e.g., Sonnet → GPT-4o → Gemini 2.5 Pro, Haiku → GPT-4o-mini → Gemini 2.0 Flash).
+**Model resolution:** The LangFuse prompt config specifies the model to use (e.g., `claude-sonnet-4-20250514`). The LLMService passes this to LiteLLM, which resolves the provider from the model name prefix and routes accordingly. If that provider is down, LiteLLM fails over to the next configured provider using the fallback model mapping.
 
-**Prompt config defaults:** If a LangFuse prompt's `config` doesn't specify `primary_model` and `secondary_model`, the service falls back to Sonnet (primary) and GPT-4o (secondary). This matches the PRD requirement.
+**Fallback model mapping:** When a provider fails, the service needs to know which model on the next provider is the appropriate substitute. This mapping is configured at startup:
+
+| Primary Model | Secondary Fallback | Tertiary Fallback |
+| ------------- | ------------------ | ----------------- |
+| Any Claude Sonnet/Opus | gpt-4o | gemini-2.5-pro |
+| Any Claude Haiku | gpt-4o-mini | gemini-2.0-flash |
+
+LiteLLM standardizes the request/response format across providers (parameter names, response envelopes, etc.), so the calling code doesn't need to know which provider handled the request.
+
+**Prompt config defaults:** If a LangFuse prompt's `config` doesn't specify a `model`, the service falls back to `claude-sonnet-4-20250514`. This matches the PRD requirement.
 
 #### 4. Typed Endpoint Factory (`endpoint.py`)
 
@@ -336,7 +347,7 @@ Both services degrade gracefully: if environment variables are missing, the serv
 
 Use the Anthropic and OpenAI Python SDKs directly with a hand-rolled `try/except` failover wrapper. No LiteLLM dependency.
 
-**Trade-offs:** Dramatically simpler dependency tree. Full control over timeout and retry behavior. But: requires manual model name normalization across providers (Anthropic uses `max_tokens`, OpenAI uses `max_completion_tokens`; response formats differ), no built-in cooldown tracking, and adding a third provider means extending custom code rather than adding a config entry.
+**Trade-offs:** Dramatically simpler dependency tree. Full control over timeout and retry behavior. But: requires manual request/response normalization across providers (different parameter names, response envelopes), no built-in cooldown tracking, and adding a third provider means extending custom code rather than adding a config entry.
 
 **Why not:** Three providers (Anthropic, OpenAI, Gemini) tip the balance toward a routing library. If we were only doing two providers, hand-rolled would be the right call.
 
@@ -466,8 +477,6 @@ The current scale is small: ~5 coordinators, ~50 emails/day across all coordinat
 2. **OTel span filtering.** How exactly do we configure the OTel exporter to only send LLM-related spans to LangFuse? The LangFuse docs suggest setting up a filtered exporter, but the configuration depends on which other OTel-instrumented libraries are in our stack (httpx, psycopg). — _Resolve during implementation._
 
 3. **LangFuse cost at scale.** LangFuse Cloud pricing is based on trace volume. At current scale (~20 traces/day) this is negligible. At what trace volume does self-hosting become worth the operational cost? — _Revisit at 10x scale (200 traces/day)._
-
-4. **Model equivalence across providers.** When failing over from Claude Sonnet to GPT-4o, the output format and quality may differ. Do we need provider-specific prompt variants, or is one prompt robust enough across providers? — _Resolve during agent endpoint development._
 
 ## Milestones
 
