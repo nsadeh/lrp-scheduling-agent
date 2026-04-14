@@ -15,6 +15,7 @@ from api.ai.endpoint import llm_endpoint
 from api.ai.errors import AIError
 from api.classifier.models import (
     ClassificationResult,
+    EmailClassification,
     SuggestedAction,
     SuggestionItem,
 )
@@ -149,7 +150,7 @@ class ClassifierHook:
             logger.error("Classification failed for message %s: %s", msg.id, exc)
             # Create a NEEDS_ATTENTION fallback suggestion
             fallback = SuggestionItem(
-                classification="follow_up_needed",
+                classification=EmailClassification.FOLLOW_UP_NEEDED,
                 action=SuggestedAction.ASK_COORDINATOR,
                 confidence=0.0,
                 summary=(
@@ -185,7 +186,17 @@ class ClassifierHook:
                 item.auto_advance = True
                 item = self._apply_guardrails(item, loop)
 
+                # Skip no-ops for outgoing emails
+                if item.action == SuggestedAction.NO_ACTION:
+                    continue
+
                 if item.action == SuggestedAction.ADVANCE_STAGE and item.target_state:
+                    # Supersede stale pending suggestions BEFORE advancing
+                    await self._suggestions.supersede_pending_for_loop(
+                        loop_id=loop.id,
+                        resolved_by=event.coordinator_email,
+                    )
+
                     # Auto-advance the stage
                     stage = loop.most_urgent_stage
                     if stage and item.target_state in ALLOWED_TRANSITIONS.get(stage.state, set()):
@@ -201,12 +212,6 @@ class ClassifierHook:
                             stage.state.value,
                             item.target_state.value,
                         )
-
-                    # Supersede any pending suggestions for this loop
-                    await self._suggestions.supersede_pending_for_loop(
-                        loop_id=loop.id,
-                        resolved_by=event.coordinator_email,
-                    )
 
                 # Persist the auto-applied suggestion
                 await self._suggestions.create_suggestion(
@@ -230,11 +235,13 @@ class ClassifierHook:
         # Format the current email
         email_text = format_email(msg)
 
-        # Get thread messages for history (the worker caches these)
-        # We re-fetch via loop_service since we don't have the thread cache here
-        thread_history = "(thread context unavailable)"
-        if hasattr(event, "_thread_messages"):
-            thread_history = format_thread_history(event._thread_messages, exclude_id=msg.id)
+        # Get thread messages for history (the worker attaches these via _thread_messages)
+        thread_messages = getattr(event, "_thread_messages", None)
+        thread_history = (
+            format_thread_history(thread_messages, exclude_id=msg.id)
+            if thread_messages
+            else "(thread context unavailable)"
+        )
 
         # Loop state
         loop_state_text = format_loop_state(loop)

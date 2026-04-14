@@ -174,6 +174,8 @@ def format_transitions() -> str:
 
 def format_classification_schema() -> str:
     """Format the ClassificationResult JSON schema for the system prompt."""
+    import json
+
     from api.classifier.models import ClassificationResult
 
-    return ClassificationResult.model_json_schema(mode="serialization").__repr__()
+    return json.dumps(ClassificationResult.model_json_schema(mode="serialization"), indent=2)

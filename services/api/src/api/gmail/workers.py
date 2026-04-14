@@ -172,6 +172,15 @@ async def renew_gmail_watches(ctx: dict) -> None:
             logger.exception("watch renewal failed for %s", coordinator_email)
 
 
+async def expire_old_suggestions(ctx: dict) -> None:
+    """Expire pending suggestions older than 72 hours."""
+    from api.classifier.suggestions import SuggestionService
+
+    pool: AsyncConnectionPool = ctx["db"]
+    service = SuggestionService(db_pool=pool)
+    await service.expire_old_suggestions()
+
+
 async def cleanup_processed_messages(ctx: dict) -> None:
     """Delete dedup records older than 30 days."""
     pool: AsyncConnectionPool = ctx["db"]
@@ -320,6 +329,7 @@ class WorkerSettings:
         cron(poll_gmail_history, second=0),  # every 60s
         cron(renew_gmail_watches, hour={0, 6, 12, 18}, minute=0, second=0),
         cron(cleanup_processed_messages, hour=3, minute=0, second=0),
+        cron(expire_old_suggestions, hour={2, 8, 14, 20}, minute=30, second=0),
     ]
     on_startup = startup
     on_shutdown = shutdown
