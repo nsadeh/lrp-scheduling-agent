@@ -141,19 +141,28 @@ The pipeline is a linear sequence with one LLM call:
 ```mermaid
 flowchart TD
     A[EmailEvent arrives] --> B{Outgoing email?}
-    B -->|Yes| C[Skip — coordinator sent this]
-    B -->|No| D[Assemble AgentContext]
-    D --> E[Call classify_email endpoint]
-    E --> F{Parse successful?}
-    F -->|No| G[Log error, create NEEDS_ATTENTION suggestion]
-    F -->|Yes| H{Any suggestions with<br/>matched loop?}
-    H -->|Yes| I[Validate action-state compatibility]
-    H -->|No| J[Persist suggestions as-is]
-    I --> J
-    J --> K[Done — suggestions in DB]
+    B -->|Yes| C{Thread linked to a loop?}
+    C -->|No| D[Skip — no loop to update]
+    C -->|Yes| E[Classify outgoing email<br/>for state sync]
+    E --> F[Auto-advance stage if confident]
+    B -->|No| G[Assemble AgentContext]
+    G --> H[Call classify_email endpoint]
+    H --> I{Parse successful?}
+    I -->|No| J[Log error, create NEEDS_ATTENTION suggestion]
+    I -->|Yes| K{Any suggestions with<br/>matched loop?}
+    K -->|Yes| L[Validate action-state compatibility]
+    K -->|No| M[Persist suggestions as-is]
+    L --> M
+    M --> N[Done — suggestions in DB]
+    F --> O[Expire stale pending suggestions<br/>for this loop]
+    O --> N
 ```
 
-**Outgoing email skip:** When the coordinator sends an email, it arrives in the push pipeline as an outgoing message. The classifier skips these — the coordinator already knows what they did. This is a cheap check on `EmailEvent.direction`.
+**Outgoing emails on loop threads trigger state sync.** When the coordinator sends an email on a thread linked to a scheduling loop, the classifier observes it to keep loop state consistent. This handles the critical case where a coordinator acts outside the agent — e.g., forwarding availability to the client directly in Gmail without going through a suggestion. Without this, the agent would suggest actions the coordinator already took, eroding trust.
+
+Outgoing emails on loop threads are classified with the same LLM call but a different behavioral expectation: the classifier answers "what did the coordinator just do?" rather than "what should the coordinator do next?" The output uses `ADVANCE_STAGE` with an `auto_advance: true` flag — the stage transition is applied automatically (no coordinator approval needed, since the coordinator already took the action). Any pending suggestions that conflict with the new state are expired.
+
+Outgoing emails on threads *not* linked to a loop are skipped — the coordinator isn't acting on a tracked process, so there's nothing to sync.
 
 **Context assembly** queries the database for:
 - The email thread's linked loop (via `loop_email_threads` join on `gmail_thread_id`)
@@ -201,6 +210,7 @@ class SuggestionItem(BaseModel):
     target_state: StageState | None = None    # for ADVANCE_STAGE
     target_loop_id: str | None = None         # for LINK_THREAD, ADVANCE_STAGE
     target_stage_id: str | None = None        # for ADVANCE_STAGE
+    auto_advance: bool = False                # True for outgoing email state sync (no approval needed)
     extracted_entities: dict = {}              # candidate_name, client_company, time_slots, etc.
     questions: list[str] = []                 # for ASK_COORDINATOR
 ```
@@ -273,6 +283,8 @@ The user prompt assembles the classification context. Key changes from v1:
 | `{{events}}` | Recent `loop_events` | Last 10 events for context |
 | `{{coordinator_context}}` | Coordinator record | Name and email |
 
+**Outgoing email context:** When classifying an outgoing email (coordinator sent), the user prompt includes an additional `{{direction}}` variable set to `"outgoing"` and the system prompt instructs the classifier to answer "what action did the coordinator just take?" rather than "what should happen next?" The classifier should infer the state transition from the email content (e.g., coordinator forwarding times to a client implies `AWAITING_CANDIDATE → AWAITING_CLIENT`) and emit an `ADVANCE_STAGE` suggestion with `auto_advance: true`. If the outgoing email doesn't map to a clear state transition, no suggestion is created.
+
 **Thread history truncation:** The full thread is included newest-first. If the thread exceeds a configurable token budget (default: 3000 tokens, ~12,000 characters), older messages are truncated with a `[...N earlier messages truncated...]` marker. This keeps the most decision-relevant context (recent replies) while bounding input size.
 
 #### 4. Thread-to-Loop Matching
@@ -328,6 +340,7 @@ CREATE TABLE agent_suggestions (
     stage_id            TEXT REFERENCES stages(id),-- NULL if not stage-specific
     classification      TEXT NOT NULL,             -- EmailClassification value
     action              TEXT NOT NULL,             -- SuggestedAction value
+    auto_advance        BOOLEAN NOT NULL DEFAULT false, -- true for outgoing state sync
     confidence          REAL NOT NULL,
     summary             TEXT NOT NULL,             -- human-readable description
     target_state        TEXT,                      -- StageState value for ADVANCE_STAGE
@@ -354,18 +367,24 @@ CREATE INDEX idx_suggestions_loop
 ```mermaid
 stateDiagram-v2
     [*] --> pending: classifier creates
+    [*] --> auto_applied: outgoing email state sync
     pending --> accepted: coordinator approves
     pending --> rejected: coordinator dismisses
     pending --> expired: TTL (72h) with no action
+    pending --> superseded: outgoing email invalidated this
     accepted --> [*]
     rejected --> [*]
     expired --> [*]
+    auto_applied --> [*]
+    superseded --> [*]
 ```
 
 - **pending** — classifier created the suggestion, awaiting coordinator action
 - **accepted** — coordinator approved; downstream systems (future drafter, state machine) should act
 - **rejected** — coordinator dismissed; logged for eval improvement
 - **expired** — no action within 72 hours; auto-resolved by cleanup cron
+- **auto_applied** — outgoing email triggered an automatic state advance (no coordinator approval needed, since the coordinator already took the action)
+- **superseded** — a newer outgoing email on the same loop invalidated this pending suggestion (e.g., coordinator already forwarded availability, so the "forward to client" suggestion is moot)
 
 **Why persist `NOT_SCHEDULING` suggestions?** Two reasons: (1) analytics — we need to measure false-negative rate (scheduling emails incorrectly classified as not-scheduling), and (2) dedup — if the same thread gets a new reply, we can check whether we already classified the thread as not-scheduling and decide whether to re-classify.
 
@@ -499,13 +518,15 @@ Errors log at `ERROR` level with Sentry capture:
 - Respect `ALLOWED_TRANSITIONS` — never suggest a state transition that isn't valid
 - Include a confidence score that correlates with actual accuracy (calibrated)
 - Provide reasoning that explains the classification (for debugging and coordinator context)
+- For outgoing emails on loop threads: infer what action the coordinator took and emit `auto_advance: true` suggestions to keep loop state in sync
+- Expire (supersede) stale pending suggestions when an outgoing email advances the loop state
 
 **The classifier MUST NOT:**
 - Generate email drafts or suggest email body text
 - Access external systems beyond what's in the context (no tool use, no web access)
 - Fabricate entities not present in the email (e.g., inventing a candidate name)
 - Suggest `LINK_THREAD` with confidence < 0.9
-- Return suggestions for outgoing emails (coordinator-sent)
+- Classify outgoing emails on threads not linked to a loop (skip these entirely)
 
 ### Evaluation Metrics
 
@@ -533,6 +554,17 @@ Errors log at `ERROR` level with Sentry capture:
 | Non-scheduling email | Recruiter asks about compensation for a different candidate | `NOT_SCHEDULING` + `NO_ACTION` | Correctly filtered, no false action |
 | Newsletter / automated | LinkedIn notification, Google Calendar reminder | `NOT_SCHEDULING` + `NO_ACTION` | Correctly filtered |
 | Informational update | Client says "Round 1 went well, looking forward to Round 2" (no scheduling action yet) | `INFORMATIONAL` + `NO_ACTION` or `ASK_COORDINATOR` | No false advance, context preserved |
+
+#### Outgoing Email State Sync
+
+| Scenario | Input | Expected Behavior | Pass Criteria |
+|----------|-------|-------------------|---------------|
+| Coordinator forwards availability to client | Outgoing email on loop thread (AWAITING_CANDIDATE stage), body contains time slots sent to client contact | `ADVANCE_STAGE` to `AWAITING_CLIENT` with `auto_advance: true`; pending "forward to client" suggestion superseded | Correct transition, stale suggestions expired |
+| Coordinator emails recruiter for availability | Outgoing email on loop thread (NEW stage), body asks recruiter for candidate times | `ADVANCE_STAGE` to `AWAITING_CANDIDATE` with `auto_advance: true` | Correct transition inferred from outgoing content |
+| Coordinator sends confirmation | Outgoing email on loop thread (AWAITING_CLIENT stage), body confirms interview time | `ADVANCE_STAGE` to `SCHEDULED` with `auto_advance: true` | Correct transition |
+| Coordinator sends unrelated reply on loop thread | Outgoing email on loop thread, body is "Thanks, I'll look into that" with no scheduling action | No suggestion created | Does not fabricate a transition for non-scheduling outgoing content |
+| Coordinator acts while suggestion is pending | Outgoing email advances stage; a pending suggestion for the same stage exists | Stage auto-advanced, pending suggestion marked `superseded` | No duplicate state transitions, stale suggestion cleaned up |
+| Outgoing email on unlinked thread | Coordinator sends email on a thread not linked to any loop | Skip — no classification attempted | No wasted LLM call |
 
 #### Edge Cases
 
