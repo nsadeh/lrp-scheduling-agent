@@ -46,12 +46,45 @@ async def startup(ctx: dict) -> None:
     ctx["db"] = pool
     ctx["token_store"] = token_store
     ctx["gmail"] = gmail
-    ctx["hook"] = LoggingHook()
+
+    # Initialize email hook: ClassifierHook if AI is configured, else LoggingHook
+    classifier_enabled = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
+    if classifier_enabled:
+        from api.ai import init_langfuse, init_llm_service
+        from api.classifier.hook import ClassifierHook
+        from api.classifier.suggestions import SuggestionService
+        from api.scheduling.service import LoopService
+
+        langfuse_client = init_langfuse()
+        llm_service = init_llm_service()
+
+        if langfuse_client and llm_service:
+            loop_service = LoopService(db_pool=pool, gmail=gmail)
+            suggestion_service = SuggestionService(db_pool=pool)
+            ctx["hook"] = ClassifierHook(
+                llm=llm_service,
+                langfuse=langfuse_client,
+                loop_service=loop_service,
+                suggestion_service=suggestion_service,
+                db_pool=pool,
+            )
+            ctx["langfuse"] = langfuse_client
+            logger.info("Worker using ClassifierHook")
+        else:
+            ctx["hook"] = LoggingHook()
+            logger.warning("CLASSIFIER_ENABLED=true but AI infra not available — using LoggingHook")
+    else:
+        ctx["hook"] = LoggingHook()
+
     logger.info("worker startup complete")
 
 
 async def shutdown(ctx: dict) -> None:
     """Clean up shared resources."""
+    langfuse_client = ctx.get("langfuse")
+    if langfuse_client:
+        langfuse_client.flush()
+        langfuse_client.shutdown()
     pool = ctx.get("db")
     if pool:
         await pool.close()
@@ -266,6 +299,8 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
                 message_type=message_type,
                 new_participants=new_participants,
             )
+            # Attach thread messages for classifier context (not part of the model)
+            event._thread_messages = thread_messages  # type: ignore[attr-defined]
             await hook.on_email(event)
 
         except Exception:

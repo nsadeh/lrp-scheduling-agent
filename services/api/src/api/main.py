@@ -17,6 +17,8 @@ from sentry_sdk.integrations.asyncio import AsyncioIntegration  # noqa: E402
 from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
+from api.ai import init_langfuse, init_llm_service  # noqa: E402
+from api.classifier.suggestions import SuggestionService  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
 from api.gmail.hooks import LoggingHook  # noqa: E402
@@ -65,11 +67,39 @@ async def lifespan(app: FastAPI):
         app.state.redis = None
         logger.warning("Redis not available — push pipeline disabled, poll fallback only")
 
-    # Email hook — default is logging, replaced by agent in production
-    app.state.email_hook = LoggingHook()
+    # AI infrastructure (optional — app runs without it)
+    langfuse_client = init_langfuse()
+    llm_service = init_llm_service()
+    app.state.langfuse = langfuse_client
+    app.state.llm_service = llm_service
+
+    # Email hook — ClassifierHook if AI is configured, else LoggingHook
+    classifier_enabled = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
+    if classifier_enabled and langfuse_client and llm_service:
+        from api.classifier.hook import ClassifierHook
+
+        suggestion_service = SuggestionService(db_pool=pool)
+        app.state.email_hook = ClassifierHook(
+            llm=llm_service,
+            langfuse=langfuse_client,
+            loop_service=app.state.scheduling,
+            suggestion_service=suggestion_service,
+            db_pool=pool,
+        )
+        logger.info("ClassifierHook enabled")
+    else:
+        app.state.email_hook = LoggingHook()
+        if classifier_enabled:
+            logger.warning(
+                "CLASSIFIER_ENABLED=true but AI infra not configured — using LoggingHook"
+            )
 
     yield
 
+    # Cleanup
+    if langfuse_client:
+        langfuse_client.flush()
+        langfuse_client.shutdown()
     redis = getattr(app.state, "redis", None)
     if redis:
         await redis.close()

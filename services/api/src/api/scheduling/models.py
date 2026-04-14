@@ -20,7 +20,7 @@ class StageState(StrEnum):
 
 # Valid transitions: from_state -> set of allowed to_states
 ALLOWED_TRANSITIONS: dict[StageState, set[StageState]] = {
-    StageState.NEW: {StageState.AWAITING_CANDIDATE, StageState.COLD},
+    StageState.NEW: {StageState.AWAITING_CANDIDATE, StageState.AWAITING_CLIENT, StageState.COLD},
     StageState.AWAITING_CANDIDATE: {StageState.AWAITING_CLIENT, StageState.COLD},
     StageState.AWAITING_CLIENT: {
         StageState.SCHEDULED,
