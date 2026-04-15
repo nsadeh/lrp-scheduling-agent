@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langfuse.model import ChatPromptClient
 from pydantic import BaseModel
 
 from api.ai.endpoint import LLMEndpoint, llm_endpoint
@@ -21,14 +22,46 @@ class SampleOutput(BaseModel):
     confidence: float
 
 
+def _make_chat_prompt(config: dict | None = None):
+    """Create a mock ChatPromptClient that compiles to a message list."""
+    prompt = MagicMock(spec=ChatPromptClient)
+    prompt.config = config or {
+        "model": "claude-sonnet-4-20250514",
+        "temperature": 0.1,
+        "max_tokens": 2048,
+    }
+    prompt.is_fallback = False
+    prompt.compile.return_value = [
+        {"role": "system", "content": "Classify this email."},
+        {"role": "user", "content": "Subject: {{subject}}\nBody: {{body}}"},
+    ]
+    return prompt
+
+
+def _make_text_prompt(config: dict | None = None):
+    """Create a mock TextPromptClient that compiles to a string."""
+    prompt = MagicMock()
+    # Not a ChatPromptClient instance — endpoint treats it as text
+    prompt.__class__ = type("TextPromptClient", (), {})
+    prompt.config = config or {
+        "model": "claude-sonnet-4-20250514",
+        "temperature": 0.1,
+        "max_tokens": 2048,
+    }
+    prompt.is_fallback = False
+    prompt.compile.return_value = "Classify this email about {{subject}}"
+    return prompt
+
+
 @pytest.fixture
 def mock_langfuse():
     client = MagicMock()
-    prompt = MagicMock()
-    prompt.config = {"model": "claude-sonnet-4-20250514", "temperature": 0.1, "max_tokens": 2048}
-    prompt.is_fallback = False
-    prompt.compile.return_value = "Classify this email about {{subject}}"
-    client.get_prompt.return_value = prompt
+    client.get_prompt.return_value = _make_chat_prompt()
+    # Mock the context manager for start_as_current_observation
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=ctx)
+    ctx.__exit__ = MagicMock(return_value=False)
+    client.start_as_current_observation.return_value = ctx
     return client
 
 
@@ -98,7 +131,6 @@ class TestLLMEndpointCall:
         assert result.classification == "scheduling"
 
     async def test_retries_on_parse_failure(self, endpoint, mock_langfuse, mock_llm):
-        # First call returns invalid JSON, second call returns valid JSON
         mock_llm.complete.side_effect = [
             LLMResponse(content="not json at all", model="test", provider="test"),
             LLMResponse(
@@ -167,7 +199,10 @@ class TestLLMEndpointCall:
         assert call_kwargs["model"] == "gpt-4o"
         assert call_kwargs["temperature"] == 0.9
 
-    async def test_messages_include_json_schema(self, endpoint, mock_langfuse, mock_llm):
+    async def test_chat_prompt_injects_json_schema_into_system(
+        self, endpoint, mock_langfuse, mock_llm
+    ):
+        """Chat prompts get JSON schema injected into the system message."""
         mock_llm.complete.return_value = LLMResponse(
             content=json.dumps({"classification": "test", "confidence": 0.5}),
             model="test",
@@ -182,7 +217,66 @@ class TestLLMEndpointCall:
 
         call_kwargs = mock_llm.complete.call_args.kwargs
         messages = call_kwargs["messages"]
+        # System message should have JSON schema prepended
         system_msg = messages[0]["content"]
-        assert "classification" in system_msg
-        assert "confidence" in system_msg
         assert "JSON" in system_msg
+        assert "classification" in system_msg
+        # Original system content should still be there
+        assert "Classify this email" in system_msg
+        # User message from chat prompt should be preserved
+        assert messages[1]["role"] == "user"
+
+    async def test_text_prompt_builds_system_plus_user(self, mock_llm):
+        """Text prompts build system (schema + prompt) + user (input JSON)."""
+        # Set up mock langfuse with a text prompt
+        mock_langfuse = MagicMock()
+        mock_langfuse.get_prompt.return_value = _make_text_prompt()
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=ctx)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_langfuse.start_as_current_observation.return_value = ctx
+
+        mock_llm.complete.return_value = LLMResponse(
+            content=json.dumps({"classification": "test", "confidence": 0.5}),
+            model="test",
+            provider="test",
+        )
+
+        endpoint = llm_endpoint(
+            name="text_test",
+            prompt_name="text-prompt",
+            input_type=SampleInput,
+            output_type=SampleOutput,
+        )
+
+        await endpoint(
+            llm=mock_llm,
+            langfuse=mock_langfuse,
+            data=SampleInput(subject="Test", body="Test"),
+        )
+
+        call_kwargs = mock_llm.complete.call_args.kwargs
+        messages = call_kwargs["messages"]
+        assert messages[0]["role"] == "system"
+        assert "JSON" in messages[0]["content"]
+        # User message should be JSON-dumped input
+        assert messages[1]["role"] == "user"
+        assert "Test" in messages[1]["content"]
+
+    async def test_creates_span_with_endpoint_name(self, endpoint, mock_langfuse, mock_llm):
+        """Verify the span is created with the endpoint name, not __call__."""
+        mock_llm.complete.return_value = LLMResponse(
+            content=json.dumps({"classification": "test", "confidence": 0.5}),
+            model="test",
+            provider="test",
+        )
+
+        await endpoint(
+            llm=mock_llm,
+            langfuse=mock_langfuse,
+            data=SampleInput(subject="Test", body="Test"),
+        )
+
+        mock_langfuse.start_as_current_observation.assert_called_once()
+        call_kwargs = mock_langfuse.start_as_current_observation.call_args.kwargs
+        assert call_kwargs["name"] == "classify_email"

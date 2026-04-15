@@ -55,7 +55,7 @@ class TestFetchPrompt:
 
         assert result is mock_prompt
         mock_client.get_prompt.assert_called_once_with(
-            "test-prompt", label="production", type="text"
+            "test-prompt", label="production", type="chat"
         )
 
     def test_raises_prompt_not_found_error(self):

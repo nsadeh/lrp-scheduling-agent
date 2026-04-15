@@ -34,10 +34,16 @@ from api.ai.llm_service import LLMService, init_llm_service  # noqa: E402
 
 # ── Test models ──────────────────────────────────────────────────────────────
 
-CLASSIFY_PROMPT = (
-    "Classify the following text into exactly one category: "
-    "greeting, question, statement. Text: {{text}}"
-)
+CLASSIFY_CHAT_PROMPT = [
+    {
+        "role": "system",
+        "content": (
+            "Classify the following text into exactly one category: "
+            "greeting, question, statement."
+        ),
+    },
+    {"role": "user", "content": "Text: {{text}}"},
+]
 
 
 class ClassifyInput(BaseModel):
@@ -73,7 +79,8 @@ async def test_langfuse_model_config(langfuse, llm):
     prompt_name = f"test-integration-model-config-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt=CLASSIFY_PROMPT,
+        prompt=CLASSIFY_CHAT_PROMPT,
+        type="chat",
         config={"model": "gpt-4o-mini", "temperature": 0.0, "max_tokens": 200},
         labels=["production"],
     )
@@ -107,7 +114,8 @@ async def test_default_model(langfuse, llm):
     prompt_name = f"test-integration-no-model-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt=CLASSIFY_PROMPT,
+        prompt=CLASSIFY_CHAT_PROMPT,
+        type="chat",
         config={},
         labels=["production"],
     )
@@ -152,7 +160,8 @@ async def test_failover(langfuse):
     prompt_name = f"test-integration-failover-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt=CLASSIFY_PROMPT,
+        prompt=CLASSIFY_CHAT_PROMPT,
+        type="chat",
         config={"model": "claude-sonnet-4-20250514", "temperature": 0.0, "max_tokens": 200},
         labels=["production"],
     )
@@ -252,7 +261,11 @@ async def test_traces_captured(langfuse, llm):
     prompt_name = f"test-integration-trace-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt="Reply with exactly: blue. Text: {{text}}",
+        prompt=[
+            {"role": "system", "content": "Reply with exactly: blue."},
+            {"role": "user", "content": "Text: {{text}}"},
+        ],
+        type="chat",
         config={"model": "gpt-4o-mini", "temperature": 0.0, "max_tokens": 50},
         labels=["production"],
     )

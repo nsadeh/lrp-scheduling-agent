@@ -71,7 +71,7 @@ def fetch_prompt(
     name: str,
     *,
     label: str | None = None,
-    prompt_type: str = "text",
+    prompt_type: str = "chat",
 ) -> TextPromptClient | ChatPromptClient:
     """Fetch a prompt from LangFuse by name.
 
