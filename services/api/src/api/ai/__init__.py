@@ -5,7 +5,6 @@ Public API:
     init_llm_service() — create an LLMService (or None if no provider keys)
     llm_endpoint()    — define a typed LLM endpoint
     observe           — LangFuse @observe() decorator for tracing
-    LangfuseFlushMiddleware — FastAPI middleware to flush traces per request
 """
 
 from api.ai.endpoint import llm_endpoint
@@ -17,7 +16,7 @@ from api.ai.errors import (
     LLMUnavailableError,
     PromptNotFoundError,
 )
-from api.ai.langfuse_client import LangfuseFlushMiddleware, init_langfuse, observe
+from api.ai.langfuse_client import init_langfuse, observe
 from api.ai.llm_service import LLMResponse, LLMService, init_llm_service
 
 __all__ = [
@@ -28,7 +27,6 @@ __all__ = [
     "LLMService",
     "LLMUnavailableError",
     "LangFuseUnavailableError",
-    "LangfuseFlushMiddleware",
     "PromptNotFoundError",
     "init_langfuse",
     "init_llm_service",

@@ -17,7 +17,7 @@ from sentry_sdk.integrations.asyncio import AsyncioIntegration  # noqa: E402
 from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
-from api.ai import LangfuseFlushMiddleware, init_langfuse, init_llm_service  # noqa: E402
+from api.ai import init_langfuse, init_llm_service  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
 from api.gmail.hooks import LoggingHook  # noqa: E402
@@ -94,8 +94,6 @@ app = FastAPI(title="LRP Scheduling Agent", lifespan=lifespan)
 static_dir = Path(__file__).resolve().parent.parent.parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-app.add_middleware(LangfuseFlushMiddleware)
 
 app.include_router(addon_router)
 app.include_router(oauth_router)

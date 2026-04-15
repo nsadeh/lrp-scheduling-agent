@@ -1,9 +1,7 @@
 """LLM service with multi-provider failover.
 
-Uses litellm.acompletion() directly (not the Router) to support caller-specified
-models from LangFuse prompt config. Implements failover via a fallback model map:
-when the primary model's provider fails, the service tries equivalent-tier models
-on other providers.
+Uses litellm.acompletion() with a simple primary → secondary → tertiary
+failover chain configured via environment variables.
 
 Latency budget:
 - Primary attempt: 5s timeout, 1 retry (10s max)
@@ -28,31 +26,7 @@ logger = logging.getLogger(__name__)
 litellm.suppress_debug_info = True
 
 # Default model when LangFuse prompt config doesn't specify one
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
-
-# Provider prefix → env var key name (for setting API keys)
-_PROVIDER_PREFIX_MAP = {
-    "anthropic/": "anthropic",
-    "openai/": "openai",
-    "gemini/": "google",
-}
-
-# Fallback model mapping: when the requested model's provider is down,
-# try equivalent-tier models on other providers. Each entry is an ordered
-# list of (provider_prefixed_model) to try.
-FALLBACK_MODEL_MAP: dict[str, list[str]] = {
-    # Claude Sonnet/Opus tier
-    "claude-sonnet-4-20250514": ["openai/gpt-4o", "gemini/gemini-2.5-pro"],
-    "claude-opus-4-20250514": ["openai/gpt-4o", "gemini/gemini-2.5-pro"],
-    # Claude Haiku tier
-    "claude-haiku-4-5-20251001": ["openai/gpt-4o-mini", "gemini/gemini-2.0-flash"],
-    # OpenAI models
-    "gpt-4o": ["anthropic/claude-sonnet-4-20250514", "gemini/gemini-2.5-pro"],
-    "gpt-4o-mini": ["anthropic/claude-haiku-4-5-20251001", "gemini/gemini-2.0-flash"],
-    # Gemini models
-    "gemini-2.5-pro": ["anthropic/claude-sonnet-4-20250514", "openai/gpt-4o"],
-    "gemini-2.0-flash": ["anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"],
-}
+DEFAULT_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "claude-sonnet-4-20250514")
 
 
 def _resolve_provider_model(model: str) -> str:
@@ -64,7 +38,6 @@ def _resolve_provider_model(model: str) -> str:
     if "/" in model:
         return model
 
-    # Infer provider from model name prefix
     if model.startswith("claude"):
         return f"anthropic/{model}"
     if model.startswith("gpt"):
@@ -74,6 +47,14 @@ def _resolve_provider_model(model: str) -> str:
 
     # Unknown model — pass through and let LiteLLM resolve it
     return model
+
+
+# Provider prefix → api_keys dict key
+_PROVIDER_PREFIX_MAP = {
+    "anthropic/": "anthropic",
+    "openai/": "openai",
+    "gemini/": "google",
+}
 
 
 @dataclass
@@ -88,7 +69,12 @@ class LLMResponse:
 
 
 def init_llm_service() -> "LLMService | None":
-    """Create an LLMService if at least one provider key is configured."""
+    """Create an LLMService if at least one provider key is configured.
+
+    Failover chain is configured via env vars:
+        LLM_SECONDARY_MODEL — model to try when primary fails
+        LLM_TERTIARY_MODEL  — model to try when secondary fails
+    """
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     google_key = os.environ.get("GOOGLE_AI_API_KEY")
@@ -97,10 +83,15 @@ def init_llm_service() -> "LLMService | None":
         logger.warning("No LLM provider API keys set — LLMService disabled")
         return None
 
+    secondary = os.environ.get("LLM_SECONDARY_MODEL", "gpt-4o")
+    tertiary = os.environ.get("LLM_TERTIARY_MODEL", "gemini-2.0-flash")
+
     return LLMService(
         anthropic_key=anthropic_key,
         openai_key=openai_key,
         google_key=google_key,
+        secondary_model=secondary,
+        tertiary_model=tertiary,
     )
 
 
@@ -108,7 +99,7 @@ class LLMService:
     """Multi-provider LLM service with automatic failover and bounded latency.
 
     Calls litellm.acompletion() directly with provider-prefixed model names.
-    When a call fails, tries equivalent-tier fallback models on other providers.
+    When the primary model fails, tries secondary then tertiary models.
     """
 
     def __init__(
@@ -116,6 +107,8 @@ class LLMService:
         anthropic_key: str | None = None,
         openai_key: str | None = None,
         google_key: str | None = None,
+        secondary_model: str = "gpt-4o",
+        tertiary_model: str = "gemini-2.0-flash",
     ):
         self._api_keys: dict[str, str] = {}
         if anthropic_key:
@@ -128,6 +121,9 @@ class LLMService:
         if not self._api_keys:
             raise ValueError("At least one LLM provider API key must be set")
 
+        self._secondary_model = _resolve_provider_model(secondary_model)
+        self._tertiary_model = _resolve_provider_model(tertiary_model)
+
         providers = [p.capitalize() for p in self._api_keys]
         logger.info("LLMService initialized with providers: %s", ", ".join(providers))
 
@@ -139,17 +135,20 @@ class LLMService:
         return None
 
     def _build_call_chain(self, model: str) -> list[str]:
-        """Build ordered list of models to try: primary + fallbacks with valid keys."""
-        prefixed = _resolve_provider_model(model)
-        chain = [prefixed]
+        """Build ordered list of models to try: primary → secondary → tertiary.
 
-        # Strip prefix to look up fallbacks
-        bare_model = model.split("/")[-1] if "/" in model else model
-        fallbacks = FALLBACK_MODEL_MAP.get(bare_model, [])
+        Only includes models whose provider keys are configured.
+        """
+        primary = _resolve_provider_model(model)
+        candidates = [primary, self._secondary_model, self._tertiary_model]
 
-        for fb in fallbacks:
-            if self._get_api_key_for_model(fb) is not None:
-                chain.append(fb)
+        # Deduplicate while preserving order, and filter to models with valid keys
+        seen: set[str] = set()
+        chain: list[str] = []
+        for candidate in candidates:
+            if candidate not in seen and self._get_api_key_for_model(candidate) is not None:
+                seen.add(candidate)
+                chain.append(candidate)
 
         return chain
 
@@ -167,11 +166,12 @@ class LLMService:
         Args:
             messages: OpenAI-format messages list (role + content dicts).
             model: Model name from LangFuse prompt config (e.g.,
-                "claude-sonnet-4-20250514" or "anthropic/claude-sonnet-4-20250514").
-                Provider is inferred from the name. If None, uses DEFAULT_MODEL.
+                "claude-sonnet-4-20250514"). If None, uses LLM_DEFAULT_MODEL.
+                On failure, falls back to LLM_SECONDARY_MODEL, then
+                LLM_TERTIARY_MODEL.
             temperature: Sampling temperature (0.0 = deterministic).
             max_tokens: Maximum tokens in the response.
-            response_format: Optional response format spec (e.g., {"type": "json_object"}).
+            response_format: Optional response format spec.
 
         Returns:
             LLMResponse with the completion content and metadata.

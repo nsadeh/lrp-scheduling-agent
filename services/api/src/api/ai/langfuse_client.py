@@ -15,23 +15,24 @@ import os
 
 from langfuse import Langfuse, observe
 from langfuse.model import ChatPromptClient, TextPromptClient
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response
 
 from api.ai.errors import LangFuseUnavailableError, PromptNotFoundError
 
 logger = logging.getLogger(__name__)
 
 # Re-export observe so callers import from this module
-__all__ = ["LangfuseFlushMiddleware", "fetch_prompt", "init_langfuse", "observe"]
+__all__ = ["fetch_prompt", "init_langfuse", "observe"]
 
 
 def init_langfuse() -> Langfuse | None:
     """Create and return a LangFuse client, or None if keys are not configured.
 
     Required env vars: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY.
-    Optional: LANGFUSE_HOST (defaults to LangFuse Cloud).
+    Optional:
+        LANGFUSE_HOST — defaults to LangFuse Cloud.
+        LANGFUSE_ENVIRONMENT — tags all traces with this environment string
+            (e.g., "development", "production"). Use this to separate dev
+            traces from prod in the LangFuse dashboard.
     """
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
@@ -41,6 +42,7 @@ def init_langfuse() -> Langfuse | None:
         return None
 
     host = os.environ.get("LANGFUSE_HOST")
+    environment = os.environ.get("LANGFUSE_ENVIRONMENT")
 
     kwargs: dict = {
         "public_key": public_key,
@@ -48,17 +50,27 @@ def init_langfuse() -> Langfuse | None:
     }
     if host:
         kwargs["host"] = host
+    if environment:
+        kwargs["environment"] = environment
 
     client = Langfuse(**kwargs)
-    logger.info("LangFuse client initialized (host=%s)", host or "cloud")
+    logger.info(
+        "LangFuse client initialized (host=%s, environment=%s)",
+        host or "cloud",
+        environment or "default",
+    )
     return client
+
+
+# Default prompt label — "production" in prod, overridable via env for dev
+DEFAULT_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
 
 
 def fetch_prompt(
     client: Langfuse,
     name: str,
     *,
-    label: str = "production",
+    label: str | None = None,
     prompt_type: str = "text",
 ) -> TextPromptClient | ChatPromptClient:
     """Fetch a prompt from LangFuse by name.
@@ -69,9 +81,15 @@ def fetch_prompt(
 
     The prompt's .config dict holds model parameters (model, temperature,
     max_tokens) that the LLM service and endpoint factory use.
+
+    Args:
+        label: Prompt label to fetch. Defaults to LANGFUSE_PROMPT_LABEL env var
+            (which defaults to "production"). Set to "development" in .env
+            to iterate on prompts without affecting prod.
     """
+    resolved_label = label or DEFAULT_PROMPT_LABEL
     try:
-        prompt = client.get_prompt(name, label=label, type=prompt_type)
+        prompt = client.get_prompt(name, label=resolved_label, type=prompt_type)
     except Exception as exc:
         error_msg = str(exc).lower()
         if "not found" in error_msg:
@@ -84,20 +102,3 @@ def fetch_prompt(
         logger.warning("Serving cached/fallback prompt for '%s' — LangFuse may be degraded", name)
 
     return prompt
-
-
-class LangfuseFlushMiddleware(BaseHTTPMiddleware):
-    """Flush LangFuse traces at the end of each request.
-
-    Without this, traces in request/response contexts may be lost if the
-    process handles another request before the async flush completes.
-    """
-
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        response = await call_next(request)
-
-        langfuse: Langfuse | None = getattr(request.app.state, "langfuse", None)
-        if langfuse:
-            langfuse.flush()
-
-        return response

@@ -62,18 +62,34 @@ class TestBuildCallChain:
         service = LLMService(anthropic_key="ak", openai_key="ok", google_key="gk")
         chain = service._build_call_chain("claude-sonnet-4-20250514")
         assert chain[0] == "anthropic/claude-sonnet-4-20250514"
+        # Secondary and tertiary from defaults
         assert "openai/gpt-4o" in chain
-        assert "gemini/gemini-2.5-pro" in chain
+        assert "gemini/gemini-2.0-flash" in chain
 
     def test_skips_fallbacks_without_keys(self):
         service = LLMService(anthropic_key="ak")
         chain = service._build_call_chain("claude-sonnet-4-20250514")
         assert chain == ["anthropic/claude-sonnet-4-20250514"]
 
-    def test_unknown_model_no_fallbacks(self):
-        service = LLMService(anthropic_key="ak")
-        chain = service._build_call_chain("some-unknown-model")
-        assert chain == ["some-unknown-model"]
+    def test_deduplicates_when_primary_matches_secondary(self):
+        service = LLMService(openai_key="ok", google_key="gk")
+        # Primary is gpt-4o, secondary default is also gpt-4o — should deduplicate
+        chain = service._build_call_chain("gpt-4o")
+        assert chain.count("openai/gpt-4o") == 1
+
+    def test_custom_secondary_tertiary(self):
+        service = LLMService(
+            anthropic_key="ak",
+            openai_key="ok",
+            secondary_model="gpt-4o-mini",
+            tertiary_model="gpt-4o",
+        )
+        chain = service._build_call_chain("claude-sonnet-4-20250514")
+        assert chain == [
+            "anthropic/claude-sonnet-4-20250514",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+        ]
 
 
 class TestLLMServiceComplete:

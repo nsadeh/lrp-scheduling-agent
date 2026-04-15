@@ -113,6 +113,9 @@ class LLMEndpoint:
             LangFuseUnavailableError: If prompt can't be fetched.
             PromptNotFoundError: If prompt doesn't exist.
         """
+        # 0. Update the trace span name to the endpoint name (instead of "__call__")
+        langfuse.update_current_span(name=self.name)
+
         # 1. Fetch prompt from LangFuse
         prompt = fetch_prompt(langfuse, self.prompt_name)
         config: dict = prompt.config or {}

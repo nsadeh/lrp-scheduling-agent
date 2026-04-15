@@ -5,7 +5,8 @@ Runs against real LangFuse + LLM providers to verify:
 1. LangFuse prompt config drives model selection
 2. Defaults work when no model config in prompt
 3. Failover works when primary provider fails
-4. Traces are captured in LangFuse
+4. Each provider (Anthropic, OpenAI, Gemini) can serve a request
+5. Traces are captured in LangFuse
 
 Usage:
     cd services/api
@@ -33,6 +34,11 @@ from api.ai.llm_service import LLMService, init_llm_service  # noqa: E402
 
 # ── Test models ──────────────────────────────────────────────────────────────
 
+CLASSIFY_PROMPT = (
+    "Classify the following text into exactly one category: "
+    "greeting, question, statement. Text: {{text}}"
+)
+
 
 class ClassifyInput(BaseModel):
     text: str
@@ -50,9 +56,9 @@ FAIL = "\033[91m✗\033[0m"
 INFO = "\033[94mi\033[0m"
 
 
-def result(ok: bool, label: str, detail: str = ""):
+def report(ok: bool, label: str, detail: str = ""):
     mark = PASS if ok else FAIL
-    suffix = f" — {detail}" if detail else ""
+    suffix = f" -- {detail}" if detail else ""
     print(f"  {mark} {label}{suffix}")
     return ok
 
@@ -64,22 +70,13 @@ async def test_langfuse_model_config(langfuse, llm):
     """Create a prompt in LangFuse with a specific model config and verify it's used."""
     print("\n[Test 1] LangFuse prompt config drives model selection")
 
-    # Create a test prompt in LangFuse with OpenAI model config
     prompt_name = f"test-integration-model-config-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt=(
-            "Classify the following text into exactly one category: "
-            "greeting, question, statement. Text: {{text}}"
-        ),
-        config={
-            "model": "gpt-4o-mini",
-            "temperature": 0.0,
-            "max_tokens": 200,
-        },
+        prompt=CLASSIFY_PROMPT,
+        config={"model": "gpt-4o-mini", "temperature": 0.0, "max_tokens": 200},
         labels=["production"],
     )
-    # Give LangFuse a moment to propagate
     await asyncio.sleep(1)
 
     endpoint = llm_endpoint(
@@ -90,17 +87,14 @@ async def test_langfuse_model_config(langfuse, llm):
     )
 
     resp = await endpoint(
-        llm=llm,
-        langfuse=langfuse,
-        data=ClassifyInput(text="Hello, how are you today?"),
+        llm=llm, langfuse=langfuse, data=ClassifyInput(text="Hello, how are you today?")
     )
 
-    ok = result(
+    return report(
         isinstance(resp, ClassifyOutput) and resp.category != "",
         "Prompt with gpt-4o-mini config returns valid response",
         f"category={resp.category}, confidence={resp.confidence}",
     )
-    return ok
 
 
 # ── Test 2: No model in config → default model used ─────────────────────────
@@ -113,11 +107,8 @@ async def test_default_model(langfuse, llm):
     prompt_name = f"test-integration-no-model-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt=(
-            "Classify the following text into exactly one category: "
-            "greeting, question, statement. Text: {{text}}"
-        ),
-        config={},  # No model specified
+        prompt=CLASSIFY_PROMPT,
+        config={},
         labels=["production"],
     )
     await asyncio.sleep(1)
@@ -130,17 +121,14 @@ async def test_default_model(langfuse, llm):
     )
 
     resp = await endpoint(
-        llm=llm,
-        langfuse=langfuse,
-        data=ClassifyInput(text="What time is the meeting?"),
+        llm=llm, langfuse=langfuse, data=ClassifyInput(text="What time is the meeting?")
     )
 
-    ok = result(
+    return report(
         isinstance(resp, ClassifyOutput) and resp.category != "",
         "Prompt with no model config returns valid response (default model)",
         f"category={resp.category}, confidence={resp.confidence}",
     )
-    return ok
 
 
 # ── Test 3: Failover — primary fails, secondary/tertiary picked up ──────────
@@ -150,12 +138,10 @@ async def test_failover(langfuse):
     """Use a service with a bad primary key to force failover to secondary."""
     print("\n[Test 3] Failover when primary provider fails")
 
-    # Create service with invalid Anthropic key but valid OpenAI key
     openai_key = os.environ.get("OPENAI_API_KEY")
     google_key = os.environ.get("GOOGLE_AI_API_KEY")
     if not openai_key:
-        result(False, "OPENAI_API_KEY not set — cannot test failover")
-        return False
+        return report(False, "OPENAI_API_KEY not set — cannot test failover")
 
     svc = LLMService(
         anthropic_key="sk-ant-INVALID-KEY-FOR-TESTING",
@@ -166,10 +152,7 @@ async def test_failover(langfuse):
     prompt_name = f"test-integration-failover-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt=(
-            "Classify the following text into exactly one category: "
-            "greeting, question, statement. Text: {{text}}"
-        ),
+        prompt=CLASSIFY_PROMPT,
         config={"model": "claude-sonnet-4-20250514", "temperature": 0.0, "max_tokens": 200},
         labels=["production"],
     )
@@ -184,21 +167,16 @@ async def test_failover(langfuse):
 
     start = time.monotonic()
     resp = await endpoint(
-        llm=svc,
-        langfuse=langfuse,
-        data=ClassifyInput(text="I am going to the store."),
+        llm=svc, langfuse=langfuse, data=ClassifyInput(text="I am going to the store.")
     )
     elapsed = time.monotonic() - start
 
-    ok1 = result(
+    ok1 = report(
         isinstance(resp, ClassifyOutput) and resp.category != "",
         "Failover to secondary succeeded",
         f"category={resp.category}, confidence={resp.confidence}",
     )
-    ok2 = result(
-        elapsed < 20,
-        f"Completed within latency budget ({elapsed:.1f}s < 20s)",
-    )
+    ok2 = report(elapsed < 20, f"Completed within latency budget ({elapsed:.1f}s < 20s)")
     return ok1 and ok2
 
 
@@ -207,38 +185,74 @@ async def test_failover(langfuse):
 
 async def test_all_providers_fail():
     """Verify LLMUnavailableError is raised when all providers fail."""
-    print("\n[Test 3b] All providers fail → LLMUnavailableError")
+    print("\n[Test 3b] All providers fail -> LLMUnavailableError")
 
-    svc = LLMService(
-        anthropic_key="sk-ant-INVALID",
-        openai_key="sk-INVALID",
-    )
+    svc = LLMService(anthropic_key="sk-ant-INVALID", openai_key="sk-INVALID")
 
     try:
         await svc.complete(
             messages=[{"role": "user", "content": "hello"}],
             model="claude-sonnet-4-20250514",
         )
-        ok = result(False, "Expected LLMUnavailableError but got success")
+        return report(False, "Expected LLMUnavailableError but got success")
     except LLMUnavailableError as e:
-        ok = result(True, "LLMUnavailableError raised as expected", str(e)[:80])
+        return report(True, "LLMUnavailableError raised as expected", str(e)[:80])
     except Exception as e:
-        ok = result(False, f"Unexpected error type: {type(e).__name__}", str(e)[:80])
-
-    return ok
+        return report(False, f"Unexpected error type: {type(e).__name__}", str(e)[:80])
 
 
-# ── Test 4: Traces captured in LangFuse ──────────────────────────────────────
+# ── Test 4: Direct provider calls ────────────────────────────────────────────
+
+
+async def test_direct_provider_calls():
+    """Call each configured provider directly to verify they all work."""
+    print("\n[Test 4] Direct provider calls (Anthropic, OpenAI, Gemini)")
+
+    messages = [{"role": "user", "content": "Reply with exactly one word: hello"}]
+    results = []
+
+    providers = [
+        ("ANTHROPIC_API_KEY", "anthropic", "anthropic/claude-haiku-4-5-20251001"),
+        ("OPENAI_API_KEY", "openai", "openai/gpt-4o-mini"),
+        ("GOOGLE_AI_API_KEY", "google", "gemini/gemini-2.0-flash"),
+    ]
+
+    for env_var, provider_name, model in providers:
+        api_key = os.environ.get(env_var)
+        if not api_key:
+            results.append(report(False, f"{provider_name}: {env_var} not set — skipped"))
+            continue
+
+        svc = LLMService(**{f"{provider_name}_key": api_key})  # type: ignore[arg-type]
+        try:
+            start = time.monotonic()
+            resp = await svc.complete(messages=messages, model=model, max_tokens=20)
+            elapsed = time.monotonic() - start
+            results.append(
+                report(
+                    len(resp.content) > 0,
+                    f"{provider_name}: {model} responded in {elapsed:.1f}s",
+                    f"content='{resp.content[:30]}'",
+                )
+            )
+        except Exception as e:
+            results.append(report(False, f"{provider_name}: {model} failed", str(e)[:80]))
+
+    return all(results)
+
+
+# ── Test 5: Traces captured in LangFuse ──────────────────────────────────────
 
 
 async def test_traces_captured(langfuse, llm):
-    """Make a call and verify trace spans appear in LangFuse."""
-    print("\n[Test 4] Traces captured in LangFuse")
+    """Make an LLM call and verify OTel tracing pipeline sends to LangFuse."""
+    print("\n[Test 5] Traces captured in LangFuse")
 
+    # Make a real LLM call
     prompt_name = f"test-integration-trace-{int(time.time())}"
     langfuse.create_prompt(
         name=prompt_name,
-        prompt="Reply with a single word: the color of the sky. Text: {{text}}",
+        prompt="Reply with exactly: blue. Text: {{text}}",
         config={"model": "gpt-4o-mini", "temperature": 0.0, "max_tokens": 50},
         labels=["production"],
     )
@@ -251,11 +265,9 @@ async def test_traces_captured(langfuse, llm):
         output_type=ClassifyOutput,
     )
 
-    await endpoint(
-        llm=llm,
-        langfuse=langfuse,
-        data=ClassifyInput(text="Look up at the sky"),
-    )
+    resp = await endpoint(llm=llm, langfuse=langfuse, data=ClassifyInput(text="Look up at the sky"))
+
+    ok1 = report(isinstance(resp, ClassifyOutput), "LLM call succeeded for trace test")
 
     # Verify the OTel tracing pipeline is configured
     from opentelemetry import trace as otel_trace
@@ -263,13 +275,14 @@ async def test_traces_captured(langfuse, llm):
     provider = otel_trace.get_tracer_provider()
     provider_name = type(provider).__name__
 
-    ok1 = result(
+    ok2 = report(
         provider_name == "TracerProvider",
         f"OTel TracerProvider is active (type={provider_name})",
     )
 
-    # Check the span processor chain: LangfuseSpanProcessor → OTLPSpanExporter
+    # Check the span processor chain
     has_langfuse_processor = False
+    exporter_type = "unknown"
     if hasattr(provider, "_active_span_processor"):
         proc = provider._active_span_processor
         for sp in getattr(proc, "_span_processors", []):
@@ -278,7 +291,7 @@ async def test_traces_captured(langfuse, llm):
                 exporter_type = type(getattr(sp, "span_exporter", None)).__name__
                 break
 
-    ok2 = result(
+    ok3 = report(
         has_langfuse_processor,
         f"LangfuseSpanProcessor is registered (exporter={exporter_type})",
     )
@@ -291,22 +304,22 @@ async def test_traces_captured(langfuse, llm):
         langfuse.flush()
         flush_ok = True
     except Exception:
-        flush_ok = False
+        pass
 
-    ok3 = result(flush_ok, "OTel + LangFuse flush completed without errors")
+    ok4 = report(flush_ok, "OTel + LangFuse flush completed without errors")
 
-    # Verify observations exist in LangFuse (from this session's earlier tests)
+    # Verify observations exist in LangFuse
     await asyncio.sleep(3)
     try:
         all_obs = langfuse.api.observations.get_many(limit=5)
-        ok4 = result(
+        ok5 = report(
             len(all_obs.data) > 0,
-            f"LangFuse has {len(all_obs.data)} recent observations (confirms ingestion works)",
+            f"LangFuse has {len(all_obs.data)} recent observations",
         )
     except Exception as e:
-        ok4 = result(False, f"Could not query observations: {e}")
+        ok5 = report(False, f"Could not query observations: {e}")
 
-    return ok1 and ok2 and ok3 and ok4
+    return ok1 and ok2 and ok3 and ok4 and ok5
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -332,36 +345,21 @@ async def main():
 
     results = []
 
-    # Run tests
-    try:
-        results.append(await test_langfuse_model_config(langfuse, llm))
-    except Exception as e:
-        result(False, f"Test 1 crashed: {e}")
-        results.append(False)
+    tests = [
+        ("test 1", lambda: test_langfuse_model_config(langfuse, llm)),
+        ("test 2", lambda: test_default_model(langfuse, llm)),
+        ("test 3", lambda: test_failover(langfuse)),
+        ("test 3b", lambda: test_all_providers_fail()),
+        ("test 4", lambda: test_direct_provider_calls()),
+        ("test 5", lambda: test_traces_captured(langfuse, llm)),
+    ]
 
-    try:
-        results.append(await test_default_model(langfuse, llm))
-    except Exception as e:
-        result(False, f"Test 2 crashed: {e}")
-        results.append(False)
-
-    try:
-        results.append(await test_failover(langfuse))
-    except Exception as e:
-        result(False, f"Test 3 crashed: {e}")
-        results.append(False)
-
-    try:
-        results.append(await test_all_providers_fail())
-    except Exception as e:
-        result(False, f"Test 3b crashed: {e}")
-        results.append(False)
-
-    try:
-        results.append(await test_traces_captured(langfuse, llm))
-    except Exception as e:
-        result(False, f"Test 4 crashed: {e}")
-        results.append(False)
+    for name, test_fn in tests:
+        try:
+            results.append(await test_fn())
+        except Exception as e:
+            report(False, f"{name} crashed: {e}")
+            results.append(False)
 
     # Cleanup
     langfuse.flush()
