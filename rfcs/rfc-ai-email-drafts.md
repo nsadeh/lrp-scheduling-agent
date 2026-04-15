@@ -5,7 +5,7 @@
 | **Author(s)**  | Kinematic Labs                             |
 | **Status**     | Draft                                      |
 | **Created**    | 2026-04-15                                 |
-| **Updated**    | 2026-04-15                                 |
+| **Updated**    | 2026-04-16                                 |
 | **Reviewers**  | LRP Engineering, LRP Coordinator team      |
 | **Decider**    | Nadav Sadeh                                |
 | **Issue**      | #16                                        |
@@ -28,7 +28,7 @@ This RFC proposes the **email draft generation pipeline**: when the classifier o
 
 - **Polymorphic action framework** — we are not building an abstract "actions" table or executor registry. `email_drafts` is a standalone table with a FK to `agent_suggestions`. When we build the second action type (calendar invites, ATS updates), we'll see the real shape of the abstraction and can extract a shared interface then. *Rationale:* the codebase already has a lightweight dispatch pattern in `_ACTION_HANDLERS`. Designing the framework before we have two concrete action types would be speculative engineering with high risk of rework.
 - **REST API for drafts** — no new HTTP endpoints for listing, fetching, or managing drafts. The sidebar add-on is the only client. *Rationale:* the add-on calls directly into `LoopService` and `DraftService` via the action handler dispatch. A REST API can be added later against the same data model without restructuring.
-- **Recruiter-facing draft generation** — messages to recruiters are typically empty forwards of the client thread. The drafter does not generate body text for these; it sets `body=""` and the forward happens via existing `send_email` flow. *Rationale:* generating text for empty forwards adds LLM cost with no value. The coordinator's workflow for recruiter messages is already one click ("Forward to Recruiter").
+- **Recruiter-facing complex correspondence** — the drafter generates content for recruiter emails when the thread context calls for it (e.g., answering a recruiter's question using loop/thread data, forwarding confirmation details with a Zoom link). However, we are not building recruiter-specific prompt templates or tone profiles in this iteration. Recruiter drafts use the same `draft-email-v1` prompt with `recipient_type="recruiter"`. *Rationale:* recruiter emails vary more than client emails; getting the prompt right requires coordinator feedback. We ship with a general-purpose prompt and specialize later if needed.
 - **Draft regeneration on edit** — if a coordinator edits a draft, the system does not re-generate or offer alternatives. The edit is final until they send or discard. *Rationale:* regeneration requires a round-trip to the LLM and a more complex UI (diff view, accept/reject). This can be added later if coordinators request it.
 - **Multi-recipient drafts** — each draft targets a single recipient (or recipient group on the same thread). Scheduling scenarios that require emailing both the client and recruiter produce two separate suggestions with two separate drafts. *Rationale:* the classifier already supports multiple suggestions per email. Each suggestion → one draft keeps the model simple.
 
@@ -40,11 +40,13 @@ Scheduling emails fall into a small number of patterns:
 
 | Pattern | Recipient | Typical Content | Frequency |
 |---------|-----------|----------------|-----------|
-| Request availability | Recruiter | Forward of client request, often with no body | Very high |
+| Request availability | Recruiter | Forward of client request, sometimes with context or a question answer | Very high |
 | Share availability | Client | Candidate name + time slots in ET format | High |
 | Confirm interview | Client | Confirmation + logistics (phone number, Zoom link) | Medium |
+| Confirm interview (to recruiter) | Recruiter | Confirmation + Zoom link from client thread (clients often share Zoom links that need to be forwarded) | Medium |
 | Follow up | Client or Recruiter | Gentle nudge for response | Medium |
 | Reschedule | Client | Updated availability or new times | Low |
+| Answer recruiter question | Recruiter | Response using info available in the thread/loop (e.g., interview format, client preferences) | Low-Medium |
 
 The "share availability" and "confirm interview" patterns have strict formatting requirements. Availability must be presented as:
 
@@ -148,16 +150,24 @@ if item.action == SuggestedAction.DRAFT_EMAIL and self._draft_service:
 
 Recipients are determined by stage state, matching existing logic in `_handle_compose_email` (addon/routes.py:396-424):
 
-| Stage State | Recipient | Subject Pattern |
-|-------------|-----------|-----------------|
-| `NEW` | `loop.recruiter.email` | `Re: {loop.title} - Availability Request` |
-| `AWAITING_CANDIDATE` | `loop.client_contact.email` | `Re: {loop.title} - Candidate Availability` |
-| `AWAITING_CLIENT` | `loop.client_contact.email` | `Re: {loop.title} - Follow Up` |
-| `SCHEDULED` | `loop.client_contact.email` | `Re: {loop.title} - Confirmed` |
+| Stage State | To | CC | Subject |
+|-------------|----|----|---------|
+| `NEW` | `loop.recruiter.email` | `loop.client_manager.email` (if set) | Thread subject (from `gmail_thread_id`) |
+| `AWAITING_CANDIDATE` | `loop.client_contact.email` | `loop.client_manager.email` (if set) | Thread subject |
+| `AWAITING_CLIENT` | `loop.client_contact.email` | `loop.client_manager.email` (if set) | Thread subject |
+| `SCHEDULED` | `loop.client_contact.email` or `loop.recruiter.email` | `loop.client_manager.email` (if set) | Thread subject |
+
+**Subject threading:** Drafts always use the existing thread's subject line (via `gmail_thread_id`), not a generated subject. This keeps the entire scheduling conversation in one Gmail thread. If no thread exists yet, we fall back to `Re: {loop.title}`.
+
+**Client manager is always CC'd.** When `loop.client_manager` exists, their email is added to `cc_emails` on every draft. This matches coordinator behavior today — client managers expect visibility into scheduling progress.
+
+**Recipient queryability for the sidebar.** The `email_drafts` table stores `to_emails` and `cc_emails` as arrays, and the denormalized `loop_id` provides a single-join path to the full loop with all contacts (recruiter, client_contact, client_manager, candidate). The sidebar can display "To: Haley Chen (Client) · CC: Mike Ross (CM)" by joining `email_drafts → loops` and resolving contact names. This is a single join, not a multi-hop traversal.
 
 The routing logic lives in `DraftService._resolve_recipient()` — a pure function that takes a `Loop` and `Stage` and returns `(to_emails, cc_emails, subject)`. This centralizes recipient routing so that both the add-on's manual compose and the AI drafter use the same rules.
 
-**Key decision: recruiter emails skip LLM generation.** When the recipient is a recruiter (stage `NEW`), the draft body is empty — these are forwards. `DraftService` creates the `email_drafts` row with `body=""` and skips the LLM call entirely. The sidebar shows this as "Forward to {recruiter name}" with a one-click send button.
+**Recruiter emails use LLM generation when thread context warrants it.** Unlike the earlier assumption that recruiter messages are always empty forwards, recruiters sometimes ask questions in the scheduling thread (e.g., "What's the interview format?"). The drafter receives the full thread context and generates a response when the classifier's `extracted_entities` indicate a question or information request. When there's no question to answer and the action is a simple forward, the drafter generates a minimal body or empty body. The LLM decides based on context — there is no hardcoded "skip LLM for recruiter" rule.
+
+**Zoom link forwarding.** Clients often share Zoom links in the thread. The classifier extracts these into `extracted_entities.zoom_link`, and the drafter includes them in confirmation emails to recruiters. The prompt explicitly instructs: "If a Zoom link is present in the extracted entities, include it in confirmation and scheduling emails to the recruiter."
 
 #### 3. Draft Content Generation (LLM Endpoint)
 
@@ -224,17 +234,15 @@ class DraftService:
         stage = self._resolve_stage(suggestion, loop)
         to_emails, cc_emails, subject = self._resolve_recipient(loop, stage)
 
-        # Skip LLM for recruiter forwards (empty body)
-        if stage.state == StageState.NEW:
-            body = ""
-            reasoning = "Recruiter forward — no body needed"
-        else:
-            result = await generate_draft_content(
-                llm=self._llm, langfuse=self._langfuse,
-                data=self._build_input(suggestion, loop, stage, thread_messages),
-            )
-            body = result.body
-            reasoning = result.reasoning
+        # LLM generates for all recipient types — the prompt adapts based on
+        # recipient_type and thread context (e.g., minimal body for simple
+        # forwards, full response if recruiter asked a question)
+        result = await generate_draft_content(
+            llm=self._llm, langfuse=self._langfuse,
+            data=self._build_input(suggestion, loop, stage, thread_messages),
+        )
+        body = result.body
+        reasoning = result.reasoning
 
         return await self._persist_draft(
             suggestion=suggestion, loop=loop, stage=stage,
@@ -448,7 +456,9 @@ Human-in-the-loop checkpoint: every generated draft requires explicit coordinato
 |----------|-------|-------------------|---------------|
 | Availability share (happy path) | AWAITING_CANDIDATE stage, classifier extracts 3 time slots | Draft to client with candidate name + formatted availability | Correct format, all slots present, terse tone |
 | Confirmation email | SCHEDULED stage, time slot confirmed | Draft confirming time + logistics | Correct time, no hallucinated details |
-| Recruiter forward | NEW stage | Empty body, correct recipient | `body=""`, `to=recruiter.email` |
+| Recruiter forward (simple) | NEW stage, no question in thread | Minimal or empty body, correct recipient | `to=recruiter.email`, `cc=client_manager.email` |
+| Recruiter forward (with question) | NEW stage, recruiter asked "What's the interview format?" in thread | Draft answers using loop/thread context | Response addresses the question, no fabricated info |
+| Confirmation to recruiter (with Zoom) | SCHEDULED stage, client provided Zoom link in thread | Draft includes Zoom link from `extracted_entities` | Zoom link present in body, correct recipient |
 | Missing availability entities | AWAITING_CANDIDATE, `extracted_entities` has no time slots | Draft asks coordinator for input or generates generic follow-up | Does NOT fabricate availability slots |
 | Wrong candidate name in context | Loop has "Claire" but thread mentions "Clara" | Uses loop's canonical name ("Claire") | No name confusion |
 | Non-English availability text | Availability in thread is in different format (24h, non-ET) | Converts to ET format or flags for coordinator review | Does NOT silently pass through unconverted times |
@@ -501,7 +511,7 @@ Human-in-the-loop checkpoint: every generated draft requires explicit coordinato
 
 - **How should superseded drafts be handled in the UI?** When a coordinator sends a manual email that supersedes a pending suggestion (and its draft), should the draft disappear immediately or show as "superseded"? Currently the suggestion gets `superseded` status via `ClassifierHook._handle_outgoing_state_sync()`, but we need to decide whether to cascade this to the draft. *Owner: product team.*
 - **Should we track edit diffs?** When a coordinator edits a draft, should we store the original body alongside the edited version? This would enable measuring "how much did coordinators change?" which is a richer quality signal than binary "edited or not." Adds a `original_body` column. *Owner: engineering — decide during implementation.*
-- **What about CC recipients?** The data model supports `cc_emails`, but the recipient routing rules above only specify `to`. Should the client manager be CC'd on client emails? Should anyone be CC'd on recruiter forwards? *Owner: product team / coordinator feedback.*
+- ~~**What about CC recipients?**~~ **Resolved:** Client manager is always CC'd when present on the loop. See recipient routing table above.
 
 ## Milestones and Timeline
 
