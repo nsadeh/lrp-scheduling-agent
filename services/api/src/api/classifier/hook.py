@@ -20,6 +20,7 @@ from api.classifier.formatters import (
     format_email,
     format_events,
     format_loop_state,
+    format_thread_history,
 )
 from api.classifier.models import (
     ClassificationResult,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from langfuse import Langfuse
 
     from api.ai.llm_service import LLMService
+    from api.gmail.models import Message
     from api.scheduling.models import Loop, Stage
     from api.scheduling.service import LoopService
 
@@ -91,7 +93,7 @@ class ClassifierHook:
         msg = event.message
 
         # 1. Assemble context
-        context_input = await self._build_context(event, linked_loop)
+        context_input = await self._build_context(event, linked_loop, event.thread_messages)
 
         # 2. Call LLM
         try:
@@ -152,13 +154,16 @@ class ClassifierHook:
         self,
         event: EmailEvent,
         linked_loop: Loop | None,
+        thread_messages: list[Message] | None = None,
     ) -> ClassifyEmailInput:
         """Assemble all context for the LLM call."""
         msg = event.message
 
-        # Get thread messages for history (we only have the current message here;
-        # in production the worker passes the thread cache, but we fetch if needed)
-        thread_history_text = "No prior messages in this thread."
+        # Format thread history from the worker's thread cache
+        if thread_messages:
+            thread_history_text = format_thread_history(thread_messages, msg.id)
+        else:
+            thread_history_text = "No prior messages in this thread."
 
         # Load active loops for the coordinator (for thread-to-loop matching)
         active_loops: list[Loop] = []
