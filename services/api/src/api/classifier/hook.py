@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from langfuse import Langfuse
 
     from api.ai.llm_service import LLMService
+    from api.drafts.service import DraftService
     from api.gmail.models import Message
     from api.scheduling.models import Loop, Stage
     from api.scheduling.service import LoopService
@@ -58,11 +59,13 @@ class ClassifierHook:
         langfuse: Langfuse,
         suggestion_service: SuggestionService,
         loop_service: LoopService,
+        draft_service: DraftService | None = None,
     ):
         self._llm = llm
         self._langfuse = langfuse
         self._suggestions = suggestion_service
         self._loops = loop_service
+        self._draft_service = draft_service
 
     async def on_email(self, event: EmailEvent) -> None:
         """Process an email event — classify and persist suggestions."""
@@ -145,6 +148,22 @@ class ClassifierHook:
                 item.action,
                 item.confidence,
             )
+
+            # Draft generation for DRAFT_EMAIL actions
+            if (
+                item.action == SuggestedAction.DRAFT_EMAIL
+                and self._draft_service is not None
+                and linked_loop is not None
+            ):
+                try:
+                    await self._draft_service.generate_draft(
+                        suggestion=suggestion,
+                        loop=linked_loop,
+                        thread_messages=event.thread_messages,
+                    )
+                    logger.info("draft generated for suggestion %s", suggestion.id)
+                except Exception:
+                    logger.exception("draft generation failed for suggestion %s", suggestion.id)
 
         # 4. Outgoing email state sync: auto-advance and supersede
         if event.direction == MessageDirection.OUTGOING and linked_loop:

@@ -22,6 +22,7 @@ from api.addon.models import (
     PushCard,
     UpdateCard,
 )
+from api.classifier.models import SuggestionStatus
 from api.gmail.exceptions import GmailScopeError, GmailValidationError
 from api.scheduling.cards import (
     build_add_time_slot_form,
@@ -198,7 +199,7 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
 
     handler = _ACTION_HANDLERS.get(fn or "", _handle_unknown)
     try:
-        card = await handler(body, svc, email)
+        card = await handler(body, svc, email, request=request)
     except GmailScopeError as exc:
         logger.warning("Gmail scope error in action %s: %s", fn, exc)
         base = str(request.url).rsplit("/addon/", 1)[0]
@@ -215,7 +216,7 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: str, **_):
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     message_id = _get_param(body, "message_id")
 
@@ -249,7 +250,7 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
     )
 
 
-async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, **_):
     candidate_name = _get_form_value(body, "candidate_name") or "Unknown"
     client_name = _get_form_value(body, "client_name") or "Unknown"
     client_email = (_get_form_value(body, "client_email") or "").strip()
@@ -313,7 +314,7 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str):
     return build_loop_detail(loop)
 
 
-async def _handle_view_loop(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_view_loop(body: AddonRequest, svc: LoopService, email: str, **_):
     loop_id = _get_param(body, "loop_id")
     if not loop_id:
         board = await svc.get_status_board(email)
@@ -322,7 +323,7 @@ async def _handle_view_loop(body: AddonRequest, svc: LoopService, email: str):
     return build_loop_detail(loop)
 
 
-async def _handle_advance_stage(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_advance_stage(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     to_state = _get_param(body, "to_state")
     if not stage_id or not to_state:
@@ -334,7 +335,7 @@ async def _handle_advance_stage(body: AddonRequest, svc: LoopService, email: str
     return build_loop_detail(loop)
 
 
-async def _handle_mark_cold(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_mark_cold(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     if not stage_id:
         board = await svc.get_status_board(email)
@@ -345,7 +346,7 @@ async def _handle_mark_cold(body: AddonRequest, svc: LoopService, email: str):
     return build_loop_detail(loop)
 
 
-async def _handle_show_revive(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_show_revive(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id") or ""
     if not stage_id:
@@ -365,7 +366,7 @@ async def _handle_show_revive(body: AddonRequest, svc: LoopService, email: str):
     return build_revive_form(stage, loop_id)
 
 
-async def _handle_revive_stage(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_revive_stage(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     to_state = _get_form_value(body, "revive_to_state")
     if not stage_id or not to_state:
@@ -377,7 +378,7 @@ async def _handle_revive_stage(body: AddonRequest, svc: LoopService, email: str)
     return build_loop_detail(loop)
 
 
-async def _handle_add_stage(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_add_stage(body: AddonRequest, svc: LoopService, email: str, **_):
     loop_id = _get_param(body, "loop_id")
     if not loop_id:
         board = await svc.get_status_board(email)
@@ -393,7 +394,7 @@ async def _handle_add_stage(body: AddonRequest, svc: LoopService, email: str):
     return build_loop_detail(loop)
 
 
-async def _handle_compose_email(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_compose_email(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id")
     if not stage_id or not loop_id:
@@ -424,7 +425,7 @@ async def _handle_compose_email(body: AddonRequest, svc: LoopService, email: str
     return build_compose_email(loop, stage, to_email, subject, gmail_thread_id)
 
 
-async def _handle_send_email(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_send_email(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id")
     to_email = _get_param(body, "to_email")
@@ -461,7 +462,7 @@ async def _handle_send_email(body: AddonRequest, svc: LoopService, email: str):
     return build_loop_detail(loop)
 
 
-async def _handle_link_thread(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_link_thread(body: AddonRequest, svc: LoopService, email: str, **_):
     loop_id = _get_param(body, "loop_id")
     gmail_thread_id = body.gmail.thread_id if body.gmail else None
     if not loop_id or not gmail_thread_id:
@@ -473,7 +474,7 @@ async def _handle_link_thread(body: AddonRequest, svc: LoopService, email: str):
     return build_loop_detail(loop)
 
 
-async def _handle_show_add_time_slot(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_show_add_time_slot(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id") or ""
     if not stage_id:
@@ -493,7 +494,7 @@ async def _handle_show_add_time_slot(body: AddonRequest, svc: LoopService, email
     return build_add_time_slot_form(stage, loop_id)
 
 
-async def _handle_save_time_slot(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_save_time_slot(body: AddonRequest, svc: LoopService, email: str, **_):
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id")
     if not stage_id or not loop_id:
@@ -526,17 +527,35 @@ async def _handle_save_time_slot(body: AddonRequest, svc: LoopService, email: st
     return build_loop_detail(loop)
 
 
-async def _handle_show_drafts_tab(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_show_drafts_tab(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     board = await svc.get_status_board(email)
-    return build_drafts_tab(board)
+    card = build_drafts_tab(board)
+
+    # Inject pending AI drafts at the top if DraftService is available
+    request = kwargs.get("request")
+    draft_svc = _get_draft_service(request) if request else None
+    if draft_svc:
+        from api.drafts.cards import build_drafts_list_sections
+
+        pending_drafts = await draft_svc.get_pending_drafts(email)
+        if pending_drafts:
+            # Insert AI draft sections after the tab buttons (first section)
+            draft_sections = build_drafts_list_sections(pending_drafts)
+            nav = card.action.navigations[0]
+            existing_sections = nav.update_card.sections
+            nav.update_card.sections = (
+                existing_sections[:1] + draft_sections + existing_sections[1:]
+            )
+
+    return card
 
 
-async def _handle_show_status_tab(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_show_status_tab(body: AddonRequest, svc: LoopService, email: str, **_):
     board = await svc.get_status_board(email)
     return build_status_board(board)
 
 
-async def _handle_forward_thread(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_forward_thread(body: AddonRequest, svc: LoopService, email: str, **_):
     """Forward the current thread to the recruiter (no body) and advance to AWAITING_CANDIDATE."""
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id")
@@ -566,7 +585,7 @@ async def _handle_forward_thread(body: AddonRequest, svc: LoopService, email: st
     return build_loop_detail(loop)
 
 
-async def _handle_send_inline_email(body: AddonRequest, svc: LoopService, email: str):
+async def _handle_send_inline_email(body: AddonRequest, svc: LoopService, email: str, **_):
     """Send email to client with inline-composed body, advance to AWAITING_CLIENT."""
     stage_id = _get_param(body, "stage_id")
     loop_id = _get_param(body, "loop_id")
@@ -597,7 +616,155 @@ async def _handle_send_inline_email(body: AddonRequest, svc: LoopService, email:
     return build_loop_detail(loop)
 
 
-async def _handle_unknown(body: AddonRequest, svc: LoopService, email: str):
+# ---------------------------------------------------------------------------
+# AI Draft action handlers
+# ---------------------------------------------------------------------------
+
+
+def _get_draft_service(request: Request | None):
+    """Get DraftService from app state, or None if not available."""
+    if request is None:
+        return None
+    return getattr(request.app.state, "draft_service", None)
+
+
+async def _handle_view_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Show a read-only preview of an AI-generated draft."""
+    from api.drafts.cards import build_draft_preview
+
+    request = kwargs.get("request")
+    draft_svc = _get_draft_service(request)
+    if not draft_svc:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft_id = _get_param(body, "draft_id")
+    if not draft_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft = await draft_svc.get_draft(draft_id)
+    if not draft:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    return build_draft_preview(draft)
+
+
+async def _handle_edit_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Show the editable draft form with TextInput for body."""
+    from api.drafts.cards import build_draft_edit
+
+    request = kwargs.get("request")
+    draft_svc = _get_draft_service(request)
+    if not draft_svc:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft_id = _get_param(body, "draft_id")
+    if not draft_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft = await draft_svc.get_draft(draft_id)
+    if not draft:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    return build_draft_edit(draft)
+
+
+async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Send an AI-generated draft: update body if edited, send via LoopService, mark sent."""
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    draft_svc = _get_draft_service(request)
+    if not draft_svc:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft_id = _get_param(body, "draft_id")
+    if not draft_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft = await draft_svc.get_draft(draft_id)
+    if not draft:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    # If the body was edited inline, use the form value
+    edited_body = _get_form_value(body, "draft_body")
+    send_body = edited_body if edited_body is not None else draft.body
+    if edited_body is not None and edited_body != draft.body:
+        await draft_svc.update_draft_body(draft.id, send_body)
+
+    # Determine auto-advance based on stage state
+    loop = await svc.get_loop(draft.loop_id)
+    stage = next((s for s in loop.stages if s.id == draft.stage_id), None)
+    auto_advance_to = None
+    if stage:
+        if stage.state == StageState.NEW:
+            auto_advance_to = StageState.AWAITING_CANDIDATE
+        elif stage.state == StageState.AWAITING_CANDIDATE:
+            auto_advance_to = StageState.AWAITING_CLIENT
+
+    # Send email via existing LoopService path
+    await svc.send_email(
+        loop_id=draft.loop_id,
+        stage_id=draft.stage_id,
+        coordinator_email=email,
+        to=draft.to_emails,
+        subject=draft.subject,
+        body=send_body,
+        gmail_thread_id=draft.gmail_thread_id,
+        auto_advance_to=auto_advance_to,
+    )
+
+    # Mark draft sent + resolve parent suggestion as accepted
+    await draft_svc.mark_sent(draft.id)
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    await suggestion_svc.resolve(
+        draft.suggestion_id,
+        status=SuggestionStatus.ACCEPTED,
+        resolved_by=email,
+    )
+
+    loop = await svc.get_loop(draft.loop_id)
+    return build_loop_detail(loop)
+
+
+async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Discard an AI-generated draft and reject the parent suggestion."""
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    draft_svc = _get_draft_service(request)
+    if not draft_svc:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft_id = _get_param(body, "draft_id")
+    if not draft_id:
+        board = await svc.get_status_board(email)
+        return build_drafts_tab(board)
+
+    draft = await draft_svc.get_draft(draft_id)
+    if draft:
+        await draft_svc.mark_discarded(draft.id)
+        suggestion_svc = SuggestionService(db_pool=svc._pool)
+        await suggestion_svc.resolve(
+            draft.suggestion_id,
+            status=SuggestionStatus.REJECTED,
+            resolved_by=email,
+        )
+
+    board = await svc.get_status_board(email)
+    return build_drafts_tab(board)
+
+
+async def _handle_unknown(body: AddonRequest, svc: LoopService, email: str, **_):
     fn = body.common_event_object.invoked_function if body.common_event_object else None
     logger.warning("Unknown invokedFunction: %s", fn)
     board = await svc.get_status_board(email)
@@ -623,6 +790,10 @@ _ACTION_HANDLERS = {
     "forward_thread": _handle_forward_thread,
     "send_inline_email": _handle_send_inline_email,
     "edit_actors": _handle_show_drafts_tab,  # TODO: implement edit actors form
+    "view_draft": _handle_view_draft,
+    "edit_draft": _handle_edit_draft,
+    "send_draft": _handle_send_draft,
+    "discard_draft": _handle_discard_draft,
 }
 
 
