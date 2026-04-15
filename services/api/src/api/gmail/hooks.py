@@ -38,6 +38,7 @@ class EmailEvent(BaseModel):
     direction: MessageDirection
     message_type: MessageType
     new_participants: list[EmailAddress]
+    thread_messages: list[Message] = []
 
     model_config = {"populate_by_name": True}
 

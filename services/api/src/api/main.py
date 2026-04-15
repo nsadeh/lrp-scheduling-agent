@@ -66,14 +66,28 @@ async def lifespan(app: FastAPI):
         app.state.redis = None
         logger.warning("Redis not available — push pipeline disabled, poll fallback only")
 
-    # Email hook — default is logging, replaced by agent in production
-    app.state.email_hook = LoggingHook()
-
     # AI infrastructure — degrades gracefully when keys not set
     langfuse = init_langfuse()
     llm_service = init_llm_service()
     app.state.langfuse = langfuse
     app.state.llm_service = llm_service
+
+    # Email hook — ClassifierHook when enabled, LoggingHook as fallback
+    classifier_enabled = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
+    if classifier_enabled and langfuse and llm_service:
+        from api.classifier.hook import ClassifierHook
+        from api.classifier.service import SuggestionService
+
+        app.state.email_hook = ClassifierHook(
+            llm=llm_service,
+            langfuse=langfuse,
+            suggestion_service=SuggestionService(db_pool=pool),
+            loop_service=app.state.scheduling,
+        )
+        logger.info("ClassifierHook active")
+    else:
+        app.state.email_hook = LoggingHook()
+        logger.info("LoggingHook active")
 
     yield
 

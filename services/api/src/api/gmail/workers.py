@@ -31,6 +31,9 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "")
 DEBOUNCE_TTL = 60  # seconds
 
+# Feature flag: set CLASSIFIER_ENABLED=true to use the AI classifier
+CLASSIFIER_ENABLED = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
+
 
 async def startup(ctx: dict) -> None:
     """Initialize shared resources for all worker jobs."""
@@ -46,8 +49,42 @@ async def startup(ctx: dict) -> None:
     ctx["db"] = pool
     ctx["token_store"] = token_store
     ctx["gmail"] = gmail
+
+    # Email hook: ClassifierHook when enabled, LoggingHook as fallback
+    if CLASSIFIER_ENABLED:
+        hook = _init_classifier_hook(pool, gmail)
+        if hook:
+            ctx["hook"] = hook
+            logger.info("worker startup complete — ClassifierHook active")
+            return
+
     ctx["hook"] = LoggingHook()
-    logger.info("worker startup complete")
+    logger.info("worker startup complete — LoggingHook active")
+
+
+def _init_classifier_hook(pool, gmail):
+    """Create a ClassifierHook if AI infrastructure is available."""
+    from api.ai import init_langfuse, init_llm_service
+    from api.classifier.hook import ClassifierHook
+    from api.classifier.service import SuggestionService
+    from api.scheduling.service import LoopService
+
+    langfuse = init_langfuse()
+    llm = init_llm_service()
+
+    if not langfuse or not llm:
+        logger.warning(
+            "CLASSIFIER_ENABLED=true but AI infrastructure not available — "
+            "falling back to LoggingHook"
+        )
+        return None
+
+    return ClassifierHook(
+        llm=llm,
+        langfuse=langfuse,
+        suggestion_service=SuggestionService(db_pool=pool),
+        loop_service=LoopService(db_pool=pool, gmail=gmail),
+    )
 
 
 async def shutdown(ctx: dict) -> None:
@@ -265,6 +302,7 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
                 direction=direction,
                 message_type=message_type,
                 new_participants=new_participants,
+                thread_messages=thread_messages,
             )
             await hook.on_email(event)
 

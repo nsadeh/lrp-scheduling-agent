@@ -50,8 +50,9 @@ class TestStageState:
     def test_new_can_advance_or_go_cold(self):
         allowed = ALLOWED_TRANSITIONS[StageState.NEW]
         assert StageState.AWAITING_CANDIDATE in allowed
+        assert StageState.AWAITING_CLIENT in allowed
         assert StageState.COLD in allowed
-        assert len(allowed) == 2
+        assert len(allowed) == 3
 
 
 class TestStage:
