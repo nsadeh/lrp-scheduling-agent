@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 DEFAULT_THREAD_CHAR_BUDGET = 12_000
 
 
-def format_email(message: Message, direction: str) -> str:
+def format_email(message: Message, direction: str, message_type: str = "") -> str:
     """Format a single email into a human-readable block for the LLM."""
     from_str = (
         f"{message.from_.name} <{message.from_.email}>"
@@ -36,15 +36,12 @@ def format_email(message: Message, direction: str) -> str:
     ]
     if cc_str:
         lines.append(f"CC: {cc_str}")
-    lines.extend(
-        [
-            f"Subject: {message.subject}",
-            f"Date: {message.date.isoformat()}",
-            f"Direction: {direction}",
-            "",
-            message.body_text.strip(),
-        ]
-    )
+    lines.append(f"Subject: {message.subject}")
+    lines.append(f"Date: {message.date.isoformat()}")
+    lines.append(f"Direction: {direction}")
+    if message_type:
+        lines.append(f"Message-Type: {message_type}")
+    lines.extend(["", message.body_text.strip()])
     return "\n".join(lines)
 
 

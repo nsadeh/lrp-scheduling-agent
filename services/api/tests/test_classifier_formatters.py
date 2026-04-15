@@ -102,6 +102,14 @@ class TestFormatEmail:
         assert "CC:" not in result
         assert "Direction: outgoing" in result
 
+    def test_includes_message_type(self):
+        result = format_email(_msg(), "incoming", "forward")
+        assert "Message-Type: forward" in result
+
+    def test_omits_message_type_when_empty(self):
+        result = format_email(_msg(), "incoming")
+        assert "Message-Type" not in result
+
 
 class TestFormatThreadHistory:
     def test_empty_thread(self):

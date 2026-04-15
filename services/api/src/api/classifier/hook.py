@@ -178,7 +178,7 @@ class ClassifierHook:
             events = await self._loops.get_events(linked_loop.id)
 
         return ClassifyEmailInput(
-            email=format_email(msg, event.direction.value),
+            email=format_email(msg, event.direction.value, event.message_type.value),
             thread_history=thread_history_text,
             loop_state=format_loop_state(linked_loop),
             active_loops_summary=format_active_loops(active_loops),
