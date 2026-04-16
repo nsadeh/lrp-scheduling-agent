@@ -1,5 +1,7 @@
-"""Tests for Google Workspace Add-on token verification."""
+"""Tests for Google Workspace Add-on user token verification."""
 
+import base64
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,67 +10,73 @@ from fastapi import HTTPException
 from api.addon.auth import verify_google_addon_token
 
 
-def _mock_request(url: str = "https://example.com/addon/homepage") -> MagicMock:
-    """Create a mock FastAPI Request with the given URL."""
+def _mock_request(body: dict | None = None) -> MagicMock:
+    """Create a mock FastAPI Request with the given body."""
+
     req = MagicMock()
-    req.url = url
+    req.url = "https://example.com/addon/homepage"
+
+    async def mock_json():
+        return body or {}
+
+    req.json = mock_json
     return req
 
 
+def _body_with_token(email: str = "nim@longridgepartners.com") -> dict:
+    """Build a request body with a valid-format userIdToken."""
+    payload = base64.urlsafe_b64encode(json.dumps({"email": email}).encode()).decode()
+    return {
+        "authorizationEventObject": {
+            "userIdToken": f"header.{payload}.signature",
+        },
+    }
+
+
 class TestVerifyGoogleAddonToken:
-    async def test_missing_bearer_prefix_returns_401(self):
+    async def test_missing_user_id_token_returns_401(self):
+        req = _mock_request(body={"commonEventObject": {}})
         with pytest.raises(HTTPException) as exc_info:
-            await verify_google_addon_token(
-                request=_mock_request(), authorization="not-a-bearer-token"
-            )
+            await verify_google_addon_token(req)
         assert exc_info.value.status_code == 401
 
-    async def test_empty_authorization_returns_401(self):
+    async def test_empty_body_returns_401(self):
+        req = _mock_request(body={})
         with pytest.raises(HTTPException) as exc_info:
-            await verify_google_addon_token(request=_mock_request(), authorization="")
+            await verify_google_addon_token(req)
         assert exc_info.value.status_code == 401
+
+    async def test_valid_token_returns_claims(self):
+        body = _body_with_token("nim@longridgepartners.com")
+        fake_claims = {"iss": "accounts.google.com", "email": "nim@longridgepartners.com"}
+        req = _mock_request(body=body)
+
+        with patch("api.addon.auth.id_token.verify_token", return_value=fake_claims):
+            result = await verify_google_addon_token(req)
+
+        assert result["email"] == "nim@longridgepartners.com"
 
     async def test_invalid_token_returns_401(self):
+        body = _body_with_token()
+        req = _mock_request(body=body)
+
         with (
-            patch("api.addon.auth.id_token.verify_token", side_effect=ValueError("bad token")),
+            patch("api.addon.auth.id_token.verify_token", side_effect=ValueError("bad")),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await verify_google_addon_token(
-                request=_mock_request(), authorization="Bearer fake.token.here"
-            )
+            await verify_google_addon_token(req)
         assert exc_info.value.status_code == 401
 
-    async def test_wrong_issuer_returns_401(self):
-        fake_claims = {"iss": "https://evil.example.com", "email": "good@gcp-sa.com"}
+    async def test_token_without_email_returns_401(self):
+        body = _body_with_token()
+        req = _mock_request(body=body)
+
+        # Token verifies but has no email claim
         with (
-            patch("api.addon.auth.id_token.verify_token", return_value=fake_claims),
+            patch(
+                "api.addon.auth.id_token.verify_token", return_value={"iss": "accounts.google.com"}
+            ),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await verify_google_addon_token(
-                request=_mock_request(), authorization="Bearer valid.token.here"
-            )
+            await verify_google_addon_token(req)
         assert exc_info.value.status_code == 401
-
-    async def test_wrong_email_returns_401(self, monkeypatch):
-        monkeypatch.setattr("api.addon.auth.GOOGLE_ADDON_SA_EMAIL", "good@sa.com")
-
-        fake_claims = {"iss": "accounts.google.com", "email": "evil@sa.com"}
-        with (
-            patch("api.addon.auth.id_token.verify_token", return_value=fake_claims),
-            pytest.raises(HTTPException) as exc_info,
-        ):
-            await verify_google_addon_token(
-                request=_mock_request(), authorization="Bearer valid.token.here"
-            )
-        assert exc_info.value.status_code == 401
-
-    async def test_valid_token_returns_claims(self, monkeypatch):
-        monkeypatch.setattr("api.addon.auth.GOOGLE_ADDON_SA_EMAIL", "addons-123@gcp-sa.com")
-
-        fake_claims = {"iss": "accounts.google.com", "email": "addons-123@gcp-sa.com"}
-        with patch("api.addon.auth.id_token.verify_token", return_value=fake_claims):
-            result = await verify_google_addon_token(
-                request=_mock_request(), authorization="Bearer valid.token.here"
-            )
-        assert result["iss"] == "accounts.google.com"
-        assert result["email"] == "addons-123@gcp-sa.com"

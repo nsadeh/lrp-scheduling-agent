@@ -71,38 +71,28 @@ def _get_base_url(request: Request) -> str:
 def _get_user_email(body: AddonRequest) -> str:
     """Extract coordinator email from the add-on request.
 
-    Google's add-on framework sends a user ID token in the authorization event object.
-    We decode it (without verification — it's already been verified by our auth dependency)
-    to get the user's email.
+    The auth dependency (verify_google_addon_token) already verified the
+    userIdToken. We just decode the payload here to get the email — no
+    re-verification needed.
 
-    Raises ValueError if the email cannot be determined — callers should
-    handle this rather than silently operating on a wrong account.
+    Raises ValueError if the email cannot be determined.
     """
     import base64
     import json
 
     auth = body.authorization_event_object
-    if not auth:
-        logger.error("No authorizationEventObject in add-on request")
-        raise ValueError("Could not determine coordinator email from add-on request")
+    if not auth or not auth.user_id_token:
+        raise ValueError("No userIdToken in add-on request")
 
-    # Try userIdToken first (preferred — contains the user's email)
-    for token_field in [auth.user_id_token, auth.system_id_token]:
-        if not token_field:
-            continue
-        try:
-            payload = token_field.split(".")[1]
-            payload += "=" * (4 - len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            if "email" in claims:
-                return claims["email"]
-        except Exception:
-            logger.warning("Could not decode token for email", exc_info=True)
+    try:
+        payload = auth.user_id_token.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        if "email" in claims:
+            return claims["email"]
+    except Exception:
+        logger.warning("Could not decode userIdToken for email", exc_info=True)
 
-    logger.error(
-        "No email found in add-on request tokens. " "authorizationEventObject keys: %s",
-        list(auth.model_dump(exclude_none=True).keys()),
-    )
     raise ValueError("Could not determine coordinator email from add-on request")
 
 
