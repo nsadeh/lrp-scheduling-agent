@@ -45,5 +45,5 @@ async def verify_google_addon_token(
         logger.warning("Token verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
-    logger.debug("Verified add-on request from Google")
+    logger.info("Verified add-on request from Google (iss=%s)", claims.get("iss"))
     return claims

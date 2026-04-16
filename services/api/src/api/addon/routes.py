@@ -71,9 +71,8 @@ def _get_base_url(request: Request) -> str:
 def _get_user_email(body: AddonRequest) -> str:
     """Extract coordinator email from the add-on request.
 
-    The auth dependency (verify_google_addon_token) already verified the
-    userIdToken. We just decode the payload here to get the email — no
-    re-verification needed.
+    Tries userIdToken first. Falls back to userOAuthToken or systemIdToken
+    if available. All are Google-signed JWTs with an email claim.
 
     Raises ValueError if the email cannot be determined.
     """
@@ -81,18 +80,55 @@ def _get_user_email(body: AddonRequest) -> str:
     import json
 
     auth = body.authorization_event_object
-    if not auth or not auth.user_id_token:
-        raise ValueError("No userIdToken in add-on request")
+    if not auth:
+        logger.error("No authorizationEventObject in request body")
+        raise ValueError("No authorizationEventObject in add-on request")
 
-    try:
-        payload = auth.user_id_token.split(".")[1]
-        payload += "=" * (4 - len(payload) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-        if "email" in claims:
-            return claims["email"]
-    except Exception:
-        logger.warning("Could not decode userIdToken for email", exc_info=True)
+    # Try each token type — they're all JWTs with potential email claims
+    token_sources = [
+        ("userIdToken", auth.user_id_token),
+        ("systemIdToken", auth.system_id_token),
+    ]
 
+    # Log what we received for debugging
+    available = [name for name, val in token_sources if val]
+    logger.info("Available tokens in request: %s", available)
+
+    for name, token_value in token_sources:
+        if not token_value:
+            continue
+        try:
+            payload = token_value.split(".")[1]
+            payload += "=" * (4 - len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            if "email" in claims:
+                logger.info("Got user email from %s: %s", name, claims["email"])
+                return claims["email"]
+        except Exception:
+            logger.warning("Could not decode %s for email", name, exc_info=True)
+
+    # Fallback: if we have a userOAuthToken, call Google's userinfo endpoint
+    if auth.user_oauth_token:
+        try:
+            import requests as http_requests
+
+            resp = http_requests.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {auth.user_oauth_token}"},
+                timeout=5,
+            )
+            if resp.ok:
+                email = resp.json().get("email")
+                if email:
+                    logger.info("Got user email from userinfo endpoint: %s", email)
+                    return email
+        except Exception:
+            logger.warning("Failed to fetch userinfo", exc_info=True)
+
+    logger.error(
+        "No email found in any token. Available: %s",
+        [name for name, val in token_sources if val],
+    )
     raise ValueError("Could not determine coordinator email from add-on request")
 
 
@@ -164,6 +200,21 @@ def _as_push(response: CardResponse) -> CardResponse:
 async def addon_homepage(body: AddonRequest, request: Request) -> dict:
     """Homepage trigger — suggestion-centric overview."""
     _ensure_action_url(request)
+
+    # Debug: log what Google actually sends in authorizationEventObject
+    if body.authorization_event_object:
+        auth_dump = body.authorization_event_object.model_dump(exclude_none=True)
+        has_id = body.authorization_event_object.user_id_token is not None
+        has_oauth = body.authorization_event_object.user_oauth_token is not None
+        logger.info(
+            "Homepage auth keys: %s, userIdToken: %s, userOAuthToken: %s",
+            list(auth_dump.keys()),
+            has_id,
+            has_oauth,
+        )
+    else:
+        logger.warning("Homepage request has NO authorizationEventObject")
+
     email = _get_user_email(body)
 
     auth_card = await _check_gmail_auth(request, email)
