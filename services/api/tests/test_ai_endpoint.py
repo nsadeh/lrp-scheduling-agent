@@ -280,3 +280,42 @@ class TestLLMEndpointCall:
         mock_langfuse.start_as_current_observation.assert_called_once()
         call_kwargs = mock_langfuse.start_as_current_observation.call_args.kwargs
         assert call_kwargs["name"] == "classify_email"
+
+    async def test_observation_output_is_set(self, endpoint, mock_langfuse, mock_llm):
+        """Verify the parsed output is recorded on the LangFuse observation."""
+        mock_llm.complete.return_value = LLMResponse(
+            content=json.dumps({"classification": "scheduling", "confidence": 0.95}),
+            model="test",
+            provider="test",
+        )
+
+        await endpoint(
+            llm=mock_llm,
+            langfuse=mock_langfuse,
+            data=SampleInput(subject="Test", body="Test"),
+        )
+
+        mock_langfuse.update_current_span.assert_called_once_with(
+            output={"classification": "scheduling", "confidence": 0.95},
+        )
+
+    async def test_observation_output_set_on_retry(self, endpoint, mock_langfuse, mock_llm):
+        """Verify the output is recorded even when the first parse fails and retry succeeds."""
+        mock_llm.complete.side_effect = [
+            LLMResponse(content="not json", model="test", provider="test"),
+            LLMResponse(
+                content=json.dumps({"classification": "other", "confidence": 0.7}),
+                model="test",
+                provider="test",
+            ),
+        ]
+
+        await endpoint(
+            llm=mock_llm,
+            langfuse=mock_langfuse,
+            data=SampleInput(subject="Test", body="Test"),
+        )
+
+        mock_langfuse.update_current_span.assert_called_once_with(
+            output={"classification": "other", "confidence": 0.7},
+        )
