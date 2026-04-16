@@ -126,6 +126,8 @@ class OpenLink(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
     url: str
+    open_as: str | None = Field(default=None, alias="openAs")  # "FULL_SIZE" or "OVERLAY"
+    on_close: str | None = Field(default=None, alias="onClose")  # "NOTHING" or "RELOAD"
 
 
 class OnClick(BaseModel):
