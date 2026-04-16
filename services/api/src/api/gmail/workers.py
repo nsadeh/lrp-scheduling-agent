@@ -67,6 +67,7 @@ def _init_classifier_hook(pool, gmail):
     from api.ai import init_langfuse, init_llm_service
     from api.classifier.hook import ClassifierHook
     from api.classifier.service import SuggestionService
+    from api.drafts.service import DraftService
     from api.scheduling.service import LoopService
 
     langfuse = init_langfuse()
@@ -79,11 +80,21 @@ def _init_classifier_hook(pool, gmail):
         )
         return None
 
+    loop_service = LoopService(db_pool=pool, gmail=gmail)
+
+    draft_service = DraftService(
+        db_pool=pool,
+        loop_service=loop_service,
+        llm=llm,
+        langfuse=langfuse,
+    )
+
     return ClassifierHook(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=SuggestionService(db_pool=pool),
-        loop_service=LoopService(db_pool=pool, gmail=gmail),
+        loop_service=loop_service,
+        draft_service=draft_service,
     )
 
 

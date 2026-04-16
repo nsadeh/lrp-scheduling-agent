@@ -46,6 +46,28 @@ class SuggestionStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+# -- Action data: typed payloads per action type --
+
+
+class DraftEmailData(BaseModel):
+    """Action data for DRAFT_EMAIL suggestions.
+
+    The classifier (agent brain) fills this when it decides an email should
+    be drafted. The drafter (tool) reads it as its instruction set.
+    """
+
+    # TODO: Define the fields that the classifier should provide
+    # to the drafter. Consider:
+    #   - What instruction does the drafter need?
+    #   - What recipient context matters?
+    #   - What entities should be highlighted vs. left in extracted_entities?
+    #
+    # The drafter prompt only knows tone rules — it relies on this data
+    # to know WHAT to write.
+    directive: str  # e.g. "Share Claire's availability with the client"
+    recipient_type: str  # "client" or "recruiter"
+
+
 # -- LLM output schema --
 
 
@@ -62,6 +84,7 @@ class SuggestionItem(BaseModel):
     auto_advance: bool = False
     extracted_entities: dict[str, Any] = {}
     questions: list[str] = []
+    action_data: dict[str, Any] = {}  # Typed per action — DraftEmailData for DRAFT_EMAIL
 
 
 class ClassificationResult(BaseModel):
@@ -91,6 +114,7 @@ class Suggestion(BaseModel):
     target_state: StageState | None = None
     extracted_entities: dict[str, Any] = {}
     questions: list[str] = []
+    action_data: dict[str, Any] = {}
     reasoning: str | None = None
     status: SuggestionStatus = SuggestionStatus.PENDING
     resolved_at: datetime | None = None

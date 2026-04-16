@@ -20,7 +20,9 @@ from api.classifier.formatters import (
     format_email,
     format_events,
     format_loop_state,
+    format_stage_states,
     format_thread_history,
+    format_transitions,
 )
 from api.classifier.models import (
     ClassificationResult,
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     from langfuse import Langfuse
 
     from api.ai.llm_service import LLMService
+    from api.drafts.service import DraftService
     from api.gmail.models import Message
     from api.scheduling.models import Loop, Stage
     from api.scheduling.service import LoopService
@@ -58,11 +61,13 @@ class ClassifierHook:
         langfuse: Langfuse,
         suggestion_service: SuggestionService,
         loop_service: LoopService,
+        draft_service: DraftService | None = None,
     ):
         self._llm = llm
         self._langfuse = langfuse
         self._suggestions = suggestion_service
         self._loops = loop_service
+        self._draft_service = draft_service
 
     async def on_email(self, event: EmailEvent) -> None:
         """Process an email event — classify and persist suggestions."""
@@ -146,6 +151,22 @@ class ClassifierHook:
                 item.confidence,
             )
 
+            # Draft generation for DRAFT_EMAIL actions
+            if (
+                item.action == SuggestedAction.DRAFT_EMAIL
+                and self._draft_service is not None
+                and linked_loop is not None
+            ):
+                try:
+                    await self._draft_service.generate_draft(
+                        suggestion=suggestion,
+                        loop=linked_loop,
+                        thread_messages=event.thread_messages,
+                    )
+                    logger.info("draft generated for suggestion %s", suggestion.id)
+                except Exception:
+                    logger.exception("draft generation failed for suggestion %s", suggestion.id)
+
         # 4. Outgoing email state sync: auto-advance and supersede
         if event.direction == MessageDirection.OUTGOING and linked_loop:
             await self._handle_outgoing_state_sync(result, linked_loop, event.coordinator_email)
@@ -178,6 +199,8 @@ class ClassifierHook:
             events = await self._loops.get_events(linked_loop.id)
 
         return ClassifyEmailInput(
+            stage_states=format_stage_states(),
+            transitions=format_transitions(),
             email=format_email(msg, event.direction.value, event.message_type.value),
             thread_history=thread_history_text,
             loop_state=format_loop_state(linked_loop),

@@ -72,6 +72,20 @@ async def lifespan(app: FastAPI):
     app.state.langfuse = langfuse
     app.state.llm_service = llm_service
 
+    # Draft service — available whenever AI infrastructure is up
+    draft_service = None
+    if langfuse and llm_service:
+        from api.drafts.service import DraftService
+
+        draft_service = DraftService(
+            db_pool=pool,
+            loop_service=app.state.scheduling,
+            llm=llm_service,
+            langfuse=langfuse,
+        )
+        logger.info("DraftService initialized")
+    app.state.draft_service = draft_service
+
     # Email hook — ClassifierHook when enabled, LoggingHook as fallback
     classifier_enabled = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
     if classifier_enabled and langfuse and llm_service:
@@ -83,6 +97,7 @@ async def lifespan(app: FastAPI):
             langfuse=langfuse,
             suggestion_service=SuggestionService(db_pool=pool),
             loop_service=app.state.scheduling,
+            draft_service=draft_service,
         )
         logger.info("ClassifierHook active")
     else:

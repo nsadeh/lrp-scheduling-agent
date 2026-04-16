@@ -62,6 +62,7 @@ class SuggestionService:
                 target_state=item.target_state,
                 extracted_entities=json.dumps(item.extracted_entities),
                 questions=json.dumps(item.questions),
+                action_data=json.dumps(item.action_data),
                 reasoning=reasoning,
                 status=status,
             )
@@ -119,6 +120,9 @@ def _row_to_suggestion(row: tuple) -> Suggestion:
     questions = row[13]
     if isinstance(questions, str):
         questions = json.loads(questions)
+    action_data = row[14]
+    if isinstance(action_data, str):
+        action_data = json.loads(action_data)
 
     return Suggestion(
         id=row[0],
@@ -135,9 +139,10 @@ def _row_to_suggestion(row: tuple) -> Suggestion:
         target_state=row[11],
         extracted_entities=entities,
         questions=questions,
-        reasoning=row[14],
-        status=row[15],
-        resolved_at=row[16],
-        resolved_by=row[17],
-        created_at=row[18],
+        action_data=action_data,
+        reasoning=row[15],
+        status=row[16],
+        resolved_at=row[17],
+        resolved_by=row[18],
+        created_at=row[19],
     )
