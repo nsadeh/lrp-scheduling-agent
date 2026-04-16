@@ -163,6 +163,7 @@ class LLMEndpoint:
                 response.provider,
                 response.latency_ms,
             )
+            langfuse.update_current_span(output=parsed.model_dump())
             return parsed
 
         # 6. Retry once with "fix your JSON" follow-up
@@ -189,6 +190,7 @@ class LLMEndpoint:
                 retry_response.model,
                 retry_response.latency_ms,
             )
+            langfuse.update_current_span(output=parsed.model_dump())
             return parsed
 
         raise LLMParseError(
