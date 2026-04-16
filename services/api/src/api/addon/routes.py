@@ -22,13 +22,14 @@ from api.addon.models import (
     PushCard,
     UpdateCard,
 )
-from api.classifier.models import SuggestionStatus
+from api.classifier.models import SuggestedAction, SuggestionStatus
 from api.gmail.exceptions import GmailScopeError, GmailValidationError
+from api.overview.cards import build_overview
+from api.overview.service import OverviewService
 from api.scheduling.cards import (
     build_add_time_slot_form,
     build_auth_required,
     build_compose_email,
-    build_contextual_linked,
     build_contextual_unlinked,
     build_create_loop_form,
     build_drafts_tab,
@@ -51,6 +52,20 @@ addon_router = APIRouter(
 
 def _get_scheduling(request: Request) -> LoopService:
     return request.app.state.scheduling
+
+
+def _get_overview_service(request: Request) -> OverviewService:
+    svc = getattr(request.app.state, "overview_service", None)
+    if svc is None:
+        # Lazily create from the db pool
+        svc = OverviewService(request.app.state.db)
+        request.app.state.overview_service = svc
+    return svc
+
+
+def _get_base_url(request: Request) -> str:
+    """Extract the base URL from the current request (e.g. https://xxx.ngrok-free.app)."""
+    return str(request.url).rsplit("/addon/", 1)[0]
 
 
 def _get_user_email(body: AddonRequest) -> str:
@@ -125,6 +140,14 @@ def _ensure_action_url(request: Request) -> None:
     set_action_url(f"{base}/addon/action")
 
 
+async def _build_refreshed_overview(request: Request, email: str) -> CardResponse:
+    """Fetch latest suggestions and return a fresh overview card."""
+    overview_svc = _get_overview_service(request)
+    base_url = _get_base_url(request)
+    groups = await overview_svc.get_overview_data(email)
+    return build_overview(groups, base_url=base_url)
+
+
 def _as_push(response: CardResponse) -> CardResponse:
     """Convert updateCard navigations to pushCard for initial triggers."""
     navigations = [
@@ -136,7 +159,7 @@ def _as_push(response: CardResponse) -> CardResponse:
 
 @addon_router.post("/homepage")
 async def addon_homepage(body: AddonRequest, request: Request) -> dict:
-    """Homepage trigger — status board showing all active loops."""
+    """Homepage trigger — suggestion-centric overview."""
     _ensure_action_url(request)
     email = _get_user_email(body)
 
@@ -144,14 +167,13 @@ async def addon_homepage(body: AddonRequest, request: Request) -> dict:
     if auth_card:
         return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
-    svc = _get_scheduling(request)
-    board = await svc.get_status_board(email)
-    return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
+    card = await _build_refreshed_overview(request, email)
+    return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
 
 @addon_router.post("/on-message")
 async def addon_on_message(body: AddonRequest, request: Request) -> dict:
-    """Contextual trigger — check if this email thread is linked to a loop."""
+    """Contextual trigger — show suggestions for this thread, or create prompt."""
     _ensure_action_url(request)
     email = _get_user_email(body)
 
@@ -159,7 +181,6 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     if auth_card:
         return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
-    svc = _get_scheduling(request)
     thread_id = None
     message_id = None
     if body.gmail:
@@ -167,14 +188,25 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
         message_id = body.gmail.message_id
 
     if not thread_id:
-        board = await svc.get_status_board(_get_user_email(body))
-        return _as_push(build_drafts_tab(board)).model_dump(by_alias=True, exclude_none=True)
+        # No thread context — show full overview
+        card = await _build_refreshed_overview(request, email)
+        return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
-    loop = await svc.find_loop_by_thread(thread_id)
-    if loop:
-        card = build_contextual_linked(loop)
+    # Show suggestions filtered to this thread
+    overview_svc = _get_overview_service(request)
+    base_url = _get_base_url(request)
+    groups = await overview_svc.get_thread_overview_data(thread_id, email)
+
+    if groups:
+        card = build_overview(groups, base_url=base_url)
     else:
-        card = build_contextual_unlinked(thread_id, message_id=message_id)
+        # No suggestions for this thread — check if it's linked to a loop
+        svc = _get_scheduling(request)
+        loop = await svc.find_loop_by_thread(thread_id)
+        if loop:
+            card = build_loop_detail(loop)
+        else:
+            card = build_contextual_unlinked(thread_id, message_id=message_id)
 
     return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
@@ -220,33 +252,46 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     message_id = _get_param(body, "message_id")
 
-    # Try to pre-fill from message metadata via Gmail API
-    prefill_client_name = None
-    prefill_client_email = None
-    prefill_cm_name = None
-    prefill_cm_email = None
+    # Check for prefill params from suggestion entities (passed by overview card)
+    prefill_candidate_name = _get_param(body, "prefill_candidate_name")
+    prefill_client_name = _get_param(body, "prefill_client_name")
+    prefill_client_email = _get_param(body, "prefill_client_email")
+    prefill_client_company = _get_param(body, "prefill_client_company")
+    prefill_recruiter_name = _get_param(body, "prefill_recruiter_name")
+    prefill_recruiter_email = _get_param(body, "prefill_recruiter_email")
+    prefill_cm_name = _get_param(body, "prefill_cm_name")
+    prefill_cm_email = _get_param(body, "prefill_cm_email")
     gmail_subject = None
 
-    if message_id and svc._gmail:
+    # If no prefill from suggestion, try Gmail message metadata
+    if not prefill_client_email and message_id and svc._gmail:
         try:
             msg = await svc._gmail.get_message(email, message_id)
             if msg.from_:
-                prefill_client_name = msg.from_.name or ""
+                prefill_client_name = prefill_client_name or msg.from_.name or ""
                 prefill_client_email = msg.from_.email
             if msg.cc:
-                prefill_cm_name = msg.cc[0].name or ""
-                prefill_cm_email = msg.cc[0].email
+                prefill_cm_name = prefill_cm_name or msg.cc[0].name or ""
+                prefill_cm_email = prefill_cm_email or msg.cc[0].email
             gmail_subject = msg.subject
         except Exception:
             logger.warning("Could not fetch message %s for pre-fill", message_id, exc_info=True)
 
+    # Pass suggestion_id through so create_loop can resolve it
+    suggestion_id = _get_param(body, "suggestion_id")
+
     return build_create_loop_form(
         gmail_thread_id=gmail_thread_id,
         gmail_subject=gmail_subject,
+        prefill_candidate_name=prefill_candidate_name,
         prefill_client_name=prefill_client_name,
         prefill_client_email=prefill_client_email,
+        prefill_client_company=prefill_client_company,
+        prefill_recruiter_name=prefill_recruiter_name,
+        prefill_recruiter_email=prefill_recruiter_email,
         prefill_cm_name=prefill_cm_name,
         prefill_cm_email=prefill_cm_email,
+        suggestion_id=suggestion_id,
     )
 
 
@@ -311,6 +356,15 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
         gmail_thread_id=gmail_thread_id,
         gmail_subject=gmail_subject,
     )
+
+    # Resolve the parent suggestion if this was triggered from the overview
+    suggestion_id = _get_param(body, "suggestion_id")
+    if suggestion_id:
+        from api.classifier.service import SuggestionService
+
+        suggestion_svc = SuggestionService(db_pool=svc._pool)
+        await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
+
     return build_loop_detail(loop)
 
 
@@ -673,21 +727,24 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     request = kwargs.get("request")
     draft_svc = _get_draft_service(request)
     if not draft_svc:
-        board = await svc.get_status_board(email)
-        return build_drafts_tab(board)
+        return await _build_refreshed_overview(request, email)
 
     draft_id = _get_param(body, "draft_id")
     if not draft_id:
-        board = await svc.get_status_board(email)
-        return build_drafts_tab(board)
+        return await _build_refreshed_overview(request, email)
 
     draft = await draft_svc.get_draft(draft_id)
     if not draft:
-        board = await svc.get_status_board(email)
-        return build_drafts_tab(board)
+        return await _build_refreshed_overview(request, email)
 
     # If the body was edited inline, use the form value
-    edited_body = _get_form_value(body, "draft_body")
+    # Check both the suggestion-specific input name and the generic "draft_body"
+    suggestion_id = _get_param(body, "suggestion_id")
+    edited_body = None
+    if suggestion_id:
+        edited_body = _get_form_value(body, f"draft_body_{suggestion_id}")
+    if edited_body is None:
+        edited_body = _get_form_value(body, "draft_body")
     send_body = edited_body if edited_body is not None else draft.body
     if edited_body is not None and edited_body != draft.body:
         await draft_svc.update_draft_body(draft.id, send_body)
@@ -723,8 +780,8 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
         resolved_by=email,
     )
 
-    loop = await svc.get_loop(draft.loop_id)
-    return build_loop_detail(loop)
+    # Return refreshed overview instead of loop detail
+    return await _build_refreshed_overview(request, email)
 
 
 async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -734,13 +791,11 @@ async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str
     request = kwargs.get("request")
     draft_svc = _get_draft_service(request)
     if not draft_svc:
-        board = await svc.get_status_board(email)
-        return build_drafts_tab(board)
+        return await _build_refreshed_overview(request, email)
 
     draft_id = _get_param(body, "draft_id")
     if not draft_id:
-        board = await svc.get_status_board(email)
-        return build_drafts_tab(board)
+        return await _build_refreshed_overview(request, email)
 
     draft = await draft_svc.get_draft(draft_id)
     if draft:
@@ -752,8 +807,70 @@ async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str
             resolved_by=email,
         )
 
-    board = await svc.get_status_board(email)
-    return build_drafts_tab(board)
+    return await _build_refreshed_overview(request, email)
+
+
+async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Generic accept handler — dispatches by suggestion action type."""
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    suggestion_id = _get_param(body, "suggestion_id")
+    if not suggestion_id or not request:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+    if not suggestion:
+        return await _build_refreshed_overview(request, email)
+
+    # Dispatch by action type
+    if suggestion.action == SuggestedAction.ADVANCE_STAGE:
+        if suggestion.stage_id and suggestion.target_state:
+            await svc.advance_stage(suggestion.stage_id, StageState(suggestion.target_state), email)
+    elif suggestion.action == SuggestedAction.MARK_COLD:
+        if suggestion.stage_id:
+            await svc.mark_cold(suggestion.stage_id, email)
+    elif suggestion.action == SuggestedAction.LINK_THREAD:
+        target_loop_id = suggestion.loop_id or suggestion.extracted_entities.get("target_loop_id")
+        if target_loop_id and suggestion.gmail_thread_id:
+            await svc.link_thread(target_loop_id, suggestion.gmail_thread_id, None, email)
+
+    # Resolve the suggestion as accepted
+    await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
+
+    return await _build_refreshed_overview(request, email)
+
+
+async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Dismiss a suggestion — resolve as REJECTED, discard draft if applicable."""
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    suggestion_id = _get_param(body, "suggestion_id")
+    if not suggestion_id or not request:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+
+    # If the suggestion has a draft, discard it too
+    if suggestion and suggestion.action == SuggestedAction.DRAFT_EMAIL:
+        draft_svc = _get_draft_service(request)
+        if draft_svc:
+            draft = await draft_svc.get_draft_for_suggestion(suggestion_id)
+            if draft:
+                await draft_svc.mark_discarded(draft.id)
+
+    await suggestion_svc.resolve(suggestion_id, SuggestionStatus.REJECTED, email)
+
+    return await _build_refreshed_overview(request, email)
+
+
+async def _handle_show_suggestions_tab(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Switch to the Suggestions tab (overview)."""
+    request = kwargs.get("request")
+    return await _build_refreshed_overview(request, email)
 
 
 async def _handle_unknown(body: AddonRequest, svc: LoopService, email: str, **_):
@@ -786,12 +903,38 @@ _ACTION_HANDLERS = {
     "edit_draft": _handle_edit_draft,
     "send_draft": _handle_send_draft,
     "discard_draft": _handle_discard_draft,
+    "accept_suggestion": _handle_accept_suggestion,
+    "reject_suggestion": _handle_reject_suggestion,
+    "show_suggestions_tab": _handle_show_suggestions_tab,
 }
 
 
 # ---------------------------------------------------------------------------
 # OAuth flow (no Google add-on token verification — browser-based)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Refresh endpoint (no add-on token — self-closing HTML for overlay polling)
+# ---------------------------------------------------------------------------
+
+refresh_router = APIRouter(prefix="/addon", tags=["addon-refresh"])
+
+
+@refresh_router.get("/refresh")
+async def addon_refresh() -> HTMLResponse:
+    """Return a self-closing HTML page for the OpenLink overlay refresh mechanism.
+
+    When the sidebar's "Refresh" button is clicked, Google opens this URL in
+    a small overlay. The page auto-closes, triggering the onClose: RELOAD
+    behavior which re-fires the add-on's homepage/contextual trigger.
+    """
+    return HTMLResponse(
+        "<html><body>"
+        "<script>setTimeout(function(){window.close()},100);</script>"
+        "Refreshing..."
+        "</body></html>"
+    )
+
 
 oauth_router = APIRouter(prefix="/addon/oauth", tags=["oauth"])
 

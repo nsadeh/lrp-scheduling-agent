@@ -571,6 +571,7 @@ def build_create_loop_form(
     prefill_client_company: str | None = None,
     prefill_first_stage: str | None = None,
     error_message: str | None = None,
+    suggestion_id: str | None = None,
 ) -> CardResponse:
     sections = []
 
@@ -713,6 +714,8 @@ def build_create_loop_form(
         params["gmail_thread_id"] = gmail_thread_id
     if gmail_subject:
         params["gmail_subject"] = gmail_subject
+    if suggestion_id:
+        params["suggestion_id"] = suggestion_id
 
     sections.append(
         Section(
