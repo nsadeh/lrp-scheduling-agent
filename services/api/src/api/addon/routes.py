@@ -78,22 +78,31 @@ def _get_user_email(body: AddonRequest) -> str:
     Raises ValueError if the email cannot be determined — callers should
     handle this rather than silently operating on a wrong account.
     """
-    if body.authorization_event_object and body.authorization_event_object.user_id_token:
-        import base64
-        import json
+    import base64
+    import json
 
-        # JWT is header.payload.signature — we just need the payload
-        token = body.authorization_event_object.user_id_token
+    auth = body.authorization_event_object
+    if not auth:
+        logger.error("No authorizationEventObject in add-on request")
+        raise ValueError("Could not determine coordinator email from add-on request")
+
+    # Try userIdToken first (preferred — contains the user's email)
+    for token_field in [auth.user_id_token, auth.system_id_token]:
+        if not token_field:
+            continue
         try:
-            payload = token.split(".")[1]
-            # Add padding if needed
+            payload = token_field.split(".")[1]
             payload += "=" * (4 - len(payload) % 4)
             claims = json.loads(base64.urlsafe_b64decode(payload))
             if "email" in claims:
                 return claims["email"]
         except Exception:
-            logger.warning("Could not decode user ID token for email", exc_info=True)
+            logger.warning("Could not decode token for email", exc_info=True)
 
+    logger.error(
+        "No email found in add-on request tokens. " "authorizationEventObject keys: %s",
+        list(auth.model_dump(exclude_none=True).keys()),
+    )
     raise ValueError("Could not determine coordinator email from add-on request")
 
 

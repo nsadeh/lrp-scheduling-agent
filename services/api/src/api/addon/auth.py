@@ -20,13 +20,6 @@ logger = logging.getLogger(__name__)
 
 GCP_PROJECT_NUMBER = os.environ.get("GCP_PROJECT_NUMBER", "")
 GOOGLE_ADDON_SA_EMAIL = os.environ.get("GOOGLE_ADDON_SERVICE_ACCOUNT_EMAIL", "")
-SKIP_ADDON_AUTH = os.environ.get("SKIP_ADDON_AUTH", "").lower() == "true"
-
-if SKIP_ADDON_AUTH:
-    logger.warning(
-        "SKIP_ADDON_AUTH is enabled — add-on token verification is DISABLED. "
-        "This must NEVER be set in production."
-    )
 
 
 async def verify_google_addon_token(
@@ -39,11 +32,8 @@ async def verify_google_addon_token(
     endpoint URL being called (not the GCP project number). We verify against
     the request URL.
 
-    Returns the verified token claims dict. In skip mode, returns a stub.
+    Returns the verified token claims dict.
     """
-    if SKIP_ADDON_AUTH:
-        return {"iss": "skip", "email": "skip@test"}
-
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
