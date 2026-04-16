@@ -7,24 +7,26 @@ INSERT INTO agent_suggestions (
     id, coordinator_email, gmail_message_id, gmail_thread_id,
     loop_id, stage_id, classification, action, auto_advance,
     confidence, summary, target_state, extracted_entities,
-    questions, reasoning, status
+    questions, action_data, reasoning, status
 )
 VALUES (
     :id, :coordinator_email, :gmail_message_id, :gmail_thread_id,
     :loop_id, :stage_id, :classification, :action, :auto_advance,
     :confidence, :summary, :target_state, :extracted_entities,
-    :questions, :reasoning, :status
+    :questions, :action_data, :reasoning, :status
 )
 RETURNING id, coordinator_email, gmail_message_id, gmail_thread_id,
           loop_id, stage_id, classification, action, auto_advance,
           confidence, summary, target_state, extracted_entities,
-          questions, reasoning, status, resolved_at, resolved_by, created_at;
+          questions, action_data, reasoning, status, resolved_at,
+          resolved_by, created_at;
 
 -- name: get_suggestion^
 SELECT id, coordinator_email, gmail_message_id, gmail_thread_id,
        loop_id, stage_id, classification, action, auto_advance,
        confidence, summary, target_state, extracted_entities,
-       questions, reasoning, status, resolved_at, resolved_by, created_at
+       questions, action_data, reasoning, status, resolved_at,
+       resolved_by, created_at
 FROM agent_suggestions
 WHERE id = :id;
 
@@ -32,7 +34,8 @@ WHERE id = :id;
 SELECT id, coordinator_email, gmail_message_id, gmail_thread_id,
        loop_id, stage_id, classification, action, auto_advance,
        confidence, summary, target_state, extracted_entities,
-       questions, reasoning, status, resolved_at, resolved_by, created_at
+       questions, action_data, reasoning, status, resolved_at,
+       resolved_by, created_at
 FROM agent_suggestions
 WHERE gmail_thread_id = :gmail_thread_id
 ORDER BY created_at DESC;
@@ -41,7 +44,8 @@ ORDER BY created_at DESC;
 SELECT id, coordinator_email, gmail_message_id, gmail_thread_id,
        loop_id, stage_id, classification, action, auto_advance,
        confidence, summary, target_state, extracted_entities,
-       questions, reasoning, status, resolved_at, resolved_by, created_at
+       questions, action_data, reasoning, status, resolved_at,
+       resolved_by, created_at
 FROM agent_suggestions
 WHERE coordinator_email = :coordinator_email AND status = 'pending'
 ORDER BY created_at DESC;
@@ -50,7 +54,8 @@ ORDER BY created_at DESC;
 SELECT id, coordinator_email, gmail_message_id, gmail_thread_id,
        loop_id, stage_id, classification, action, auto_advance,
        confidence, summary, target_state, extracted_entities,
-       questions, reasoning, status, resolved_at, resolved_by, created_at
+       questions, action_data, reasoning, status, resolved_at,
+       resolved_by, created_at
 FROM agent_suggestions
 WHERE loop_id = :loop_id AND status = 'pending'
 ORDER BY created_at DESC;

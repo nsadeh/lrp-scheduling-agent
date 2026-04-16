@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from psycopg.rows import dict_row
+from psycopg.rows import dict_row, tuple_row
 
 from api.classifier.formatters import format_thread_history
 from api.drafts.endpoint import generate_draft_content
@@ -155,21 +155,24 @@ class DraftService:
         draft_id = make_id("drf")
         async with self._pool.connection() as conn, conn.transaction():
             conn.row_factory = dict_row
-            row = await queries.create_draft(
-                conn,
-                id=draft_id,
-                suggestion_id=suggestion.id,
-                loop_id=loop.id,
-                stage_id=stage.id if stage else loop.stages[0].id,
-                coordinator_email=suggestion.coordinator_email,
-                to_emails=to_emails,
-                cc_emails=cc_emails,
-                subject=subject,
-                body=body,
-                gmail_thread_id=suggestion.gmail_thread_id,
-                status=DraftStatus.GENERATED,
-            )
-            draft = _row_to_draft(row)
+            try:
+                row = await queries.create_draft(
+                    conn,
+                    id=draft_id,
+                    suggestion_id=suggestion.id,
+                    loop_id=loop.id,
+                    stage_id=stage.id if stage else loop.stages[0].id,
+                    coordinator_email=suggestion.coordinator_email,
+                    to_emails=to_emails,
+                    cc_emails=cc_emails,
+                    subject=subject,
+                    body=body,
+                    gmail_thread_id=suggestion.gmail_thread_id,
+                    status=DraftStatus.GENERATED,
+                )
+                draft = _row_to_draft(row)
+            finally:
+                conn.row_factory = tuple_row
 
         logger.info(
             "draft created: %s (suggestion=%s, loop=%s, to=%s, body_len=%d)",
@@ -188,24 +191,33 @@ class DraftService:
     async def get_draft(self, draft_id: str) -> EmailDraft | None:
         async with self._pool.connection() as conn:
             conn.row_factory = dict_row
-            row = await queries.get_draft(conn, id=draft_id)
-            return _row_to_draft(row) if row else None
+            try:
+                row = await queries.get_draft(conn, id=draft_id)
+                return _row_to_draft(row) if row else None
+            finally:
+                conn.row_factory = tuple_row
 
     async def get_draft_for_suggestion(self, suggestion_id: str) -> EmailDraft | None:
         async with self._pool.connection() as conn:
             conn.row_factory = dict_row
-            row = await queries.get_draft_for_suggestion(conn, suggestion_id=suggestion_id)
-            return _row_to_draft(row) if row else None
+            try:
+                row = await queries.get_draft_for_suggestion(conn, suggestion_id=suggestion_id)
+                return _row_to_draft(row) if row else None
+            finally:
+                conn.row_factory = tuple_row
 
     async def get_pending_drafts(self, coordinator_email: str) -> list[EmailDraft]:
         async with self._pool.connection() as conn:
             conn.row_factory = dict_row
-            rows = await _collect(
-                queries.get_pending_drafts_for_coordinator(
-                    conn, coordinator_email=coordinator_email
+            try:
+                rows = await _collect(
+                    queries.get_pending_drafts_for_coordinator(
+                        conn, coordinator_email=coordinator_email
+                    )
                 )
-            )
-            return [_row_to_draft(r) for r in rows]
+                return [_row_to_draft(r) for r in rows]
+            finally:
+                conn.row_factory = tuple_row
 
     async def update_draft_body(self, draft_id: str, body: str) -> None:
         async with self._pool.connection() as conn, conn.transaction():
@@ -254,9 +266,9 @@ class DraftService:
     ) -> GenerateDraftInput:
         """Construct the drafter LLM input.
 
-        The drafter is a "dumb tool" — the classifier has already decided what
-        to draft (suggestion.summary). We just pass the directive, recipient
-        name, entities, and formatted thread messages for context.
+        The drafter is a "dumb tool" — the classifier provides the directive
+        via action_data. We pass that along with recipient name, entities,
+        and formatted thread messages for context.
         """
         thread_text = "No prior messages in this thread."
         if thread_messages:
@@ -264,8 +276,23 @@ class DraftService:
                 thread_messages, current_message_id=suggestion.gmail_message_id
             )
 
+        # Read directive from action_data (typed contract), fall back to summary
+        from api.classifier.models import DraftEmailData
+
+        directive = suggestion.summary  # fallback
+        if suggestion.action_data:
+            try:
+                draft_data = DraftEmailData.model_validate(suggestion.action_data)
+                directive = draft_data.directive
+            except Exception:
+                logger.warning(
+                    "could not parse action_data as DraftEmailData for suggestion %s, "
+                    "falling back to summary",
+                    suggestion.id,
+                )
+
         return GenerateDraftInput(
-            draft_directive=suggestion.summary,
+            draft_directive=directive,
             recipient_name=self._resolve_recipient_name(loop, stage),
             candidate_name=loop.candidate.name if loop.candidate else "Candidate",
             coordinator_name=loop.coordinator.name if loop.coordinator else "Coordinator",
