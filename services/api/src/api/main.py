@@ -72,10 +72,9 @@ async def lifespan(app: FastAPI):
     app.state.langfuse = langfuse
     app.state.llm_service = llm_service
 
-    # Draft service — gated on separate feature flag
+    # Draft service — available whenever AI infrastructure is up
     draft_service = None
-    draft_enabled = os.environ.get("DRAFT_GENERATION_ENABLED", "false").lower() == "true"
-    if draft_enabled and langfuse and llm_service:
+    if langfuse and llm_service:
         from api.drafts.service import DraftService
 
         draft_service = DraftService(
@@ -84,7 +83,7 @@ async def lifespan(app: FastAPI):
             llm=llm_service,
             langfuse=langfuse,
         )
-        logger.info("DraftService initialized (DRAFT_GENERATION_ENABLED=true)")
+        logger.info("DraftService initialized")
     app.state.draft_service = draft_service
 
     # Email hook — ClassifierHook when enabled, LoggingHook as fallback

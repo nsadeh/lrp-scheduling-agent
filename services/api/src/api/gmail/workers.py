@@ -64,11 +64,10 @@ async def startup(ctx: dict) -> None:
 
 def _init_classifier_hook(pool, gmail):
     """Create a ClassifierHook if AI infrastructure is available."""
-    import os
-
     from api.ai import init_langfuse, init_llm_service
     from api.classifier.hook import ClassifierHook
     from api.classifier.service import SuggestionService
+    from api.drafts.service import DraftService
     from api.scheduling.service import LoopService
 
     langfuse = init_langfuse()
@@ -83,18 +82,12 @@ def _init_classifier_hook(pool, gmail):
 
     loop_service = LoopService(db_pool=pool, gmail=gmail)
 
-    # Draft service — gated on DRAFT_GENERATION_ENABLED
-    draft_service = None
-    if os.environ.get("DRAFT_GENERATION_ENABLED", "false").lower() == "true":
-        from api.drafts.service import DraftService
-
-        draft_service = DraftService(
-            db_pool=pool,
-            loop_service=loop_service,
-            llm=llm,
-            langfuse=langfuse,
-        )
-        logger.info("DraftService initialized in worker")
+    draft_service = DraftService(
+        db_pool=pool,
+        loop_service=loop_service,
+        llm=llm,
+        langfuse=langfuse,
+    )
 
     return ClassifierHook(
         llm=llm,
