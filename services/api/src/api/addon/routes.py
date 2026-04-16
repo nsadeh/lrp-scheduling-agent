@@ -11,10 +11,9 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from api.addon.auth import verify_google_addon_token
 from api.addon.models import (
     ActionResponse,
     AddonRequest,
@@ -46,7 +45,6 @@ logger = logging.getLogger(__name__)
 addon_router = APIRouter(
     prefix="/addon",
     tags=["addon"],
-    dependencies=[Depends(verify_google_addon_token)],
 )
 
 

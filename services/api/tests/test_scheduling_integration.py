@@ -537,17 +537,12 @@ class TestRouteIntegration:
 
     @pytest.fixture
     async def client(self, pool):
-        """HTTP client with real DB and mocked Google auth."""
+        """HTTP client with real DB."""
         from httpx import ASGITransport, AsyncClient
 
-        from api.addon.auth import verify_google_addon_token
         from api.main import app
         from api.overview.service import OverviewService
 
-        async def _mock_auth():
-            return {"iss": "accounts.google.com", "email": "test@gserviceaccount.com"}
-
-        app.dependency_overrides[verify_google_addon_token] = _mock_auth
         app.state.db = pool
         app.state.scheduling = LoopService(db_pool=pool, gmail=None)
         app.state.overview_service = OverviewService(db_pool=pool)
@@ -555,8 +550,6 @@ class TestRouteIntegration:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             yield c
-
-        app.dependency_overrides.pop(verify_google_addon_token, None)
 
     _TEST_EMAIL = "test-coordinator@longridgepartners.com"
 

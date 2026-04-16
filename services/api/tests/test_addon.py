@@ -7,18 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from api.addon.auth import verify_google_addon_token
 from api.main import app
 from api.scheduling.models import StatusBoard
-
-
-async def _mock_addon_auth():
-    """Mock auth dependency — returns stub claims."""
-    return {"iss": "accounts.google.com", "email": "service-account@gserviceaccount.com"}
-
-
-# Override the auth dependency for all tests
-app.dependency_overrides[verify_google_addon_token] = _mock_addon_auth
 
 # Build a fake JWT with an email claim for test requests
 _TEST_EMAIL = "test@longridgepartners.com"
