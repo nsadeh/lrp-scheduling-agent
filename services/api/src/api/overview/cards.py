@@ -38,19 +38,9 @@ from api.scheduling.cards import (
 # ---------------------------------------------------------------------------
 
 
-def _overview_tab_buttons(active_tab: str, base_url: str | None = None) -> Section:
-    """Render tab toggle buttons with optional refresh."""
-    suggestions_btn = Button(
-        text="Suggestions",
-        on_click=_action("show_suggestions_tab"),
-        disabled=active_tab == "suggestions",
-    )
-    board_btn = Button(
-        text="Status Board",
-        on_click=_action("show_status_tab"),
-        disabled=active_tab == "status",
-    )
-    buttons = [suggestions_btn, board_btn]
+def _overview_header_buttons(base_url: str | None = None) -> Section:
+    """Render header buttons (refresh only)."""
+    buttons = []
 
     if base_url:
         refresh_btn = Button(
@@ -65,6 +55,8 @@ def _overview_tab_buttons(active_tab: str, base_url: str | None = None) -> Secti
         )
         buttons.append(refresh_btn)
 
+    if not buttons:
+        return None
     return Section(widgets=[_buttons(*buttons)])
 
 
@@ -323,7 +315,10 @@ def build_overview(
     Each loop group becomes a Section. Standalone suggestions (no loop)
     are rendered in a headerless section at the top.
     """
-    sections: list[Section] = [_overview_tab_buttons("suggestions", base_url)]
+    sections: list[Section] = []
+    header_section = _overview_header_buttons(base_url)
+    if header_section:
+        sections.append(header_section)
 
     if not groups:
         # Empty state
@@ -331,7 +326,6 @@ def build_overview(
             Section(
                 widgets=[
                     _text("All caught up \u2014 no actions needed."),
-                    _buttons(_button("Status Board", "show_status_tab")),
                 ]
             )
         )

@@ -102,37 +102,3 @@ def build_draft_edit(draft: EmailDraft) -> CardResponse:
             sections=[Section(widgets=widgets)],
         )
     )
-
-
-def build_drafts_list_sections(drafts: list[EmailDraft]) -> list[Section]:
-    """Build sections for pending AI drafts to insert into the drafts tab.
-
-    Returns one section with a header + one decorated text widget per draft.
-    Returns an empty list if no drafts are pending.
-    """
-    if not drafts:
-        return []
-
-    widgets = []
-    widgets.append(_text("<b>AI Drafts</b>"))
-
-    for draft in drafts:
-        # Show recipient + subject as a clickable item
-        recipient = ", ".join(draft.to_emails) if draft.to_emails else "Unknown"
-        label = f"To: {recipient}"
-        widgets.append(
-            _decorated(
-                text=f"<b>{draft.subject}</b>",
-                top_label=label,
-            )
-        )
-        widgets.append(
-            _buttons(
-                _button("Review", "view_draft", draft_id=draft.id),
-                _button("Send", "send_draft", draft_id=draft.id),
-                _button("Discard", "discard_draft", draft_id=draft.id),
-            )
-        )
-
-    widgets.append(_divider())
-    return [Section(widgets=widgets)]

@@ -122,8 +122,7 @@ class TestBuildOverview:
         assert isinstance(card, CardResponse)
         serialized = card.model_dump(by_alias=True, exclude_none=True)
         sections = serialized["action"]["navigations"][0]["updateCard"]["sections"]
-        # At least: tab buttons + one suggestion section
-        assert len(sections) >= 2
+        assert len(sections) >= 1
 
     def test_multiple_groups_render_separate_sections(self):
         groups = [
@@ -137,8 +136,8 @@ class TestBuildOverview:
         card = build_overview(groups)
         serialized = card.model_dump(by_alias=True, exclude_none=True)
         sections = serialized["action"]["navigations"][0]["updateCard"]["sections"]
-        # Tab buttons + 2 loop sections
-        assert len(sections) >= 3
+        # One section per loop group
+        assert len(sections) >= 2
 
     def test_refresh_button_included_with_base_url(self):
         card = build_overview([], base_url="https://test.ngrok-free.app")

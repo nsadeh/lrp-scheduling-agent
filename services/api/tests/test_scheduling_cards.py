@@ -7,9 +7,7 @@ from api.scheduling.cards import (
     build_compose_email,
     build_contextual_unlinked,
     build_create_loop_form,
-    build_drafts_tab,
     build_loop_detail,
-    build_status_board,
     set_action_url,
 )
 from api.scheduling.models import (
@@ -18,10 +16,8 @@ from api.scheduling.models import (
     Contact,
     Coordinator,
     Loop,
-    LoopSummary,
     Stage,
     StageState,
-    StatusBoard,
 )
 
 NOW = datetime.now(UTC)
@@ -96,133 +92,6 @@ class TestInitials:
 
     def test_three_words(self):
         assert _initials("Mary Jane Watson") == "MJW"
-
-
-def _make_summary(**overrides) -> LoopSummary:
-    defaults = dict(
-        loop_id="lop_1",
-        title="Smith, Acme",
-        candidate_name="Smith",
-        client_company="Acme",
-        most_urgent_stage_id="stg_1",
-        most_urgent_stage_name="Round 1",
-        most_urgent_next_action="Email recruiter for availability",
-        most_urgent_state=StageState.NEW,
-    )
-    defaults.update(overrides)
-    return LoopSummary(**defaults)
-
-
-class TestDraftsTab:
-    def test_empty_board_shows_get_started_message(self):
-        board = StatusBoard()
-        data = _card_json(build_drafts_tab(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        text = str(card)
-        assert "create one" in text.lower()
-
-    def test_empty_drafts_with_completed_loops_shows_hint(self):
-        board = StatusBoard(complete=[_make_summary(most_urgent_state=StageState.COMPLETE)])
-        data = _card_json(build_drafts_tab(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        text = str(card)
-        assert "status board" in text.lower()
-
-    def test_has_tab_buttons(self):
-        board = StatusBoard()
-        data = _card_json(build_drafts_tab(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        # First section should have tab buttons
-        first_section = card["sections"][0]
-        button_widgets = [w for w in first_section["widgets"] if "buttonList" in w]
-        assert len(button_widgets) == 1
-        btn_texts = [b["text"] for b in button_widgets[0]["buttonList"]["buttons"]]
-        assert "Drafts" in btn_texts
-        assert "Status Board" in btn_texts
-
-    def test_drafts_tab_is_active(self):
-        board = StatusBoard()
-        data = _card_json(build_drafts_tab(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        first_section = card["sections"][0]
-        buttons = first_section["widgets"][0]["buttonList"]["buttons"]
-        drafts_btn = next(b for b in buttons if b["text"] == "Drafts")
-        assert drafts_btn["disabled"] is True
-
-    def test_action_needed_shows_inline_buttons(self):
-        board = StatusBoard(action_needed=[_make_summary()])
-        data = _card_json(build_drafts_tab(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        # Second section (after tabs) should have action buttons
-        action_section = card["sections"][1]
-        button_widgets = [w for w in action_section["widgets"] if "buttonList" in w]
-        all_texts = [b["text"] for bw in button_widgets for b in bw["buttonList"]["buttons"]]
-        assert "Forward to Recruiter" in all_texts
-        assert "Go Cold" in all_texts
-
-    def test_has_new_loop_button(self):
-        board = StatusBoard()
-        data = _card_json(build_drafts_tab(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        all_buttons = [
-            b["text"]
-            for s in card["sections"]
-            for w in s["widgets"]
-            if "buttonList" in w
-            for b in w["buttonList"]["buttons"]
-        ]
-        assert "+ New Loop" in all_buttons
-
-
-class TestStatusBoard:
-    def test_has_tab_buttons(self):
-        board = StatusBoard()
-        data = _card_json(build_status_board(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        first_section = card["sections"][0]
-        button_widgets = [w for w in first_section["widgets"] if "buttonList" in w]
-        btn_texts = [b["text"] for b in button_widgets[0]["buttonList"]["buttons"]]
-        assert "Drafts" in btn_texts
-        assert "Status Board" in btn_texts
-
-    def test_status_tab_is_active(self):
-        board = StatusBoard()
-        data = _card_json(build_status_board(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        first_section = card["sections"][0]
-        buttons = first_section["widgets"][0]["buttonList"]["buttons"]
-        status_btn = next(b for b in buttons if b["text"] == "Status Board")
-        assert status_btn["disabled"] is True
-
-    def test_groups_by_state_with_labels(self):
-        board = StatusBoard(
-            action_needed=[_make_summary(most_urgent_state=StageState.NEW)],
-            waiting=[
-                _make_summary(
-                    loop_id="lop_2",
-                    title="Jones, Beta",
-                    most_urgent_state=StageState.AWAITING_CANDIDATE,
-                )
-            ],
-        )
-        data = _card_json(build_status_board(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        headers = [s.get("header", "") for s in card["sections"]]
-        assert any("Action Needed" in h for h in headers)
-        assert any("Waiting on Recruiter" in h for h in headers)
-
-    def test_summary_has_colored_badge(self):
-        board = StatusBoard(action_needed=[_make_summary(most_urgent_state=StageState.NEW)])
-        data = _card_json(build_status_board(board))
-        card = data["action"]["navigations"][0]["updateCard"]
-        # Find the section with loop summary (not the tab section)
-        summary_sections = [s for s in card["sections"] if s.get("header", "").startswith("Action")]
-        assert len(summary_sections) == 1
-        widget = summary_sections[0]["widgets"][0]
-        top_label = widget["decoratedText"]["topLabel"]
-        # Should contain colored dot HTML
-        assert "●" in top_label
-        assert "font color" in top_label
 
 
 class TestContextualUnlinked:

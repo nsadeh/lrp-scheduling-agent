@@ -6,7 +6,6 @@ from api.addon.models import CardResponse
 from api.drafts.cards import (
     build_draft_edit,
     build_draft_preview,
-    build_drafts_list_sections,
 )
 from api.drafts.models import DraftStatus, EmailDraft
 
@@ -58,14 +57,3 @@ class TestBuildDraftEdit:
     def test_shows_cc_when_present(self):
         card = build_draft_edit(_draft())
         assert isinstance(card, CardResponse)
-
-
-class TestBuildDraftsListSections:
-    def test_empty_list_returns_empty(self):
-        sections = build_drafts_list_sections([])
-        assert sections == []
-
-    def test_with_drafts_returns_sections(self):
-        sections = build_drafts_list_sections([_draft(), _draft(draft_id="drf_2")])
-        assert len(sections) == 1  # One section with all drafts
-        assert len(sections[0].widgets) > 0
