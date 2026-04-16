@@ -29,7 +29,7 @@ This RFC proposes a complete rewrite of the sidebar homepage and contextual (thr
 - **Loop status board** — the existing Status Board tab is not being redesigned in this RFC. It remains accessible as a secondary view. *Rationale:* the PRD explicitly excludes the loop status view. The status board serves a monitoring function ("where are my loops?") that is orthogonal to the action queue ("what should I do next?").
 - **ASK_COORDINATOR backend** — the UI for ASK_COORDINATOR suggestions will be rendered (question display + text input), but the backend handler for storing and acting on coordinator responses is out of scope. *Rationale:* the classifier doesn't reliably produce ASK_COORDINATOR yet. We'll build the response pipeline when it does. The UI renders now so we can test the visual design.
 - **Draft regeneration** — there is no "Regenerate" button on email drafts. The coordinator edits the draft manually or discards it. *Rationale:* regeneration requires a round-trip to the LLM and a diff UI. This can be added later if coordinators request it.
-- **Real-time updates / push refresh** — the sidebar only refreshes on user interaction (button click, open new message). *Rationale:* the Card API has no push mechanism. A polling workaround would require a hidden auto-refresh button or timer, which the API doesn't support.
+- **True server-push updates** — we are not implementing WebSocket/SSE-style push from the backend to the sidebar. *Rationale:* the Card API has no push mechanism. We implement a polling workaround instead (see "Auto-Refresh via OpenLink Overlay Polling" in Detailed Design).
 - **Marketplace publishing** — this remains a developer test deployment. *Rationale:* same as the original addon RFC — premature before coordinator feedback.
 
 ## Background
@@ -53,9 +53,10 @@ Key constraints relevant to this design:
 1. **No hover cards or tooltips.** We use collapsible sections (`Section.collapsible=True` with `uncollapsibleWidgetsCount=0`) as the closest alternative.
 2. **No nested cards.** Suggestions "inside" a loop are achieved by rendering multiple widgets within one Section (loop = section header, suggestions = widgets).
 3. **No onChange handlers.** Form values (text inputs, selections) are only transmitted when the user clicks a button. No real-time validation.
-4. **No push updates.** The sidebar only refreshes on user-initiated actions.
+4. **No server-push updates.** The sidebar has no WebSocket/SSE channel. However, the `OpenLink` widget supports `onClose: "RELOAD"` which re-fires the add-on's trigger (homepage or contextual) when an opened overlay closes. This is our auto-refresh mechanism (see below).
 5. **Navigation stack.** `PushCard` pushes onto a back-navigable stack; `UpdateCard` replaces in-place. Initial triggers (homepage, on-message) must use `PushCard`.
 6. **~3 button limit per row.** `ButtonList` renders horizontally; more than 3 buttons truncate on the narrow sidebar.
+7. **No client-side JS in card-based add-ons.** Apps Script HTML sidebars support `setInterval` and `google.script.run` for client-server communication, but this is only available for Editor add-ons (Docs/Sheets/Slides). Workspace add-ons (Gmail, Calendar) use the card framework exclusively — no custom HTML, no client-side JS, no `UrlFetchApp` from the card context. The HTTP runtime (our FastAPI backend) has no Apps Script bridge.
 
 ### Suggestion Data Model
 
@@ -453,6 +454,72 @@ async def _build_thread_overview(svc, email, gmail_thread_id, request):
 
 **Edge case: thread linked to multiple loops.** The suggestion data already carries `loop_id`, so multiple loops render as separate sections naturally. No special handling needed.
 
+#### Auto-Refresh via OpenLink Overlay Polling
+
+The sidebar has no server-push channel, but the agent processes emails in real-time and creates suggestions asynchronously. Without auto-refresh, a coordinator who leaves the sidebar open while emails arrive would see stale data until they click something. This defeats the "open sidebar, approve everything" UX.
+
+**Mechanism: `OpenLink` with `onClose: "RELOAD"`**
+
+The Card API supports an `OpenLink` widget that opens a URL in an overlay window. When the overlay closes, if `onClose` is set to `"RELOAD"`, Google re-fires the add-on's trigger function (homepage or contextual), which causes our backend to serve a fresh card with the latest suggestions.
+
+We exploit this by building a lightweight **refresh endpoint** that our backend serves as a self-closing HTML page:
+
+```
+GET /addon/refresh → returns minimal HTML:
+  <html><body>
+    <script>setTimeout(() => window.close(), 100);</script>
+    Refreshing...
+  </body></html>
+```
+
+The sidebar includes a "Refresh" button implemented as:
+
+```python
+Button(
+    text="↻ Refresh",
+    on_click=OnClick(
+        open_link=OpenLink(
+            url=f"{base_url}/addon/refresh",
+            open_as="OVERLAY",
+            on_close="RELOAD",
+        )
+    ),
+)
+```
+
+**Flow:**
+1. Coordinator clicks "↻ Refresh"
+2. Google opens `/addon/refresh` in a small overlay
+3. The HTML page auto-closes via `setTimeout`
+4. Google detects the overlay closed and re-fires the homepage/contextual trigger
+5. Our backend returns a fresh overview card with any new suggestions
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant G as Google Addon Framework
+    participant B as FastAPI Backend
+
+    Note over C: New emails arrived while sidebar was open
+    C->>G: Click "↻ Refresh" button
+    G->>B: GET /addon/refresh
+    B->>G: Self-closing HTML page
+    G->>G: Overlay opens, auto-closes
+    G->>B: POST /addon/homepage (re-triggered)
+    B->>B: Fetch latest suggestions
+    B->>G: Fresh overview card JSON
+    G->>C: Sidebar updates with new suggestions
+```
+
+**Trade-offs:**
+- **Visual flicker:** The overlay briefly appears (~100ms) before auto-closing. This is a known UX cost. The overlay is small and fast enough that it reads as a loading indicator rather than a distraction.
+- **Not truly automatic:** The coordinator must click "Refresh." We cannot implement a `setInterval`-style auto-poll because the card framework has no client-side JS execution for Workspace add-ons (only Editor add-ons support HTML sidebars with JS). This is an SDK limitation with no workaround.
+- **COOP header caveat:** The refresh endpoint must NOT set the `Cross-Origin-Opener-Policy` header, or Google won't detect the window closure. FastAPI doesn't set COOP by default, so this should work out of the box.
+
+**Future improvement:** If coordinators report that manual refresh is too much friction, we can explore a second mechanism: including a timestamp or suggestion count in the card, so coordinators can see at a glance whether the data might be stale (e.g., "Last refreshed: 2 min ago · 3 pending"). This at least tells them *when* to click refresh.
+
+**Why not Apps Script with `setInterval`?** Apps Script HTML sidebars support `setInterval` + `google.script.run` for client-server polling — but this is only available for **Editor add-ons** (Docs, Sheets, Slides). Gmail Workspace add-ons use the card framework exclusively. There is no hybrid: an HTTP-based add-on cannot access Apps Script services, and a card-based Gmail add-on cannot render custom HTML sidebars. The OpenLink overlay approach is the only available mechanism within the Gmail card framework.
+
 ### Data Storage
 
 No new tables. The design uses the existing `agent_suggestions` and `email_drafts` tables. Changes:
@@ -460,6 +527,8 @@ No new tables. The design uses the existing `agent_suggestions` and `email_draft
 1. **New SQL query** in `queries/suggestions.sql`: `get_pending_suggestions_with_context` (the JOIN query described above).
 2. **New SQL query** in `queries/suggestions.sql`: `get_pending_suggestions_for_thread_with_context` — same query with `AND s.gmail_thread_id = :gmail_thread_id`.
 3. **Minor schema addition** to `_handle_create_loop`: reads optional `suggestion_id` from action parameters to resolve the suggestion after loop creation.
+4. **Extend `OpenLink` model** in `addon/models.py`: add `open_as: str | None` (values: `"FULL_SIZE"`, `"OVERLAY"`) and `on_close: str | None` (values: `"NOTHING"`, `"RELOAD"`) fields to support the auto-refresh mechanism. These are existing Card API fields we haven't modeled yet.
+5. **New endpoint** `GET /addon/refresh`: returns a self-closing HTML page for the overlay-based refresh mechanism. No auth required (it's a static page).
 
 ### Key Trade-offs
 
@@ -471,13 +540,15 @@ No new tables. The design uses the existing `agent_suggestions` and `email_draft
 
 ## Alternatives Considered
 
-### Alternative 1: Apps Script Frontend with Client-Side State
+### Alternative 1: Apps Script Frontend with Client-Side Polling
 
-Build the sidebar UI in Apps Script instead of the HTTP backend. Apps Script can use `CacheService` to store suggestion state client-side and `CardService` to render cards without a server round-trip.
+Build the sidebar UI in Apps Script instead of the HTTP backend. Apps Script supports `UrlFetchApp` for HTTP requests (server-side) and, for Editor add-ons (Docs/Sheets/Slides), HTML sidebars with `setInterval` + `google.script.run` for client-server polling. The appeal: an Apps Script sidebar could theoretically poll our backend for new suggestions and re-render the card automatically.
 
-**Trade-offs:** Faster card rendering (no HTTP round-trip per interaction). Access to some Gmail-native features. But: (a) all business logic must be duplicated in JavaScript; (b) no access to our database, LLM service, or Python libraries; (c) every RFC, tool, and convention in this project is built around the FastAPI backend pattern; (d) Apps Script has a 6-minute execution limit and no async/await.
+**Trade-offs:** The polling capability is real — but only for Editor add-ons. Gmail Workspace add-ons use the card framework, not HTML sidebars. An Apps Script Gmail add-on uses `CardService` which has the same constraints as our HTTP card approach: no client-side JS, no `setInterval`, no HTML. `UrlFetchApp` is available server-side (in trigger functions and action callbacks), but it can't run on a timer in the card context — it can only run when the user clicks something.
 
-**Why not:** The entire project architecture is HTTP-based add-on with Python backend. Switching to Apps Script for one feature creates a split-brain architecture. The round-trip latency cost (~200-400ms) is acceptable for a sidebar that refreshes on user clicks.
+Beyond the auto-refresh question: (a) all business logic must be duplicated in JavaScript; (b) no access to our database, LLM service, or Python libraries; (c) every RFC, tool, and convention in this project is built around the FastAPI backend pattern; (d) Apps Script has a 6-minute execution limit and no async/await.
+
+**Why not:** Apps Script doesn't actually solve the auto-refresh problem for Gmail add-ons. And even if it did, the architecture cost is too high — we'd need to maintain two backend languages, duplicate data access, and lose our LangFuse observability chain. The `OpenLink.onClose.RELOAD` approach in the proposed design achieves manual refresh without leaving the HTTP backend architecture.
 
 ### Alternative 2: Separate "Suggestions" Endpoint (Not Reusing Overview)
 
@@ -583,11 +654,15 @@ Suggestion data contains email addresses, names, and scheduling context (availab
 
 3. **Should clicking a loop header in the overview do anything?** Options: (a) no-op — it's just a section title; (b) push to loop detail view; (c) open the thread in a new Gmail tab via OpenLink. The PRD says "clicking on a loop opens the related thread" — we resolved this as OpenLink to Gmail URL. But the loop header is a Section header, and Section headers in the Card API are not clickable. We would need a separate clickable widget. — *Propose adding a small "Open in Gmail" link button per group if the loop has a linked thread.*
 
+4. **Is the OpenLink overlay refresh flicker acceptable?** The auto-refresh mechanism opens a self-closing overlay that briefly flickers (~100ms). If coordinators find this jarring, we may need to add a "Last refreshed: X min ago" timestamp instead and rely on natural interaction (clicking any button) to refresh. — *Coordinator feedback needed after first prototype.*
+
+5. **Should the refresh button be always-visible or in a collapsed header?** It needs to be accessible without scrolling, but it also shouldn't compete with suggestion action buttons. Options: (a) fixed in the tab bar section alongside "Suggestions / Status Board"; (b) in the card header subtitle area; (c) as a floating-style button at the bottom. — *UI decision during implementation.*
+
 ## Milestones and Timeline
 
 | Phase | Description | Estimated Duration |
 |-------|-------------|--------------------|
 | Phase 1: Data layer | New SQL query, `SuggestionView` / `LoopSuggestionGroup` models, `get_overview_data` service method | 1 day |
 | Phase 2: Card builders | `build_overview`, per-type suggestion widget builders, thread view variant | 2 days |
-| Phase 3: Action handlers | `accept_suggestion`, `reject_suggestion`, wire up homepage/on-message, modify `create_loop` for suggestion_id | 1 day |
-| Phase 4: Polish + testing | Collapsible reasoning, empty states, stale suggestion handling, sort order, manual QA with test suggestions | 1 day |
+| Phase 3: Action handlers | `accept_suggestion`, `reject_suggestion`, wire up homepage/on-message, modify `create_loop` for suggestion_id, `GET /addon/refresh` endpoint | 1 day |
+| Phase 4: Polish + testing | Collapsible reasoning, empty states, stale suggestion handling, sort order, refresh button placement, manual QA with test suggestions | 1 day |
