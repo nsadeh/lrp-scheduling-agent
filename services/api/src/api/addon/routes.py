@@ -877,6 +877,16 @@ async def oauth_callback(code: str, state: str, request: Request):
     )
     logger.info("Stored OAuth token for %s", user_email)
 
+    # Establish Gmail history baseline immediately so no messages are missed.
+    # Any email arriving after this point will have a historyId > baseline.
+    try:
+        profile = await gmail.get_profile(user_email)
+        history_id = str(profile["historyId"])
+        await gmail._token_store.update_history_id(user_email, history_id)
+        logger.info("Established baseline for %s at history_id=%s", user_email, history_id)
+    except Exception:
+        logger.exception("Failed to establish baseline for %s during OAuth", user_email)
+
     return HTMLResponse(
         "<html><body><h2>Gmail access authorized.</h2>"
         "<p>You can close this tab and return to Gmail.</p>"

@@ -130,9 +130,11 @@ async def process_gmail_push(ctx: dict, coordinator_email: str, history_id: str)
     # Use our stored cursor, not the push notification's history_id
     stored_history_id = await token_store.get_history_id(coordinator_email)
     if not stored_history_id:
-        # First push — establish baseline
-        logger.info("first push for %s, establishing baseline", coordinator_email)
-        await _establish_baseline(ctx, coordinator_email)
+        # No baseline yet (OAuth callback didn't set one, or legacy user).
+        # Use the push notification's history_id so we don't skip any messages.
+        logger.info("no baseline for %s, using push history_id=%s", coordinator_email, history_id)
+        await token_store.update_history_id(coordinator_email, history_id)
+        await _process_history(ctx, coordinator_email, history_id)
         return
 
     await _process_history(ctx, coordinator_email, stored_history_id)
