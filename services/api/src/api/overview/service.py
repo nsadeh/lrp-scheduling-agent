@@ -1,0 +1,150 @@
+"""OverviewService — fetches denormalized suggestion data for the sidebar UI.
+
+Runs the JOIN query and groups results by loop_id for card rendering.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import TYPE_CHECKING
+
+from api.classifier.models import Suggestion
+from api.classifier.queries import queries
+from api.drafts.models import DraftStatus, EmailDraft
+from api.overview.models import LoopSuggestionGroup, SuggestionView
+
+if TYPE_CHECKING:
+    from psycopg_pool import AsyncConnectionPool
+
+logger = logging.getLogger(__name__)
+
+
+async def _collect(async_gen) -> list:
+    return [row async for row in async_gen]
+
+
+def _row_to_suggestion_view(row: tuple) -> SuggestionView:
+    """Convert a JOIN query row into a SuggestionView."""
+    # Columns 0-19: suggestion fields (same order as get_suggestion)
+    entities = row[12]
+    if isinstance(entities, str):
+        entities = json.loads(entities)
+    questions = row[13]
+    if isinstance(questions, str):
+        questions = json.loads(questions)
+    action_data = row[14]
+    if isinstance(action_data, str):
+        action_data = json.loads(action_data)
+
+    suggestion = Suggestion(
+        id=row[0],
+        coordinator_email=row[1],
+        gmail_message_id=row[2],
+        gmail_thread_id=row[3],
+        loop_id=row[4],
+        stage_id=row[5],
+        classification=row[6],
+        action=row[7],
+        auto_advance=row[8],
+        confidence=row[9],
+        summary=row[10],
+        target_state=row[11],
+        extracted_entities=entities,
+        questions=questions,
+        action_data=action_data,
+        reasoning=row[15],
+        status=row[16],
+        resolved_at=row[17],
+        resolved_by=row[18],
+        created_at=row[19],
+    )
+
+    # Columns 20-22: loop context
+    loop_title = row[20]
+    candidate_name = row[21]
+    client_company = row[22]
+
+    # Columns 23-29: draft context
+    draft = None
+    draft_id = row[23]
+    if draft_id is not None:
+        draft_to = row[24]
+        if isinstance(draft_to, str):
+            draft_to = [draft_to]
+        draft_cc = row[25]
+        if isinstance(draft_cc, str):
+            draft_cc = [draft_cc]
+        if draft_cc is None:
+            draft_cc = []
+        draft = EmailDraft(
+            id=draft_id,
+            suggestion_id=suggestion.id,
+            loop_id=suggestion.loop_id or "",
+            stage_id=suggestion.stage_id or "",
+            coordinator_email=suggestion.coordinator_email,
+            to_emails=draft_to if draft_to else [],
+            cc_emails=draft_cc if draft_cc else [],
+            subject=row[26] or "",
+            body=row[27] or "",
+            status=DraftStatus(row[28]) if row[28] else DraftStatus.GENERATED,
+            gmail_thread_id=row[29],
+        )
+
+    return SuggestionView(
+        suggestion=suggestion,
+        loop_title=loop_title,
+        candidate_name=candidate_name,
+        client_company=client_company,
+        draft=draft,
+    )
+
+
+def group_by_loop(views: list[SuggestionView]) -> list[LoopSuggestionGroup]:
+    """Group suggestion views by loop_id, sorted by oldest suggestion."""
+    groups: dict[str | None, LoopSuggestionGroup] = {}
+    for v in views:
+        key = v.suggestion.loop_id
+        if key not in groups:
+            groups[key] = LoopSuggestionGroup(
+                loop_id=key,
+                loop_title=v.loop_title,
+                candidate_name=v.candidate_name,
+                client_company=v.client_company,
+                suggestions=[],
+                oldest_created_at=v.suggestion.created_at,
+            )
+        groups[key].suggestions.append(v)
+    # Sort by oldest suggestion creation time (already ASC from SQL, but explicit)
+    return sorted(groups.values(), key=lambda g: g.oldest_created_at)
+
+
+class OverviewService:
+    def __init__(self, db_pool: AsyncConnectionPool):
+        self._pool = db_pool
+
+    async def get_overview_data(self, coordinator_email: str) -> list[LoopSuggestionGroup]:
+        """Fetch all pending suggestions with context, grouped by loop."""
+        async with self._pool.connection() as conn:
+            rows = await _collect(
+                queries.get_pending_suggestions_with_context(
+                    conn, coordinator_email=coordinator_email
+                )
+            )
+        views = [_row_to_suggestion_view(r) for r in rows]
+        return group_by_loop(views)
+
+    async def get_thread_overview_data(
+        self, gmail_thread_id: str, coordinator_email: str
+    ) -> list[LoopSuggestionGroup]:
+        """Fetch pending suggestions for a specific thread, grouped by loop."""
+        async with self._pool.connection() as conn:
+            rows = await _collect(
+                queries.get_pending_suggestions_for_thread_with_context(
+                    conn,
+                    gmail_thread_id=gmail_thread_id,
+                    coordinator_email=coordinator_email,
+                )
+            )
+        views = [_row_to_suggestion_view(r) for r in rows]
+        return group_by_loop(views)
