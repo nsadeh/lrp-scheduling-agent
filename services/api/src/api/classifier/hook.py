@@ -20,7 +20,9 @@ from api.classifier.formatters import (
     format_email,
     format_events,
     format_loop_state,
+    format_stage_states,
     format_thread_history,
+    format_transitions,
 )
 from api.classifier.models import (
     ClassificationResult,
@@ -197,6 +199,8 @@ class ClassifierHook:
             events = await self._loops.get_events(linked_loop.id)
 
         return ClassifyEmailInput(
+            stage_states=format_stage_states(),
+            transitions=format_transitions(),
             email=format_email(msg, event.direction.value, event.message_type.value),
             thread_history=thread_history_text,
             loop_state=format_loop_state(linked_loop),

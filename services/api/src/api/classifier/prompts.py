@@ -1,13 +1,16 @@
 """LangFuse prompt content for the email classifier.
 
-These strings define the content that should be created as Chat prompts in LangFuse:
-  - scheduling-classifier-v2 (system message + user message)
+Reference copy of the prompt content managed in LangFuse:
+  - scheduling-classifier-v3 (chat prompt — system + user messages)
 
 The prompts use LangFuse template variables ({{variable}}) that are filled by
 the formatters module at runtime.
 
+System-level variables: stage_states, transitions
+User-level variables: email, thread_history, loop_state, active_loops_summary, events, direction
+
 LangFuse prompt config should set:
-  model: claude-haiku-4-5-20251001
+  model: anthropic/claude-sonnet-4-6
   temperature: 0.0
   max_tokens: 2048
 """
