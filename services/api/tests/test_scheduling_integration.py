@@ -629,7 +629,7 @@ class TestRouteIntegration:
         )
         rec = await svc.find_or_create_contact(name="Bob", email="bob@r.com", role="recruiter")
         await svc.create_loop(
-            coordinator_email="coordinator@longridgepartners.com",
+            coordinator_email="test-coordinator@longridgepartners.com",
             coordinator_name="Coordinator",
             candidate_name="Smith",
             client_contact_id=client_c.id,

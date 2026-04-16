@@ -74,6 +74,9 @@ def _get_user_email(body: AddonRequest) -> str:
     Google's add-on framework sends a user ID token in the authorization event object.
     We decode it (without verification — it's already been verified by our auth dependency)
     to get the user's email.
+
+    Raises ValueError if the email cannot be determined — callers should
+    handle this rather than silently operating on a wrong account.
     """
     if body.authorization_event_object and body.authorization_event_object.user_id_token:
         import base64
@@ -90,7 +93,8 @@ def _get_user_email(body: AddonRequest) -> str:
                 return claims["email"]
         except Exception:
             logger.warning("Could not decode user ID token for email", exc_info=True)
-    return "coordinator@longridgepartners.com"
+
+    raise ValueError("Could not determine coordinator email from add-on request")
 
 
 def _get_form_value(body: AddonRequest, field: str) -> str | None:

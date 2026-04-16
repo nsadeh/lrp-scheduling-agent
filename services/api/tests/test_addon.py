@@ -1,5 +1,7 @@
 """Integration tests for Google Workspace Add-on endpoints."""
 
+import base64
+import json
 import os
 from unittest.mock import AsyncMock
 
@@ -11,6 +13,11 @@ os.environ["SKIP_ADDON_AUTH"] = "true"
 
 from api.main import app
 from api.scheduling.models import StatusBoard
+
+# Build a fake JWT with an email claim for test requests
+_TEST_EMAIL = "test@longridgepartners.com"
+_jwt_payload = base64.urlsafe_b64encode(json.dumps({"email": _TEST_EMAIL}).encode()).decode()
+_FAKE_USER_ID_TOKEN = f"header.{_jwt_payload}.signature"
 
 
 @pytest.fixture
@@ -46,13 +53,19 @@ MINIMAL_EVENT = {
     "commonEventObject": {
         "hostApp": "GMAIL",
         "platform": "WEB",
-    }
+    },
+    "authorizationEventObject": {
+        "userIdToken": _FAKE_USER_ID_TOKEN,
+    },
 }
 
 MESSAGE_EVENT = {
     "commonEventObject": {
         "hostApp": "GMAIL",
         "platform": "WEB",
+    },
+    "authorizationEventObject": {
+        "userIdToken": _FAKE_USER_ID_TOKEN,
     },
     "gmail": {
         "messageId": "msg-abc-123",
@@ -106,7 +119,10 @@ class TestAction:
                 "hostApp": "GMAIL",
                 "platform": "WEB",
                 "invokedFunction": "show_create_form",
-            }
+            },
+            "authorizationEventObject": {
+                "userIdToken": _FAKE_USER_ID_TOKEN,
+            },
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
@@ -120,7 +136,10 @@ class TestAction:
                 "hostApp": "GMAIL",
                 "platform": "WEB",
                 "invokedFunction": "nonexistent_function",
-            }
+            },
+            "authorizationEventObject": {
+                "userIdToken": _FAKE_USER_ID_TOKEN,
+            },
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
