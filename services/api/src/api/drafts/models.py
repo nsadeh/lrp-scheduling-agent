@@ -50,17 +50,19 @@ class EmailDraft(BaseModel):
 
 
 class GenerateDraftInput(BaseModel):
-    """Template variables for the draft-email-v1 LangFuse prompt."""
+    """Template variables for the draft-email-v1 LangFuse prompt.
 
-    classification: str
-    recipient_type: str  # "client" or "recruiter"
-    recipient_name: str
+    The drafter is a "dumb tool" — it doesn't understand the scheduling state
+    machine. The classifier (the agent brain) provides a tight directive of what
+    to draft. The drafter just follows tone instructions and the directive.
+    """
+
+    draft_directive: str  # From classifier summary, e.g. "Share candidate availability with client"
+    recipient_name: str  # First name of the person being emailed
     candidate_name: str
-    coordinator_name: str
-    stage_state: str
-    extracted_entities: str  # JSON string of availability, phone numbers, etc.
-    thread_summary: str  # Recent thread context for reply coherence
-    loop_context: str  # Loop title, participants, stage info
+    coordinator_name: str  # For the sign-off
+    extracted_entities: str  # JSON string of availability, phone numbers, zoom links, etc.
+    thread_messages: str  # Formatted list of recent emails for reply context
 
 
 class DraftOutput(BaseModel):

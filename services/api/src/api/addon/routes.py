@@ -406,20 +406,12 @@ async def _handle_compose_email(body: AddonRequest, svc: LoopService, email: str
     if not stage:
         return build_loop_detail(loop)
 
-    # Determine recipient based on state
-    if stage.state == StageState.NEW and loop.recruiter and loop.recruiter.email:
-        to_email = loop.recruiter.email
-        subject = f"Re: {loop.title} - Availability Request"
-    elif (
-        stage.state == StageState.AWAITING_CANDIDATE
-        and loop.client_contact
-        and loop.client_contact.email
-    ):
-        to_email = loop.client_contact.email
-        subject = f"Re: {loop.title} - Candidate Availability"
-    else:
-        to_email = ""
-        subject = f"Re: {loop.title}"
+    # Use centralized recipient routing (single source of truth)
+    from api.drafts.service import resolve_recipients
+
+    to_emails, _ = resolve_recipients(loop, stage)
+    to_email = to_emails[0] if to_emails else ""
+    subject = f"Re: {loop.title}"
 
     gmail_thread_id = loop.email_threads[0].gmail_thread_id if loop.email_threads else None
     return build_compose_email(loop, stage, to_email, subject, gmail_thread_id)

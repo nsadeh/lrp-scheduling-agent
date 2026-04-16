@@ -7,7 +7,7 @@ import pytest
 
 from api.classifier.models import EmailClassification, Suggestion, SuggestionStatus
 from api.drafts.models import DraftOutput, DraftStatus
-from api.drafts.service import DraftService, _row_to_draft
+from api.drafts.service import DraftService, _row_to_draft, resolve_recipients
 from api.scheduling.models import (
     Candidate,
     ClientContact,
@@ -119,27 +119,27 @@ def _suggestion(
     )
 
 
-# Fake DB row matching the column order in drafts.sql RETURNING clause
+# Fake DB row as dict (psycopg dict_row format)
 def _draft_row(
     draft_id="drf_1",
     body="Hi Haley, John is available (in ET): Mon 3/2: 8am-11am.",
 ):
-    return (
-        draft_id,  # id
-        "sug_1",  # suggestion_id
-        "lop_1",  # loop_id
-        "stg_1",  # stage_id
-        "fiona@lrp.com",  # coordinator_email
-        ["haley@client.com"],  # to_emails
-        [],  # cc_emails
-        "Re: Round 1 - John Smith",  # subject
-        body,  # body
-        None,  # gmail_thread_id
-        "generated",  # status
-        None,  # sent_at
-        datetime(2026, 4, 15, tzinfo=UTC),  # created_at
-        datetime(2026, 4, 15, tzinfo=UTC),  # updated_at
-    )
+    return {
+        "id": draft_id,
+        "suggestion_id": "sug_1",
+        "loop_id": "lop_1",
+        "stage_id": "stg_1",
+        "coordinator_email": "fiona@lrp.com",
+        "to_emails": ["haley@client.com"],
+        "cc_emails": [],
+        "subject": "Re: Round 1 - John Smith",
+        "body": body,
+        "gmail_thread_id": None,
+        "status": "generated",
+        "sent_at": None,
+        "created_at": datetime(2026, 4, 15, tzinfo=UTC),
+        "updated_at": datetime(2026, 4, 15, tzinfo=UTC),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ def _draft_row(
 
 
 class TestRowToDraft:
-    def test_converts_tuple_to_model(self):
+    def test_converts_dict_to_model(self):
         draft = _row_to_draft(_draft_row())
         assert draft.id == "drf_1"
         assert draft.suggestion_id == "sug_1"
@@ -163,48 +163,39 @@ class TestRowToDraft:
 
 
 class TestResolveRecipients:
+    """Tests for the module-level resolve_recipients() — single source of truth."""
+
     def test_new_stage_routes_to_recruiter(self):
         loop = _loop(stage_state=StageState.NEW)
-        svc = DraftService(db_pool=MagicMock(), loop_service=MagicMock())
-        stage = loop.stages[0]
-        to, _cc = svc._resolve_recipients(loop, stage)
+        to, cc = resolve_recipients(loop, loop.stages[0])
         assert to == ["mike@recruiter.com"]
-        assert _cc == []
+        assert cc == []
 
     def test_awaiting_candidate_routes_to_client(self):
         loop = _loop(stage_state=StageState.AWAITING_CANDIDATE)
-        svc = DraftService(db_pool=MagicMock(), loop_service=MagicMock())
-        stage = loop.stages[0]
-        to, _cc = svc._resolve_recipients(loop, stage)
+        to, cc = resolve_recipients(loop, loop.stages[0])
         assert to == ["haley@client.com"]
-        assert _cc == []
+        assert cc == []
 
     def test_awaiting_client_routes_to_client(self):
         loop = _loop(stage_state=StageState.AWAITING_CLIENT)
-        svc = DraftService(db_pool=MagicMock(), loop_service=MagicMock())
-        stage = loop.stages[0]
-        to, _cc = svc._resolve_recipients(loop, stage)
+        to, cc = resolve_recipients(loop, loop.stages[0])
         assert to == ["haley@client.com"]
 
     def test_scheduled_routes_to_client(self):
         loop = _loop(stage_state=StageState.SCHEDULED)
-        svc = DraftService(db_pool=MagicMock(), loop_service=MagicMock())
-        stage = loop.stages[0]
-        to, _cc = svc._resolve_recipients(loop, stage)
+        to, cc = resolve_recipients(loop, loop.stages[0])
         assert to == ["haley@client.com"]
 
     def test_client_manager_cc_when_present(self):
         loop = _loop(stage_state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
-        svc = DraftService(db_pool=MagicMock(), loop_service=MagicMock())
-        stage = loop.stages[0]
-        to, _cc = svc._resolve_recipients(loop, stage)
+        to, cc = resolve_recipients(loop, loop.stages[0])
         assert to == ["haley@client.com"]
-        assert _cc == ["sarah@lrp.com"]
+        assert cc == ["sarah@lrp.com"]
 
     def test_none_stage_defaults_to_new(self):
         loop = _loop(stage_state=StageState.NEW)
-        svc = DraftService(db_pool=MagicMock(), loop_service=MagicMock())
-        to, _cc = svc._resolve_recipients(loop, None)
+        to, cc = resolve_recipients(loop, None)
         assert to == ["mike@recruiter.com"]
 
 
