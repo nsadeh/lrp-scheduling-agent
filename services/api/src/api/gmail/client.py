@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import sys
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING
 
@@ -75,10 +76,17 @@ class GmailClient:
         return await self._token_store.load_credentials(user_email)
 
     async def _exec(self, user_email: str, fn):
-        """Load credentials and execute a Gmail API call."""
+        """Load credentials and execute a Gmail API call.
+
+        The calling public method's name (e.g. ``watch``, ``send_message``) is
+        forwarded to ``_transport.execute`` as the Sentry span ``op_name`` so
+        traces distinguish individual Gmail operations without threading the
+        name through every call site.
+        """
+        caller_name = sys._getframe(1).f_code.co_name
         creds = await self._get_creds(user_email)
         try:
-            return await _transport.execute(creds, fn)
+            return await _transport.execute(creds, fn, op_name=caller_name)
         except HttpError as exc:
             raise _map_http_error(exc) from exc
 

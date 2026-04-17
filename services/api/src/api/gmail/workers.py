@@ -11,6 +11,7 @@ import logging
 import os
 from datetime import UTC, datetime
 
+import sentry_sdk
 from arq import cron
 from arq.connections import RedisSettings
 from psycopg_pool import AsyncConnectionPool
@@ -23,6 +24,7 @@ from api.gmail.hooks import (
     classify_direction,
     classify_message_type,
 )
+from api.observability import init_sentry
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ async def startup(ctx: dict) -> None:
     Crashes on startup if AI infrastructure (LangFuse, LLM provider keys) is not configured.
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
+    init_sentry(service="worker")
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
     pool = AsyncConnectionPool(conninfo=database_url)
     await pool.open()
@@ -83,6 +86,28 @@ async def shutdown(ctx: dict) -> None:
     if pool:
         await pool.close()
     logger.info("worker shutdown complete")
+
+
+async def on_job_start(ctx: dict) -> None:
+    """Open a fresh Sentry scope tagged with arq job metadata.
+
+    Arq reuses a single process for many jobs, so without per-job isolation the
+    scope accumulates tags across jobs and errors get attributed to whichever
+    job happened to run last.
+    """
+    scope = sentry_sdk.Scope.get_current_scope()
+    scope.clear()
+    scope.set_tag("service", "worker")
+    scope.set_tag("arq.job_id", ctx.get("job_id"))
+    scope.set_tag("arq.job_try", ctx.get("job_try"))
+    scope.set_tag("arq.function", ctx.get("enqueue_job", {}).get("function", ""))
+
+
+async def on_job_end(ctx: dict) -> None:
+    """Flush buffered events before arq moves on to the next job."""
+    client = sentry_sdk.get_client()
+    if client is not None:
+        client.flush(timeout=2.0)
 
 
 async def process_gmail_push(ctx: dict, coordinator_email: str, history_id: str) -> None:
@@ -377,6 +402,8 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
+    on_job_start = on_job_start
+    on_job_end = on_job_end
     redis_settings = RedisSettings.from_dsn(REDIS_URL)
     max_jobs = 50
     job_timeout = 180

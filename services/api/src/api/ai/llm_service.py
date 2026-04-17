@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import litellm
+import sentry_sdk
 
 from api.ai.errors import LLMBudgetExceededError, LLMUnavailableError
 
@@ -211,30 +212,41 @@ class LLMService:
                 kwargs["response_format"] = response_format
 
             start = time.monotonic()
-            try:
-                response = await litellm.acompletion(**kwargs)
-            except Exception as exc:
+            with sentry_sdk.start_span(op="ai.llm", name=candidate_model) as span:
+                span.set_data("ai.attempt", i)
+                span.set_data("ai.is_failover", i > 0)
+                try:
+                    response = await litellm.acompletion(**kwargs)
+                except Exception as exc:
+                    elapsed_ms = (time.monotonic() - start) * 1000
+                    span.set_data("ai.latency_ms", elapsed_ms)
+                    span.set_status("internal_error")
+                    error_msg = str(exc).lower()
+
+                    if "budget" in error_msg or "spend" in error_msg:
+                        raise LLMBudgetExceededError(str(exc)) from exc
+
+                    # 400-level client errors don't failover (caller's fault)
+                    if "400" in error_msg or "bad request" in error_msg:
+                        raise LLMUnavailableError(
+                            f"Bad request to '{candidate_model}': {exc}"
+                        ) from exc
+
+                    errors.append(f"{candidate_model}: {exc} ({elapsed_ms:.0f}ms)")
+                    if i < len(chain) - 1:
+                        logger.warning(
+                            "Provider failed for '%s' (%.0fms), failing over: %s",
+                            candidate_model,
+                            elapsed_ms,
+                            exc,
+                        )
+                    continue
+
                 elapsed_ms = (time.monotonic() - start) * 1000
-                error_msg = str(exc).lower()
-
-                if "budget" in error_msg or "spend" in error_msg:
-                    raise LLMBudgetExceededError(str(exc)) from exc
-
-                # 400-level client errors don't failover (caller's fault)
-                if "400" in error_msg or "bad request" in error_msg:
-                    raise LLMUnavailableError(f"Bad request to '{candidate_model}': {exc}") from exc
-
-                errors.append(f"{candidate_model}: {exc} ({elapsed_ms:.0f}ms)")
-                if i < len(chain) - 1:
-                    logger.warning(
-                        "Provider failed for '%s' (%.0fms), failing over: %s",
-                        candidate_model,
-                        elapsed_ms,
-                        exc,
-                    )
-                continue
-
-            elapsed_ms = (time.monotonic() - start) * 1000
+                span.set_data("ai.latency_ms", elapsed_ms)
+                if response.usage:
+                    span.set_data("ai.prompt_tokens", response.usage.prompt_tokens or 0)
+                    span.set_data("ai.completion_tokens", response.usage.completion_tokens or 0)
 
             # Log if we had to failover
             if i > 0:
