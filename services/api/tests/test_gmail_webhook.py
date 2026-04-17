@@ -34,22 +34,25 @@ def _make_pubsub_body(email: str = "coordinator@lrp.com", history_id: str = "123
 
 @pytest.fixture
 def app():
-    """Create a test app with mocked state."""
-    from api.main import app as real_app
+    """Create a lightweight test app with only the webhook router — no lifespan."""
+    from fastapi import FastAPI
 
-    # Mock Gmail client with token store
-    mock_token_store = AsyncMock()
-    mock_token_store.has_token = AsyncMock(return_value=True)
+    from api.gmail.webhook import webhook_router
+
+    test_app = FastAPI()
+    test_app.include_router(webhook_router)
+
+    # Mock Gmail client — has_token must be AsyncMock since it's awaited
     mock_gmail = MagicMock()
-    mock_gmail._token_store = mock_token_store
-    real_app.state.gmail = mock_gmail
+    mock_gmail.has_token = AsyncMock(return_value=True)
+    test_app.state.gmail = mock_gmail
 
     # Mock Redis
     mock_redis = AsyncMock()
     mock_redis.enqueue_job = AsyncMock()
-    real_app.state.redis = mock_redis
+    test_app.state.redis = mock_redis
 
-    return real_app
+    return test_app
 
 
 class TestWebhook:
@@ -72,7 +75,7 @@ class TestWebhook:
 
     def test_unknown_coordinator_skips(self, app, _mock_verify):
         """Push for unknown coordinator is silently ignored."""
-        app.state.gmail._token_store.has_token = AsyncMock(return_value=False)
+        app.state.gmail.has_token = AsyncMock(return_value=False)
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/webhook/gmail", json=_make_pubsub_body())
         assert response.status_code == 200

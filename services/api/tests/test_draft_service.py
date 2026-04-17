@@ -7,7 +7,8 @@ import pytest
 
 from api.classifier.models import EmailClassification, Suggestion, SuggestionStatus
 from api.drafts.models import DraftOutput, DraftStatus
-from api.drafts.service import DraftService, _row_to_draft, resolve_recipients
+from api.drafts.service import DraftService, _is_forward_draft, _row_to_draft, resolve_recipients
+from api.gmail.models import EmailAddress, Message
 from api.scheduling.models import (
     Candidate,
     ClientContact,
@@ -135,6 +136,7 @@ def _draft_row(
         "subject": "Re: Round 1 - John Smith",
         "body": body,
         "gmail_thread_id": None,
+        "is_forward": False,
         "status": "generated",
         "sent_at": None,
         "created_at": datetime(2026, 4, 15, tzinfo=UTC),
@@ -197,6 +199,57 @@ class TestResolveRecipients:
         loop = _loop(stage_state=StageState.NEW)
         to, cc = resolve_recipients(loop, None)
         assert to == ["mike@recruiter.com"]
+
+
+# ---------------------------------------------------------------------------
+# _is_forward_draft
+# ---------------------------------------------------------------------------
+
+
+def _thread_msg(
+    from_email: str, to_emails: list[str], cc_emails: list[str] | None = None
+) -> Message:
+    """Minimal Message for testing _is_forward_draft."""
+    return Message(
+        id="msg_1",
+        thread_id="thread_1",
+        subject="Interview",
+        **{"from": EmailAddress(email=from_email)},
+        to=[EmailAddress(email=e) for e in to_emails],
+        cc=[EmailAddress(email=e) for e in (cc_emails or [])],
+        date=datetime(2026, 4, 15, tzinfo=UTC),
+        body_text="test",
+    )
+
+
+class TestIsForwardDraft:
+    def test_new_recipient_is_forward(self):
+        """Sending to someone not in any prior message = forward."""
+        prior = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        assert _is_forward_draft(["bob@b.com"], prior) is True
+
+    def test_existing_recipient_is_not_forward(self):
+        """Sending to someone already in the thread = reply."""
+        prior = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        assert _is_forward_draft(["alice@a.com"], prior) is False
+
+    def test_cc_participant_is_not_forward(self):
+        """Someone who was CC'd in a prior message is a known participant."""
+        prior = [_thread_msg("alice@a.com", ["coord@lrp.com"], cc_emails=["bob@b.com"])]
+        assert _is_forward_draft(["bob@b.com"], prior) is False
+
+    def test_no_thread_messages_is_not_forward(self):
+        """First message in a thread is never a forward."""
+        assert _is_forward_draft(["anyone@a.com"], None) is False
+        assert _is_forward_draft(["anyone@a.com"], []) is False
+
+    def test_empty_to_is_not_forward(self):
+        prior = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        assert _is_forward_draft([], prior) is False
+
+    def test_case_insensitive(self):
+        prior = [_thread_msg("Alice@A.COM", ["coord@lrp.com"])]
+        assert _is_forward_draft(["alice@a.com"], prior) is False
 
 
 # ---------------------------------------------------------------------------

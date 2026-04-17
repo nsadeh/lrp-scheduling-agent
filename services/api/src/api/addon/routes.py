@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import re
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -26,14 +25,10 @@ from api.gmail.exceptions import GmailScopeError, GmailValidationError
 from api.overview.cards import build_overview
 from api.overview.service import OverviewService
 from api.scheduling.cards import (
-    build_add_time_slot_form,
     build_auth_required,
-    build_compose_email,
     build_contextual_unlinked,
     build_create_loop_form,
     build_error_card,
-    build_loop_detail,
-    build_revive_form,
 )
 from api.scheduling.models import StageState
 from api.scheduling.service import LoopService  # noqa: TC001
@@ -148,6 +143,24 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
     return body.common_event_object.parameters.get(key)
 
 
+_GMAIL_CONTEXTUAL_ID_RE = re.compile(r"^(?:thread-f|msg-f):(\d+)$")
+
+
+def _normalize_gmail_id(raw_id: str | None) -> str | None:
+    """Convert Google contextual-trigger IDs to Gmail API hex format.
+
+    Google's contextual triggers send IDs like 'thread-f:1862729221917227576'
+    (decimal with prefix), but the Gmail API and our database use the hex
+    form '19d9be5bb11dba38'. They're the same number in different bases.
+    """
+    if not raw_id:
+        return None
+    m = _GMAIL_CONTEXTUAL_ID_RE.match(raw_id)
+    if m:
+        return hex(int(m.group(1)))[2:]  # strip '0x' prefix
+    return raw_id
+
+
 async def _check_gmail_auth(request: Request, user_email: str) -> CardResponse | None:
     """Check if the coordinator has stored Gmail credentials.
 
@@ -226,16 +239,25 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     """Contextual trigger — show suggestions for this thread, or create prompt."""
     _ensure_action_url(request)
     email = _get_user_email(body)
+    logger.info("on-message: coordinator=%s", email)
 
     auth_card = await _check_gmail_auth(request, email)
     if auth_card:
+        logger.info("on-message: returning auth-required card for %s", email)
         return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
     thread_id = None
     message_id = None
     if body.gmail:
-        thread_id = body.gmail.thread_id
-        message_id = body.gmail.message_id
+        thread_id = _normalize_gmail_id(body.gmail.thread_id)
+        message_id = _normalize_gmail_id(body.gmail.message_id)
+
+    logger.info(
+        "on-message: thread_id=%s, message_id=%s, email=%s",
+        thread_id,
+        message_id,
+        email,
+    )
 
     if not thread_id:
         # No thread context — show full overview
@@ -247,14 +269,27 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     base_url = _get_base_url(request)
     groups = await overview_svc.get_thread_overview_data(thread_id, email)
 
+    logger.info(
+        "on-message: thread_id=%s, groups=%d, has_suggestions=%s",
+        thread_id,
+        len(groups),
+        bool(groups),
+    )
+
     if groups:
         card = build_overview(groups, base_url=base_url)
     else:
         # No suggestions for this thread — check if it's linked to a loop
         svc = _get_scheduling(request)
         loop = await svc.find_loop_by_thread(thread_id)
+        logger.info(
+            "on-message: thread_id=%s, linked_loop=%s",
+            thread_id,
+            loop.id if loop else None,
+        )
         if loop:
-            card = build_loop_detail(loop)
+            # Thread is linked but no pending suggestions — show full overview
+            card = await _build_refreshed_overview(request, email)
         else:
             card = build_contextual_unlinked(thread_id, message_id=message_id)
 
@@ -333,6 +368,7 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
     return build_create_loop_form(
         gmail_thread_id=gmail_thread_id,
         gmail_subject=gmail_subject,
+        gmail_message_id=message_id,
         prefill_candidate_name=prefill_candidate_name,
         prefill_client_name=prefill_client_name,
         prefill_client_email=prefill_client_email,
@@ -346,16 +382,28 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
 
 
 async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    candidate_name = _get_form_value(body, "candidate_name") or "Unknown"
-    client_name = _get_form_value(body, "client_name") or "Unknown"
-    client_email = (_get_form_value(body, "client_email") or "").strip()
-    client_company = _get_form_value(body, "client_company") or ""
-    recruiter_name = _get_form_value(body, "recruiter_name") or "Unknown"
-    recruiter_email = (_get_form_value(body, "recruiter_email") or "").strip()
+    request = kwargs.get("request")
+    suggestion_id = _get_param(body, "suggestion_id")
 
-    cm_name = _get_form_value(body, "cm_name")
-    cm_email = _get_form_value(body, "cm_email")
-    first_stage = _get_form_value(body, "first_stage_name") or "Round 1"
+    # Read form inputs — inline suggestion cards use suffixed names (e.g. candidate_name_{sug_id}),
+    # the standalone create form uses unsuffixed names. Try suffixed first.
+    def _field(name: str) -> str | None:
+        if suggestion_id:
+            val = _get_form_value(body, f"{name}_{suggestion_id}")
+            if val:
+                return val
+        return _get_form_value(body, name)
+
+    candidate_name = _field("candidate_name") or "Unknown"
+    client_name = _field("client_name") or "Unknown"
+    client_email = (_field("client_email") or "").strip()
+    client_company = _field("client_company") or ""
+    recruiter_name = _field("recruiter_name") or "Unknown"
+    recruiter_email = (_field("recruiter_email") or "").strip()
+
+    cm_name = _field("cm_name")
+    cm_email = _field("cm_email")
+    first_stage = _field("first_stage_name") or "Round 1"
 
     if not client_email or not recruiter_email:
         missing = []
@@ -366,6 +414,7 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
         return build_create_loop_form(
             gmail_thread_id=_get_param(body, "gmail_thread_id"),
             gmail_subject=_get_param(body, "gmail_subject"),
+            gmail_message_id=_get_param(body, "gmail_message_id"),
             prefill_candidate_name=candidate_name if candidate_name != "Unknown" else None,
             prefill_client_name=client_name if client_name != "Unknown" else None,
             prefill_client_email=client_email or None,
@@ -376,6 +425,7 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
             prefill_cm_email=cm_email,
             prefill_first_stage=first_stage,
             error_message=f"Required: {', '.join(missing)}",
+            suggestion_id=suggestion_id,
         )
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     gmail_subject = _get_param(body, "gmail_subject")
@@ -394,7 +444,7 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
 
     title = f"{candidate_name}, {client_company}"
 
-    loop = await svc.create_loop(
+    await svc.create_loop(
         coordinator_email=email,
         coordinator_name=email.split("@")[0],
         candidate_name=candidate_name,
@@ -408,265 +458,42 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     )
 
     # Resolve the parent suggestion if this was triggered from the overview
-    suggestion_id = _get_param(body, "suggestion_id")
     if suggestion_id:
         from api.classifier.service import SuggestionService
 
         suggestion_svc = SuggestionService(db_pool=svc._pool)
         await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
 
-    return build_loop_detail(loop)
+    # Enqueue background reclassification — the thread is now linked to the
+    # new loop, so the classifier will produce follow-up suggestions
+    # (e.g. DRAFT_EMAIL to recruiter). Runs async so the UI returns instantly.
+    gmail_message_id = _get_param(body, "gmail_message_id")
+    if gmail_thread_id and request:
+        redis = getattr(request.app.state, "redis", None)
+        if redis:
+            try:
+                await redis.enqueue_job(
+                    "reclassify_after_loop_creation",
+                    email,
+                    gmail_message_id,
+                    gmail_thread_id,
+                )
+                logger.info(
+                    "enqueued background reclassification for thread %s",
+                    gmail_thread_id,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to enqueue reclassification for thread %s",
+                    gmail_thread_id,
+                )
+        else:
+            logger.warning(
+                "redis unavailable — skipping background reclassification for thread %s",
+                gmail_thread_id,
+            )
 
-
-async def _handle_view_loop(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    loop_id = _get_param(body, "loop_id")
-    if not loop_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_advance_stage(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    to_state = _get_param(body, "to_state")
-    if not stage_id or not to_state:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    stage = await svc.advance_stage(stage_id, StageState(to_state), email)
-    loop = await svc.get_loop(stage.loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_mark_cold(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    if not stage_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    stage = await svc.mark_cold(stage_id, email)
-    loop = await svc.get_loop(stage.loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_show_revive(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id") or ""
-    if not stage_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    async with svc._pool.connection() as conn:
-        from api.scheduling.queries import queries
-
-        row = await queries.get_stage(conn, id=stage_id)
-        if row is None:
-            return await _build_refreshed_overview(kwargs.get("request"), email)
-        from api.scheduling.service import _row_to_stage
-
-        stage = _row_to_stage(row)
-    return build_revive_form(stage, loop_id)
-
-
-async def _handle_revive_stage(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    to_state = _get_form_value(body, "revive_to_state")
-    if not stage_id or not to_state:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    stage = await svc.revive_stage(stage_id, StageState(to_state), email)
-    loop = await svc.get_loop(stage.loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_add_stage(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    loop_id = _get_param(body, "loop_id")
-    if not loop_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    # Determine next stage name
-    loop = await svc.get_loop(loop_id)
-    next_num = len(loop.stages) + 1
-    stage_name = f"Round {next_num}"
-
-    await svc.add_stage(loop_id, stage_name, email)
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_compose_email(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id")
-    if not stage_id or not loop_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    loop = await svc.get_loop(loop_id)
-    stage = next((s for s in loop.stages if s.id == stage_id), None)
-    if not stage:
-        return build_loop_detail(loop)
-
-    # Use centralized recipient routing (single source of truth)
-    from api.drafts.service import resolve_recipients
-
-    to_emails, _ = resolve_recipients(loop, stage)
-    to_email = to_emails[0] if to_emails else ""
-    subject = f"Re: {loop.title}"
-
-    gmail_thread_id = loop.email_threads[0].gmail_thread_id if loop.email_threads else None
-    return build_compose_email(loop, stage, to_email, subject, gmail_thread_id)
-
-
-async def _handle_send_email(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id")
-    to_email = _get_param(body, "to_email")
-    subject = _get_param(body, "subject")
-    email_body = _get_form_value(body, "email_body") or ""
-    gmail_thread_id = _get_param(body, "gmail_thread_id")
-
-    if not stage_id or not loop_id or not to_email:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    # Determine auto-advance based on current stage state
-    loop = await svc.get_loop(loop_id)
-    stage = next((s for s in loop.stages if s.id == stage_id), None)
-    auto_advance_to = None
-    if stage:
-        if stage.state == StageState.NEW:
-            auto_advance_to = StageState.AWAITING_CANDIDATE
-        elif stage.state == StageState.AWAITING_CANDIDATE:
-            auto_advance_to = StageState.AWAITING_CLIENT
-
-    await svc.send_email(
-        loop_id=loop_id,
-        stage_id=stage_id,
-        coordinator_email=email,
-        to=[to_email],
-        subject=subject or "",
-        body=email_body,
-        gmail_thread_id=gmail_thread_id,
-        auto_advance_to=auto_advance_to,
-    )
-
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_link_thread(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    loop_id = _get_param(body, "loop_id")
-    gmail_thread_id = body.gmail.thread_id if body.gmail else None
-    if not loop_id or not gmail_thread_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    await svc.link_thread(loop_id, gmail_thread_id, None, email)
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_show_add_time_slot(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id") or ""
-    if not stage_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    async with svc._pool.connection() as conn:
-        from api.scheduling.queries import queries
-
-        row = await queries.get_stage(conn, id=stage_id)
-        if row is None:
-            return await _build_refreshed_overview(kwargs.get("request"), email)
-        from api.scheduling.service import _row_to_stage
-
-        stage = _row_to_stage(row)
-    return build_add_time_slot_form(stage, loop_id)
-
-
-async def _handle_save_time_slot(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id")
-    if not stage_id or not loop_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    date_str = _get_form_value(body, "date") or ""
-    time_str = _get_form_value(body, "time") or ""
-    tz_str = _get_form_value(body, "timezone") or "America/New_York"
-    duration = int(_get_form_value(body, "duration") or "60")
-    zoom_link = _get_form_value(body, "zoom_link")
-
-    try:
-        tz = ZoneInfo(tz_str)
-        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
-    except (ValueError, KeyError):
-        # Bad input — go back to the loop detail
-        loop = await svc.get_loop(loop_id)
-        return build_loop_detail(loop)
-
-    await svc.add_time_slot(
-        stage_id=stage_id,
-        start_time=dt,
-        duration_minutes=duration,
-        timezone=tz_str,
-        coordinator_email=email,
-        zoom_link=zoom_link,
-    )
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_forward_thread(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    """Forward the current thread to the recruiter (no body) and advance to AWAITING_CANDIDATE."""
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id")
-    if not stage_id or not loop_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    loop = await svc.get_loop(loop_id)
-    if not loop.recruiter or not loop.recruiter.email:
-        return build_loop_detail(loop)
-
-    gmail_thread_id = loop.email_threads[0].gmail_thread_id if loop.email_threads else None
-    subject = f"Re: {loop.title}"
-
-    await svc.send_email(
-        loop_id=loop_id,
-        stage_id=stage_id,
-        coordinator_email=email,
-        to=[loop.recruiter.email],
-        subject=subject,
-        body="",
-        gmail_thread_id=gmail_thread_id,
-        auto_advance_to=StageState.AWAITING_CANDIDATE,
-    )
-
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
-
-
-async def _handle_send_inline_email(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    """Send email to client with inline-composed body, advance to AWAITING_CLIENT."""
-    stage_id = _get_param(body, "stage_id")
-    loop_id = _get_param(body, "loop_id")
-    if not stage_id or not loop_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    loop = await svc.get_loop(loop_id)
-    if not loop.client_contact or not loop.client_contact.email:
-        return build_loop_detail(loop)
-
-    email_body = _get_form_value(body, "email_body") or ""
-    gmail_thread_id = loop.email_threads[0].gmail_thread_id if loop.email_threads else None
-    subject = f"Re: {loop.title} - Candidate Availability"
-
-    await svc.send_email(
-        loop_id=loop_id,
-        stage_id=stage_id,
-        coordinator_email=email,
-        to=[loop.client_contact.email],
-        subject=subject,
-        body=email_body,
-        gmail_thread_id=gmail_thread_id,
-        auto_advance_to=StageState.AWAITING_CLIENT,
-    )
-
-    loop = await svc.get_loop(loop_id)
-    return build_loop_detail(loop)
+    return await _build_refreshed_overview(request, email)
 
 
 # ---------------------------------------------------------------------------
@@ -701,26 +528,6 @@ async def _handle_view_draft(body: AddonRequest, svc: LoopService, email: str, *
     return build_draft_preview(draft)
 
 
-async def _handle_edit_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    """Show the editable draft form with TextInput for body."""
-    from api.drafts.cards import build_draft_edit
-
-    request = kwargs.get("request")
-    draft_svc = _get_draft_service(request)
-    if not draft_svc:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    draft_id = _get_param(body, "draft_id")
-    if not draft_id:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    draft = await draft_svc.get_draft(draft_id)
-    if not draft:
-        return await _build_refreshed_overview(kwargs.get("request"), email)
-
-    return build_draft_edit(draft)
-
-
 async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     """Send an AI-generated draft: update body if edited, send via LoopService, mark sent."""
     from api.classifier.service import SuggestionService
@@ -750,15 +557,28 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     if edited_body is not None and edited_body != draft.body:
         await draft_svc.update_draft_body(draft.id, send_body)
 
-    # Determine auto-advance based on stage state
-    loop = await svc.get_loop(draft.loop_id)
-    stage = next((s for s in loop.stages if s.id == draft.stage_id), None)
-    auto_advance_to = None
-    if stage:
-        if stage.state == StageState.NEW:
-            auto_advance_to = StageState.AWAITING_CANDIDATE
-        elif stage.state == StageState.AWAITING_CANDIDATE:
-            auto_advance_to = StageState.AWAITING_CLIENT
+    # Resolve threading headers so the recipient sees this in the same thread.
+    # In-Reply-To + References are RFC 2822 headers that tell the recipient's
+    # email client to display this as a reply (or forward) in the thread.
+    in_reply_to = None
+    references = None
+    gmail = getattr(request.app.state, "gmail", None) if request else None
+    if gmail and draft.gmail_thread_id:
+        try:
+            thread = await gmail.get_thread(email, draft.gmail_thread_id)
+            if thread.messages:
+                last_msg = thread.messages[-1]
+                in_reply_to = last_msg.message_id_header
+                # Build References chain from all messages in thread
+                ref_ids = [m.message_id_header for m in thread.messages if m.message_id_header]
+                if ref_ids:
+                    references = " ".join(ref_ids)
+        except Exception:
+            logger.warning(
+                "Could not fetch thread %s for reply headers — sending without threading",
+                draft.gmail_thread_id,
+                exc_info=True,
+            )
 
     # Send email via existing LoopService path
     await svc.send_email(
@@ -768,8 +588,10 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
         to=draft.to_emails,
         subject=draft.subject,
         body=send_body,
+        cc=draft.cc_emails or None,
         gmail_thread_id=draft.gmail_thread_id,
-        auto_advance_to=auto_advance_to,
+        in_reply_to=in_reply_to,
+        references=references,
     )
 
     # Mark draft sent + resolve parent suggestion as accepted
@@ -825,17 +647,36 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     if not suggestion:
         return await _build_refreshed_overview(request, email)
 
-    # Dispatch by action type
+    # Dispatch by action type — only handle actions that can be one-click accepted.
+    # CREATE_LOOP and DRAFT_EMAIL have their own dedicated flows (show_create_form, send_draft).
+    # ASK_COORDINATOR has no backend action yet.
     if suggestion.action == SuggestedAction.ADVANCE_STAGE:
         if suggestion.stage_id and suggestion.target_state:
             await svc.advance_stage(suggestion.stage_id, StageState(suggestion.target_state), email)
+        else:
+            logger.warning(
+                "ADVANCE_STAGE suggestion %s missing stage_id or target_state", suggestion_id
+            )
     elif suggestion.action == SuggestedAction.MARK_COLD:
         if suggestion.stage_id:
             await svc.mark_cold(suggestion.stage_id, email)
+        else:
+            logger.warning("MARK_COLD suggestion %s missing stage_id", suggestion_id)
     elif suggestion.action == SuggestedAction.LINK_THREAD:
         target_loop_id = suggestion.loop_id or suggestion.extracted_entities.get("target_loop_id")
         if target_loop_id and suggestion.gmail_thread_id:
             await svc.link_thread(target_loop_id, suggestion.gmail_thread_id, None, email)
+        else:
+            logger.warning("LINK_THREAD suggestion %s missing loop_id or thread_id", suggestion_id)
+    else:
+        # CREATE_LOOP, DRAFT_EMAIL, ASK_COORDINATOR, NO_ACTION — should not reach here
+        # via normal UI. Don't silently mark as accepted.
+        logger.warning(
+            "accept_suggestion called for unsupported action %s (suggestion %s) — ignoring",
+            suggestion.action,
+            suggestion_id,
+        )
+        return await _build_refreshed_overview(request, email)
 
     # Resolve the suggestion as accepted
     await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
@@ -881,28 +722,14 @@ async def _handle_unknown(body: AddonRequest, svc: LoopService, email: str, **kw
 
 
 _ACTION_HANDLERS = {
+    # Loop creation (used by CREATE_LOOP suggestion)
     "show_create_form": _handle_show_create_form,
     "create_loop": _handle_create_loop,
-    "view_loop": _handle_view_loop,
-    "advance_stage": _handle_advance_stage,
-    "mark_cold": _handle_mark_cold,
-    "show_revive": _handle_show_revive,
-    "revive_stage": _handle_revive_stage,
-    "add_stage": _handle_add_stage,
-    "compose_email": _handle_compose_email,
-    "send_email": _handle_send_email,
-    "link_thread": _handle_link_thread,
-    "show_add_time_slot": _handle_show_add_time_slot,
-    "save_time_slot": _handle_save_time_slot,
-    "show_drafts_tab": _handle_show_suggestions_tab,  # legacy alias
-    "show_status_tab": _handle_show_suggestions_tab,  # legacy alias
-    "forward_thread": _handle_forward_thread,
-    "send_inline_email": _handle_send_inline_email,
-    "edit_actors": _handle_show_suggestions_tab,  # TODO: implement edit actors form
+    # AI draft actions
     "view_draft": _handle_view_draft,
-    "edit_draft": _handle_edit_draft,
     "send_draft": _handle_send_draft,
     "discard_draft": _handle_discard_draft,
+    # Suggestion actions (new suggestion-centric UI)
     "accept_suggestion": _handle_accept_suggestion,
     "reject_suggestion": _handle_reject_suggestion,
     "show_suggestions_tab": _handle_show_suggestions_tab,

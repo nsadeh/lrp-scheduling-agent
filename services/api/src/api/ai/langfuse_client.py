@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 __all__ = ["fetch_prompt", "init_langfuse", "observe"]
 
 
-def init_langfuse() -> Langfuse | None:
-    """Create and return a LangFuse client, or None if keys are not configured.
+def init_langfuse() -> Langfuse:
+    """Create and return a LangFuse client.
 
     Required env vars: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY.
     Optional:
@@ -33,13 +33,17 @@ def init_langfuse() -> Langfuse | None:
         LANGFUSE_ENVIRONMENT — tags all traces with this environment string
             (e.g., "development", "production"). Use this to separate dev
             traces from prod in the LangFuse dashboard.
+
+    Raises RuntimeError if required keys are not set.
     """
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
 
     if not public_key or not secret_key:
-        logger.warning("LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY not set — LangFuse disabled")
-        return None
+        raise RuntimeError(
+            "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must be set. "
+            "The AI classification pipeline requires LangFuse for prompt management and tracing."
+        )
 
     host = os.environ.get("LANGFUSE_HOST")
     environment = os.environ.get("LANGFUSE_ENVIRONMENT")
@@ -100,5 +104,12 @@ def fetch_prompt(
 
     if prompt.is_fallback:
         logger.warning("Serving cached/fallback prompt for '%s' — LangFuse may be degraded", name)
+
+    logger.info(
+        "Fetched prompt '%s' v%d (labels=%s)",
+        prompt.name,
+        prompt.version,
+        prompt.labels,
+    )
 
     return prompt

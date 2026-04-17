@@ -231,34 +231,3 @@ class TestErrorHandling:
         call_kwargs = suggestion_service.create_suggestion.call_args.kwargs
         assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
         assert call_kwargs["item"].confidence == 0.0
-
-
-class TestOutgoingStateSync:
-    @pytest.mark.asyncio
-    async def test_auto_advance_triggers_stage_advance(self):
-        hook, _, _, suggestion_service, loop_service = _make_hook()
-        loop = _loop(stage_state=StageState.AWAITING_CANDIDATE)
-        loop_service.find_loop_by_thread.return_value = loop
-
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-            return_value=_classification_result(
-                [
-                    _suggestion_item(
-                        auto_advance=True,
-                        target_state=StageState.AWAITING_CLIENT,
-                    ),
-                ]
-            ),
-        ):
-            event = _event(direction=MessageDirection.OUTGOING)
-            await hook.on_email(event)
-
-        loop_service.advance_stage.assert_called_once_with(
-            stage_id="stg_1",
-            to_state=StageState.AWAITING_CLIENT,
-            coordinator_email="coord@lrp.com",
-            triggered_by="classifier_outgoing_sync",
-        )
-        suggestion_service.supersede_pending_for_loop.assert_called_once()

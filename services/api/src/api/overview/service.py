@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime  # noqa: TC003 — needed at runtime for type annotation
 from typing import TYPE_CHECKING
 
-from api.classifier.models import Suggestion
+from api.classifier.models import SuggestedAction, Suggestion
 from api.classifier.queries import queries
 from api.drafts.models import DraftStatus, EmailDraft
 from api.overview.models import LoopSuggestionGroup, SuggestionView
@@ -65,14 +66,18 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
     candidate_name = row[21]
     client_company = row[22]
 
-    # Columns 23-29: draft context
+    # Columns 23-24: stage context
+    stage_name = row[23]
+    stage_state = row[24]
+
+    # Columns 25-32: draft context
     draft = None
-    draft_id = row[23]
+    draft_id = row[25]
     if draft_id is not None:
-        draft_to = row[24]
+        draft_to = row[26]
         if isinstance(draft_to, str):
             draft_to = [draft_to]
-        draft_cc = row[25]
+        draft_cc = row[27]
         if isinstance(draft_cc, str):
             draft_cc = [draft_cc]
         if draft_cc is None:
@@ -85,10 +90,11 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
             coordinator_email=suggestion.coordinator_email,
             to_emails=draft_to if draft_to else [],
             cc_emails=draft_cc if draft_cc else [],
-            subject=row[26] or "",
-            body=row[27] or "",
-            status=DraftStatus(row[28]) if row[28] else DraftStatus.GENERATED,
-            gmail_thread_id=row[29],
+            subject=row[28] or "",
+            body=row[29] or "",
+            status=DraftStatus(row[30]) if row[30] else DraftStatus.GENERATED,
+            gmail_thread_id=row[31],
+            is_forward=bool(row[32]) if row[32] is not None else False,
         )
 
     return SuggestionView(
@@ -96,12 +102,25 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
         loop_title=loop_title,
         candidate_name=candidate_name,
         client_company=client_company,
+        stage_name=stage_name,
+        stage_state=stage_state,
         draft=draft,
     )
 
 
+def _suggestion_sort_key(v: SuggestionView) -> tuple[int, datetime]:
+    """Sort key: ADVANCE_STAGE last within each group, then by created_at."""
+    is_advance = 1 if v.suggestion.action == SuggestedAction.ADVANCE_STAGE else 0
+    return (is_advance, v.suggestion.created_at)
+
+
 def group_by_loop(views: list[SuggestionView]) -> list[LoopSuggestionGroup]:
-    """Group suggestion views by loop_id, sorted by oldest suggestion."""
+    """Group suggestion views by loop_id, sorted by oldest suggestion.
+
+    Within each group, suggestions are ordered by creation date (oldest first),
+    except ADVANCE_STAGE suggestions are always at the bottom — the coordinator
+    should handle actionable items (drafts, links) before confirming state changes.
+    """
     groups: dict[str | None, LoopSuggestionGroup] = {}
     for v in views:
         key = v.suggestion.loop_id
@@ -115,7 +134,12 @@ def group_by_loop(views: list[SuggestionView]) -> list[LoopSuggestionGroup]:
                 oldest_created_at=v.suggestion.created_at,
             )
         groups[key].suggestions.append(v)
-    # Sort by oldest suggestion creation time (already ASC from SQL, but explicit)
+
+    # Sort suggestions within each group
+    for group in groups.values():
+        group.suggestions.sort(key=_suggestion_sort_key)
+
+    # Sort groups by oldest suggestion creation time
     return sorted(groups.values(), key=lambda g: g.oldest_created_at)
 
 

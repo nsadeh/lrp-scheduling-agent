@@ -21,19 +21,11 @@ from api.addon.models import (
     OnClickAction,
     OpenLink,
     Section,
-    SelectionInput,
-    SelectionInputWidget,
-    SelectionItem,
     TextInput,
     TextInputWidget,
     TextParagraph,
     TextParagraphWidget,
     UpdateCard,
-)
-from api.scheduling.models import (
-    Loop,
-    Stage,
-    StageState,
 )
 
 # ---------------------------------------------------------------------------
@@ -87,11 +79,6 @@ def _button(
         text=text,
         on_click=_action(action_name, required_widgets=required_widgets, **params),
     )
-
-
-def _initials(name: str) -> str:
-    """Extract initials from a name. 'Sarah Kim' → 'SK', 'Bob' → 'B'."""
-    return "".join(part[0].upper() for part in name.split() if part)
 
 
 def _text(content: str) -> TextParagraphWidget:
@@ -197,146 +184,6 @@ def build_contextual_unlinked(gmail_thread_id: str, message_id: str | None = Non
 
 
 # ---------------------------------------------------------------------------
-# Loop Detail
-# ---------------------------------------------------------------------------
-
-
-def _build_loop_header_title(loop: Loop) -> str:
-    """Build header: 'CM/Recruiter initials, Stage, Candidate, Client'."""
-    parts = []
-    # Initials
-    recruiter_init = _initials(loop.recruiter.name) if loop.recruiter else ""
-    if loop.client_manager:
-        parts.append(f"{_initials(loop.client_manager.name)}/{recruiter_init}")
-    elif recruiter_init:
-        parts.append(recruiter_init)
-    # Most urgent stage
-    urgent = loop.most_urgent_stage
-    if urgent:
-        parts.append(urgent.name)
-    # Candidate
-    if loop.candidate:
-        parts.append(loop.candidate.name)
-    # Client company
-    if loop.client_contact:
-        parts.append(loop.client_contact.company)
-    return ", ".join(parts)
-
-
-def build_loop_detail(loop: Loop) -> CardResponse:
-    sections = []
-
-    # Stages section
-    for stage in loop.stages:
-        stage_widgets = _build_stage_widgets(stage, loop)
-        sections.append(
-            Section(
-                header=f"{stage.name} · {stage.state.replace('_', ' ').title()}",
-                widgets=stage_widgets,
-            )
-        )
-
-    # Add stage button
-    sections.append(
-        Section(widgets=[_buttons(_button("+ Add Stage", "add_stage", loop_id=loop.id))])
-    )
-
-    # Email threads section
-    if loop.email_threads:
-        thread_widgets = [
-            _decorated(t.subject or "(no subject)", "Linked Thread") for t in loop.email_threads
-        ]
-        sections.append(
-            Section(header=f"Email Threads ({len(loop.email_threads)})", widgets=thread_widgets)
-        )
-
-    # Edit loop button at the bottom
-    sections.append(
-        Section(widgets=[_buttons(_button("Edit Loop", "edit_actors", loop_id=loop.id))])
-    )
-
-    header = CardHeader(title=_build_loop_header_title(loop))
-    return _update_card(Card(header=header, sections=sections))
-
-
-def _build_stage_widgets(stage: Stage, loop: Loop) -> list:
-    loop_id = loop.id
-    widgets = []
-    widgets.append(_decorated(stage.next_action, "Next Action"))
-
-    # Time slots
-    for ts in stage.time_slots:
-        widgets.append(
-            _decorated(
-                f"{ts.start_time.strftime('%a %m/%d %I:%M %p')} ({ts.timezone})",
-                "Scheduled",
-            )
-        )
-
-    # Action buttons based on state
-    buttons = []
-    if stage.state == StageState.NEW:
-        # Forward thread to recruiter (one-click, no body)
-        buttons.append(
-            _button("Forward to Recruiter", "forward_thread", stage_id=stage.id, loop_id=loop_id)
-        )
-    elif stage.state == StageState.AWAITING_CANDIDATE:
-        # Inline email textarea — always visible
-        widgets.append(
-            TextInputWidget(
-                text_input=TextInput(
-                    name="email_body",
-                    label="Message to Client",
-                    type="MULTIPLE_LINE",
-                    hint_text="Enter candidate availability to send to client",
-                )
-            )
-        )
-        buttons.append(
-            _button(
-                "Send Availability to Client",
-                "send_inline_email",
-                stage_id=stage.id,
-                loop_id=loop_id,
-            )
-        )
-    elif stage.state == StageState.AWAITING_CLIENT:
-        buttons.append(
-            _button(
-                "Mark Scheduled", "advance_stage", stage_id=stage.id, to_state=StageState.SCHEDULED
-            )
-        )
-        buttons.append(
-            _button(
-                "No Overlap — Retry",
-                "advance_stage",
-                stage_id=stage.id,
-                to_state=StageState.AWAITING_CANDIDATE,
-            )
-        )
-    elif stage.state == StageState.SCHEDULED:
-        buttons.append(
-            _button(
-                "Mark Complete", "advance_stage", stage_id=stage.id, to_state=StageState.COMPLETE
-            )
-        )
-        buttons.append(
-            _button("Add Time Slot", "show_add_time_slot", stage_id=stage.id, loop_id=loop_id)
-        )
-    elif stage.state == StageState.COLD:
-        buttons.append(_button("Revive", "show_revive", stage_id=stage.id, loop_id=loop_id))
-
-    # Cold button for active stages
-    if stage.state not in (StageState.COMPLETE, StageState.COLD):
-        buttons.append(_button("Go Cold", "mark_cold", stage_id=stage.id))
-
-    if buttons:
-        widgets.append(_buttons(*buttons))
-
-    return widgets
-
-
-# ---------------------------------------------------------------------------
 # Create Loop Form
 # ---------------------------------------------------------------------------
 
@@ -354,6 +201,7 @@ _REQUIRED_CREATE_FIELDS = [
 def build_create_loop_form(
     gmail_thread_id: str | None = None,
     gmail_subject: str | None = None,
+    gmail_message_id: str | None = None,
     prefill_client_name: str | None = None,
     prefill_client_email: str | None = None,
     prefill_cm_name: str | None = None,
@@ -480,7 +328,7 @@ def build_create_loop_form(
                 ),
             ],
             collapsible=True,
-            uncollapsible_widgets_count=0,
+            uncollapsible_widgets_count=1,
         )
     )
 
@@ -507,6 +355,8 @@ def build_create_loop_form(
         params["gmail_thread_id"] = gmail_thread_id
     if gmail_subject:
         params["gmail_subject"] = gmail_subject
+    if gmail_message_id:
+        params["gmail_message_id"] = gmail_message_id
     if suggestion_id:
         params["suggestion_id"] = suggestion_id
 
@@ -529,129 +379,5 @@ def build_create_loop_form(
         Card(
             header=CardHeader(title="New Scheduling Loop", subtitle="Enter details"),
             sections=sections,
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
-# Compose Email
-# ---------------------------------------------------------------------------
-
-
-def build_compose_email(
-    loop: Loop,
-    stage: Stage,
-    to_email: str,
-    subject: str,
-    gmail_thread_id: str | None = None,
-) -> CardResponse:
-    widgets = []
-
-    widgets.append(_decorated(to_email, "To"))
-    widgets.append(_decorated(subject, "Subject"))
-
-    widgets.append(
-        TextInputWidget(
-            text_input=TextInput(
-                name="email_body",
-                label="Message",
-                type="MULTIPLE_LINE",
-                hint_text="Keep it short and professional",
-            )
-        )
-    )
-
-    params = {"stage_id": stage.id, "loop_id": loop.id, "to_email": to_email, "subject": subject}
-    if gmail_thread_id:
-        params["gmail_thread_id"] = gmail_thread_id
-
-    widgets.append(
-        _buttons(
-            _button("Send", "send_email", **params),
-            _button("Cancel", "view_loop", loop_id=loop.id),
-        )
-    )
-
-    return _update_card(
-        Card(
-            header=CardHeader(
-                title="Send Email",
-                subtitle=f"{loop.title} · {stage.name}",
-            ),
-            sections=[Section(widgets=widgets)],
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
-# Add Time Slot Form
-# ---------------------------------------------------------------------------
-
-
-def build_add_time_slot_form(stage: Stage, loop_id: str) -> CardResponse:
-    widgets = [
-        TextInputWidget(
-            text_input=TextInput(name="date", label="Date (YYYY-MM-DD)", type="SINGLE_LINE")
-        ),
-        TextInputWidget(
-            text_input=TextInput(name="time", label="Time (HH:MM)", type="SINGLE_LINE")
-        ),
-        TextInputWidget(
-            text_input=TextInput(
-                name="timezone", label="Timezone", type="SINGLE_LINE", value="America/New_York"
-            )
-        ),
-        TextInputWidget(
-            text_input=TextInput(
-                name="duration", label="Duration (minutes)", type="SINGLE_LINE", value="60"
-            )
-        ),
-        TextInputWidget(
-            text_input=TextInput(name="zoom_link", label="Zoom Link (optional)", type="SINGLE_LINE")
-        ),
-        _buttons(
-            _button("Save", "save_time_slot", stage_id=stage.id, loop_id=loop_id),
-            _button("Cancel", "view_loop", loop_id=loop_id),
-        ),
-    ]
-
-    return _update_card(
-        Card(
-            header=CardHeader(title="Add Time Slot", subtitle=stage.name),
-            sections=[Section(widgets=widgets)],
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
-# Revive Stage
-# ---------------------------------------------------------------------------
-
-
-def build_revive_form(stage: Stage, loop_id: str) -> CardResponse:
-    widgets = [
-        _text(f"Revive <b>{stage.name}</b> — choose which state to resume from:"),
-        SelectionInputWidget(
-            selection_input=SelectionInput(
-                name="revive_to_state",
-                label="Resume from",
-                type="RADIO_BUTTON",
-                items=[
-                    SelectionItem(text="New (restart)", value=StageState.NEW),
-                    SelectionItem(text="Awaiting Candidate", value=StageState.AWAITING_CANDIDATE),
-                    SelectionItem(text="Awaiting Client", value=StageState.AWAITING_CLIENT),
-                ],
-            )
-        ),
-        _buttons(
-            _button("Revive", "revive_stage", stage_id=stage.id, loop_id=loop_id),
-            _button("Cancel", "view_loop", loop_id=loop_id),
-        ),
-    ]
-
-    return _update_card(
-        Card(
-            header=CardHeader(title="Revive Stage", subtitle=stage.name),
-            sections=[Section(widgets=widgets)],
         )
     )

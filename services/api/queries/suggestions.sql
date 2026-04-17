@@ -90,15 +90,20 @@ SELECT
     l.title AS loop_title,
     cand.name AS candidate_name,
     cc.company AS client_company,
+    -- Stage context (nullable — only present when suggestion has a stage_id)
+    stg.name AS stage_name,
+    stg.state AS stage_state,
     -- Draft context (nullable for non-DRAFT_EMAIL)
     d.id AS draft_id, d.to_emails AS draft_to_emails,
     d.cc_emails AS draft_cc_emails, d.subject AS draft_subject,
     d.body AS draft_body, d.status AS draft_status,
-    d.gmail_thread_id AS draft_gmail_thread_id
+    d.gmail_thread_id AS draft_gmail_thread_id,
+    d.is_forward AS draft_is_forward
 FROM agent_suggestions s
 LEFT JOIN loops l ON s.loop_id = l.id
 LEFT JOIN candidates cand ON l.candidate_id = cand.id
 LEFT JOIN client_contacts cc ON l.client_contact_id = cc.id
+LEFT JOIN stages stg ON s.stage_id = stg.id
 LEFT JOIN email_drafts d ON d.suggestion_id = s.id
     AND d.status IN ('generated', 'edited')
 WHERE s.coordinator_email = :coordinator_email
@@ -117,14 +122,18 @@ SELECT
     l.title AS loop_title,
     cand.name AS candidate_name,
     cc.company AS client_company,
+    stg.name AS stage_name,
+    stg.state AS stage_state,
     d.id AS draft_id, d.to_emails AS draft_to_emails,
     d.cc_emails AS draft_cc_emails, d.subject AS draft_subject,
     d.body AS draft_body, d.status AS draft_status,
-    d.gmail_thread_id AS draft_gmail_thread_id
+    d.gmail_thread_id AS draft_gmail_thread_id,
+    d.is_forward AS draft_is_forward
 FROM agent_suggestions s
 LEFT JOIN loops l ON s.loop_id = l.id
 LEFT JOIN candidates cand ON l.candidate_id = cand.id
 LEFT JOIN client_contacts cc ON l.client_contact_id = cc.id
+LEFT JOIN stages stg ON s.stage_id = stg.id
 LEFT JOIN email_drafts d ON d.suggestion_id = s.id
     AND d.status IN ('generated', 'edited')
 WHERE s.gmail_thread_id = :gmail_thread_id

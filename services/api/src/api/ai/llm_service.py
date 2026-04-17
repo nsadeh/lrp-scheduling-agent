@@ -4,10 +4,10 @@ Uses litellm.acompletion() with a simple primary → secondary → tertiary
 failover chain configured via environment variables.
 
 Latency budget:
-- Primary attempt: 5s timeout, 1 retry (10s max)
-- Secondary attempt: 4s timeout, 0 retries
-- Tertiary attempt: 4s timeout, 0 retries
-- Total budget: ~18s max wall-clock time
+- Primary attempt: 25s timeout, 1 retry (50s max)
+- Secondary attempt: 20s timeout, 0 retries
+- Tertiary attempt: 20s timeout, 0 retries
+- Total budget: ~90s max wall-clock time
 """
 
 import logging
@@ -68,20 +68,25 @@ class LLMResponse:
     latency_ms: float = 0.0
 
 
-def init_llm_service() -> "LLMService | None":
-    """Create an LLMService if at least one provider key is configured.
+def init_llm_service() -> "LLMService":
+    """Create an LLMService. At least one provider key must be configured.
 
     Failover chain is configured via env vars:
         LLM_SECONDARY_MODEL — model to try when primary fails
         LLM_TERTIARY_MODEL  — model to try when secondary fails
+
+    Raises RuntimeError if no provider API keys are set.
     """
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     google_key = os.environ.get("GOOGLE_AI_API_KEY")
 
     if not any([anthropic_key, openai_key, google_key]):
-        logger.warning("No LLM provider API keys set — LLMService disabled")
-        return None
+        raise RuntimeError(
+            "At least one LLM provider API key must be set "
+            "(ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_AI_API_KEY). "
+            "The AI classification pipeline requires an LLM provider."
+        )
 
     secondary = os.environ.get("LLM_SECONDARY_MODEL", "gpt-4o")
     tertiary = os.environ.get("LLM_TERTIARY_MODEL", "gemini-2.0-flash")
@@ -191,7 +196,7 @@ class LLMService:
 
             # Primary gets 1 retry, fallbacks get 0
             retries = 1 if i == 0 else 0
-            timeout = 5.0 if i == 0 else 4.0
+            timeout = 25.0 if i == 0 else 20.0
 
             kwargs: dict[str, Any] = {
                 "model": candidate_model,

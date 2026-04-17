@@ -132,6 +132,21 @@ class ClassifierHook:
 
         # 3. Apply guardrails and persist each suggestion
         for item in result.suggestions:
+            # Guardrail: drop suggestions that require a loop when thread is unlinked.
+            # DRAFT_EMAIL and ADVANCE_STAGE make no sense without a loop — they'll
+            # be generated on reclassification after the user creates the loop.
+            if linked_loop is None and item.action in (
+                SuggestedAction.DRAFT_EMAIL,
+                SuggestedAction.ADVANCE_STAGE,
+                SuggestedAction.MARK_COLD,
+            ):
+                logger.info(
+                    "dropping %s suggestion — no linked loop (thread %s)",
+                    item.action,
+                    msg.thread_id,
+                )
+                continue
+
             item = self._apply_guardrails(item, linked_loop)
             suggestion = await self._suggestions.create_suggestion(
                 coordinator_email=event.coordinator_email,
@@ -166,10 +181,6 @@ class ClassifierHook:
                     logger.info("draft generated for suggestion %s", suggestion.id)
                 except Exception:
                     logger.exception("draft generation failed for suggestion %s", suggestion.id)
-
-        # 4. Outgoing email state sync: auto-advance and supersede
-        if event.direction == MessageDirection.OUTGOING and linked_loop:
-            await self._handle_outgoing_state_sync(result, linked_loop, event.coordinator_email)
 
     async def _build_context(
         self,
@@ -302,54 +313,3 @@ class ClassifierHook:
             stage = self._find_target_stage(item, linked_loop)
             return stage.id if stage else None
         return None
-
-    async def _handle_outgoing_state_sync(
-        self,
-        result: ClassificationResult,
-        loop: Loop,
-        coordinator_email: str,
-    ) -> None:
-        """For outgoing emails: auto-advance stages and supersede stale suggestions."""
-        for item in result.suggestions:
-            if not item.auto_advance or item.action != SuggestedAction.ADVANCE_STAGE:
-                continue
-
-            if not item.target_state:
-                continue
-
-            stage = self._find_target_stage(item, loop)
-            if not stage:
-                continue
-
-            target = StageState(item.target_state)
-            allowed = ALLOWED_TRANSITIONS.get(stage.state, set())
-            if target not in allowed:
-                logger.warning(
-                    "outgoing state sync: invalid transition %s → %s, skipping",
-                    stage.state,
-                    target,
-                )
-                continue
-
-            try:
-                await self._loops.advance_stage(
-                    stage_id=stage.id,
-                    to_state=target,
-                    coordinator_email=coordinator_email,
-                    triggered_by="classifier_outgoing_sync",
-                )
-                logger.info(
-                    "auto-advanced stage %s: %s → %s",
-                    stage.id,
-                    stage.state,
-                    target,
-                )
-            except Exception:
-                logger.exception("failed to auto-advance stage %s", stage.id)
-                continue
-
-            # Supersede stale pending suggestions for this loop
-            await self._suggestions.supersede_pending_for_loop(
-                loop_id=loop.id,
-                resolved_by=f"auto:{coordinator_email}",
-            )

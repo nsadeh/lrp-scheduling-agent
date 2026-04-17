@@ -38,7 +38,7 @@ from api.scheduling.cards import (
 # ---------------------------------------------------------------------------
 
 
-def _overview_header_buttons(base_url: str | None = None) -> Section:
+def _overview_header_buttons(base_url: str | None = None) -> Section | None:
     """Render header buttons (refresh only)."""
     buttons = []
 
@@ -74,7 +74,7 @@ def _dismiss_button(suggestion_id: str) -> Button:
 
 
 def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
-    """DRAFT_EMAIL — inline editable draft with Send/Edit/Dismiss."""
+    """DRAFT_EMAIL — inline editable draft with Send/Forward + Dismiss."""
     widgets: list[Widget] = []
     sug = view.suggestion
     draft = view.draft
@@ -83,6 +83,8 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
     widgets.append(_text(f"<b>\u2709 {sug.summary}</b>"))
 
     if draft:
+        is_fwd = draft.is_forward
+
         # Recipients (read-only)
         widgets.append(_decorated(", ".join(draft.to_emails), "To"))
         if draft.cc_emails:
@@ -90,97 +92,176 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
         widgets.append(_decorated(draft.subject, "Subject"))
         widgets.append(_divider())
 
-        # Editable body — unique name per suggestion to avoid collisions
+        # Editable body — unique name per suggestion to avoid collisions.
+        # For forwards the note is optional (coordinator may just forward
+        # without commentary); for replies the message is always required.
         input_name = f"draft_body_{sug.id}"
         widgets.append(
             TextInputWidget(
                 text_input=TextInput(
                     name=input_name,
-                    label="Message",
+                    label="Forward note" if is_fwd else "Message",
                     type="MULTIPLE_LINE",
                     value=draft.body,
                 )
             )
         )
 
-        # Action buttons
+        # Dismiss (left) / Send or Forward (right)
+        send_label = "Forward" if is_fwd else "Send"
+        send_required = [] if is_fwd else [input_name]
         widgets.append(
             _buttons(
+                _dismiss_button(sug.id),
                 _button(
-                    "Send",
+                    send_label,
                     "send_draft",
-                    required_widgets=[input_name],
+                    required_widgets=send_required,
                     draft_id=draft.id,
                     suggestion_id=sug.id,
                 ),
-                _button("Edit & Send", "edit_draft", draft_id=draft.id),
-                _dismiss_button(sug.id),
             )
         )
     else:
-        # Draft not yet generated or missing
-        widgets.append(_text("<i>Draft is being generated...</i>"))
-        widgets.append(_buttons(_dismiss_button(sug.id)))
+        # Draft not yet generated — show refresh button so user can re-check
+        widgets.append(_text("<i>Draft is being generated\u2026 tap Refresh to check.</i>"))
+        widgets.append(
+            _buttons(
+                _button("\u21bb Refresh", "show_suggestions_tab"),
+                _dismiss_button(sug.id),
+            )
+        )
 
     return widgets
 
 
 def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
-    """CREATE_LOOP — extracted entities + create button."""
+    """CREATE_LOOP — inline form with pre-filled TextInputs from extracted entities.
+
+    Renders an editable form directly in the suggestion card so coordinators
+    can review/edit the extracted data and create the loop with one click —
+    no navigation to a separate form.
+    """
     widgets: list[Widget] = []
     sug = view.suggestion
     entities = sug.extracted_entities
+    action_data = sug.action_data or {}
+    sid = sug.id  # suffix for unique input names
+
+    # Read from action_data first, fall back to extracted_entities
+    def _val(key: str, default: str = "") -> str:
+        return action_data.get(key) or entities.get(key, default)
 
     widgets.append(_text("<b>+ New loop detected</b>"))
 
-    # Main entity fields
-    candidate = entities.get("candidate_name", "Unknown")
-    client_name = entities.get("client_name", "")
-    client_email = entities.get("client_email", "")
-    client_company = entities.get("client_company", "")
-    recruiter_name = entities.get("recruiter_name", "")
-    recruiter_email = entities.get("recruiter_email", "")
+    # Inline form fields — pre-filled from classifier output
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"candidate_name_{sid}",
+                label="Candidate Name",
+                type="SINGLE_LINE",
+                value=_val("candidate_name"),
+            )
+        )
+    )
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"client_name_{sid}",
+                label="Client Contact Name",
+                type="SINGLE_LINE",
+                value=_val("client_name"),
+            )
+        )
+    )
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"client_email_{sid}",
+                label="Client Email",
+                type="SINGLE_LINE",
+                value=_val("client_email"),
+            )
+        )
+    )
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"client_company_{sid}",
+                label="Client Company",
+                type="SINGLE_LINE",
+                value=_val("client_company"),
+            )
+        )
+    )
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"recruiter_name_{sid}",
+                label="Recruiter Name",
+                type="SINGLE_LINE",
+                value=_val("recruiter_name"),
+            )
+        )
+    )
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"recruiter_email_{sid}",
+                label="Recruiter Email",
+                type="SINGLE_LINE",
+                value=_val("recruiter_email"),
+            )
+        )
+    )
 
-    widgets.append(_decorated(candidate, "Candidate"))
-    client_display = f"{client_name} @ {client_company}" if client_company else client_name
-    if client_email:
-        client_display += f" ({client_email})"
-    widgets.append(_decorated(client_display, "Client"))
-    recruiter_display = recruiter_name
-    if recruiter_email:
-        recruiter_display += f" ({recruiter_email})"
-    widgets.append(_decorated(recruiter_display, "Recruiter"))
+    # Client Manager — optional
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"cm_name_{sid}",
+                label="Client Manager Name (optional)",
+                type="SINGLE_LINE",
+                value=_val("cm_name"),
+            )
+        )
+    )
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"cm_email_{sid}",
+                label="Client Manager Email (optional)",
+                type="SINGLE_LINE",
+                value=_val("cm_email"),
+            )
+        )
+    )
 
-    # Build create button params — pass extracted entities to pre-fill the form
-    create_params: dict[str, str] = {"suggestion_id": sug.id}
+    # Create button — calls create_loop directly (no form navigation)
+    required = [
+        f"candidate_name_{sid}",
+        f"client_email_{sid}",
+        f"recruiter_name_{sid}",
+        f"recruiter_email_{sid}",
+    ]
+
+    create_params: dict[str, str] = {
+        "suggestion_id": sug.id,
+    }
     if sug.gmail_thread_id:
         create_params["gmail_thread_id"] = sug.gmail_thread_id
-    # Pre-fill params for the create form
-    for key in (
-        "candidate_name",
-        "client_name",
-        "client_email",
-        "client_company",
-        "recruiter_name",
-        "recruiter_email",
-    ):
-        val = entities.get(key)
-        if val:
-            create_params[f"prefill_{key}"] = val
-
-    # Optional: client manager in collapsible section
-    cm_name = entities.get("client_manager_name")
-    cm_email = entities.get("client_manager_email")
-    if cm_name or cm_email:
-        cm_display = cm_name or ""
-        if cm_email:
-            cm_display += f" ({cm_email})"
-            create_params["prefill_cm_name"] = cm_name or ""
-            create_params["prefill_cm_email"] = cm_email
+    if sug.gmail_message_id:
+        create_params["gmail_message_id"] = sug.gmail_message_id
 
     widgets.append(
         _buttons(
-            _button("Create Loop", "show_create_form", **create_params),
+            _button(
+                "Create Loop",
+                "create_loop",
+                required_widgets=required,
+                **create_params,
+            ),
             _dismiss_button(sug.id),
         )
     )
@@ -188,11 +269,34 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
     return widgets
 
 
+def _format_state_label(state: str) -> str:
+    """Turn a StageState value like 'awaiting_client' into 'Awaiting Client'."""
+    return state.replace("_", " ").title()
+
+
 def _build_advance_suggestion(view: SuggestionView) -> list[Widget]:
-    """ADVANCE_STAGE — cardless one-liner with Accept button."""
+    """ADVANCE_STAGE — concise "from → to" label with Accept/Dismiss.
+
+    Reasoning is intentionally omitted from the card — the from/to label
+    is self-explanatory for the coordinator, and classifier reasoning
+    would clutter the one-click approve flow.
+    """
     sug = view.suggestion
+
+    # Build a descriptive label: "Advance <stage> from <current> to <target>"
+    parts = ["Advance"]
+    if view.stage_name:
+        parts.append(view.stage_name)
+    current_label = _format_state_label(view.stage_state) if view.stage_state else None
+    target_label = _format_state_label(sug.target_state.value) if sug.target_state else None
+    if current_label and target_label:
+        parts.append(f"from {current_label} to {target_label}")
+    elif target_label:
+        parts.append(f"to {target_label}")
+    label = " ".join(parts)
+
     return [
-        _decorated(sug.summary, "\u2191 Advance"),
+        _decorated(label, "\u2191 Advance"),
         _buttons(
             _button("Accept", "accept_suggestion", suggestion_id=sug.id),
             _dismiss_button(sug.id),

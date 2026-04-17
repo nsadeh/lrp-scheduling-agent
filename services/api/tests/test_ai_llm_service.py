@@ -13,9 +13,12 @@ from api.ai.llm_service import (
 
 
 class TestInitLlmService:
-    def test_returns_none_when_no_keys_set(self):
-        with patch.dict("os.environ", {}, clear=True):
-            assert init_llm_service() is None
+    def test_raises_when_no_keys_set(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            pytest.raises(RuntimeError, match="LLM provider"),
+        ):
+            init_llm_service()
 
     def test_returns_service_with_anthropic_key_only(self):
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=True):

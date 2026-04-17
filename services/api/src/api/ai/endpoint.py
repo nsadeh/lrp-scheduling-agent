@@ -136,6 +136,15 @@ class LLMEndpoint:
         prompt = fetch_prompt(langfuse, self.prompt_name)
         config: dict = prompt.config or {}
 
+        # Attach prompt version to the current span for traceability
+        langfuse.update_current_span(
+            metadata={
+                "prompt_name": self.prompt_name,
+                "prompt_version": prompt.version,
+                "prompt_labels": prompt.labels,
+            }
+        )
+
         # 2. Read model config (LangFuse config is primary, overrides take precedence)
         model = overrides.get("model", config.get("model", DEFAULT_MODEL))
         temperature = overrides.get("temperature", config.get("temperature", 0.0))

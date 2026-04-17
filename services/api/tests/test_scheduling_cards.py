@@ -1,97 +1,17 @@
 """Tests for scheduling card builder functions."""
 
-from datetime import UTC, datetime
-
 from api.scheduling.cards import (
-    _initials,
-    build_compose_email,
     build_contextual_unlinked,
     build_create_loop_form,
-    build_loop_detail,
     set_action_url,
 )
-from api.scheduling.models import (
-    Candidate,
-    ClientContact,
-    Contact,
-    Coordinator,
-    Loop,
-    Stage,
-    StageState,
-)
-
-NOW = datetime.now(UTC)
 
 # Set a test action URL so card builders can generate callback URLs
 set_action_url("https://test.example.com/addon/action")
 
 
-def _make_loop(
-    stages: list[Stage] | None = None,
-    client_manager: Contact | None = "default",
-) -> Loop:
-    cm = (
-        Contact(
-            id="con_cm",
-            name="Sarah Kim",
-            email="sarah@lrp.com",
-            role="client_manager",
-            created_at=NOW,
-        )
-        if client_manager == "default"
-        else client_manager
-    )
-    return Loop(
-        id="lop_test",
-        coordinator_id="crd_test",
-        client_contact_id="cli_test",
-        recruiter_id="con_rec",
-        client_manager_id=cm.id if cm else None,
-        candidate_id="can_test",
-        title="Smith, Acme Capital",
-        created_at=NOW,
-        updated_at=NOW,
-        coordinator=Coordinator(id="crd_test", name="Alice", email="alice@lrp.com", created_at=NOW),
-        client_contact=ClientContact(
-            id="cli_test",
-            name="Jane Doe",
-            email="jane@acme.com",
-            company="Acme Capital",
-            created_at=NOW,
-        ),
-        recruiter=Contact(
-            id="con_rec", name="Bob Lee", email="bob@recruit.com", role="recruiter", created_at=NOW
-        ),
-        client_manager=cm,
-        candidate=Candidate(id="can_test", name="John Smith", created_at=NOW),
-        stages=stages
-        or [
-            Stage(
-                id="stg_1",
-                loop_id="lop_test",
-                name="Round 1",
-                state=StageState.NEW,
-                ordinal=0,
-                created_at=NOW,
-                updated_at=NOW,
-            ),
-        ],
-    )
-
-
 def _card_json(card_response):
     return card_response.model_dump(by_alias=True, exclude_none=True)
-
-
-class TestInitials:
-    def test_two_words(self):
-        assert _initials("Sarah Kim") == "SK"
-
-    def test_single_word(self):
-        assert _initials("Bob") == "B"
-
-    def test_three_words(self):
-        assert _initials("Mary Jane Watson") == "MJW"
 
 
 class TestContextualUnlinked:
@@ -107,93 +27,6 @@ class TestContextualUnlinked:
         data = _card_json(build_contextual_unlinked("thread_123"))
         card = data["action"]["navigations"][0]["updateCard"]
         assert "header" not in card
-
-
-class TestLoopDetail:
-    def test_no_actors_section(self):
-        loop = _make_loop()
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        headers = [s.get("header", "") for s in card["sections"]]
-        assert "Actors" not in headers
-
-    def test_has_edit_loop_button(self):
-        loop = _make_loop()
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        last_section = card["sections"][-1]
-        button_texts = [
-            b["text"]
-            for w in last_section["widgets"]
-            if "buttonList" in w
-            for b in w["buttonList"]["buttons"]
-        ]
-        assert "Edit Loop" in button_texts
-
-    def test_header_format_with_cm(self):
-        loop = _make_loop()
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        title = card["header"]["title"]
-        # Should be "SK/BL, Round 1, John Smith, Acme Capital"
-        assert title == "SK/BL, Round 1, John Smith, Acme Capital"
-
-    def test_header_format_without_cm(self):
-        loop = _make_loop(client_manager=None)
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        title = card["header"]["title"]
-        assert title == "BL, Round 1, John Smith, Acme Capital"
-
-    def test_header_no_subtitle(self):
-        loop = _make_loop()
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        assert "subtitle" not in card["header"]
-
-    def test_shows_stage_with_state(self):
-        loop = _make_loop()
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        # First section is the stage
-        stage_section = card["sections"][0]
-        assert "Round 1" in stage_section["header"]
-        assert "New" in stage_section["header"]
-
-    def test_new_stage_shows_forward_button(self):
-        loop = _make_loop()
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        stage_section = card["sections"][0]
-        button_widgets = [w for w in stage_section["widgets"] if "buttonList" in w]
-        all_button_texts = [b["text"] for bw in button_widgets for b in bw["buttonList"]["buttons"]]
-        assert "Forward to Recruiter" in all_button_texts
-        assert "Send Email to Recruiter" not in all_button_texts
-
-    def test_awaiting_candidate_shows_inline_textarea(self):
-        stages = [
-            Stage(
-                id="stg_1",
-                loop_id="lop_test",
-                name="Round 1",
-                state=StageState.AWAITING_CANDIDATE,
-                ordinal=0,
-                created_at=NOW,
-                updated_at=NOW,
-            ),
-        ]
-        loop = _make_loop(stages=stages)
-        data = _card_json(build_loop_detail(loop))
-        card = data["action"]["navigations"][0]["updateCard"]
-        stage_section = card["sections"][0]
-        # Should have an inline text input for email body
-        text_inputs = [w for w in stage_section["widgets"] if "textInput" in w]
-        assert len(text_inputs) == 1
-        assert text_inputs[0]["textInput"]["name"] == "email_body"
-        # And a send button
-        button_widgets = [w for w in stage_section["widgets"] if "buttonList" in w]
-        all_button_texts = [b["text"] for bw in button_widgets for b in bw["buttonList"]["buttons"]]
-        assert "Send Availability to Client" in all_button_texts
 
 
 class TestCreateLoopForm:
@@ -225,7 +58,7 @@ class TestCreateLoopForm:
             s for s in card["sections"] if s.get("header", "").startswith("Client Manager")
         )
         assert cm_section["collapsible"] is True
-        assert cm_section["uncollapsibleWidgetsCount"] == 0
+        assert cm_section["uncollapsibleWidgetsCount"] == 1
 
     def test_create_button_has_required_widgets(self):
         data = _card_json(build_create_loop_form())
@@ -250,27 +83,3 @@ class TestCreateLoopForm:
             for b in w["buttonList"]["buttons"]
         ]
         assert "Create Loop" in all_buttons
-
-
-class TestComposeEmail:
-    def test_shows_recipient_and_subject(self):
-        loop = _make_loop()
-        stage = loop.stages[0]
-        data = _card_json(build_compose_email(loop, stage, "bob@recruit.com", "Re: Smith"))
-        card = data["action"]["navigations"][0]["updateCard"]
-        widgets = card["sections"][0]["widgets"]
-        # Should show To and Subject as decorated text
-        decorated = [w for w in widgets if "decoratedText" in w]
-        texts = [d["decoratedText"]["text"] for d in decorated]
-        assert "bob@recruit.com" in texts
-        assert "Re: Smith" in texts
-
-    def test_has_send_button(self):
-        loop = _make_loop()
-        stage = loop.stages[0]
-        data = _card_json(build_compose_email(loop, stage, "bob@recruit.com", "Re: Smith"))
-        card = data["action"]["navigations"][0]["updateCard"]
-        widgets = card["sections"][0]["widgets"]
-        button_widgets = [w for w in widgets if "buttonList" in w]
-        all_texts = [b["text"] for bw in button_widgets for b in bw["buttonList"]["buttons"]]
-        assert "Send" in all_texts

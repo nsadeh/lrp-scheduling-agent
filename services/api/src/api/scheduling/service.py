@@ -440,11 +440,16 @@ class LoopService:
         to: list[str],
         subject: str,
         body: str,
+        cc: list[str] | None = None,
         gmail_thread_id: str | None = None,
         in_reply_to: str | None = None,
-        auto_advance_to: StageState | None = None,
+        references: str | None = None,
     ) -> None:
-        """Send an email via Gmail and record the event. Optionally advance the stage."""
+        """Send an email via Gmail and record the event.
+
+        State changes are handled separately via suggestion acceptance —
+        this method is purely send + record.
+        """
         gmail_message_id = None
         if self._gmail:
             sent = await self._gmail.send_message(
@@ -452,8 +457,10 @@ class LoopService:
                 to=to,
                 subject=subject,
                 body=body,
+                cc=cc,
                 thread_id=gmail_thread_id,
                 in_reply_to=in_reply_to,
+                references=references,
             )
             gmail_message_id = sent.id
 
@@ -465,31 +472,14 @@ class LoopService:
                 event_type=EventType.EMAIL_SENT,
                 data={
                     "to": to,
+                    "cc": cc or [],
                     "subject": subject,
+                    "body": body,
                     "gmail_message_id": gmail_message_id,
                     "gmail_thread_id": gmail_thread_id,
                 },
                 actor_email=coordinator_email,
             )
-
-            if auto_advance_to:
-                row = await queries.get_stage(conn, id=stage_id)
-                if row:
-                    stage = _row_to_stage(row)
-                    if auto_advance_to in ALLOWED_TRANSITIONS.get(stage.state, set()):
-                        await queries.update_stage_state(conn, id=stage_id, state=auto_advance_to)
-                        await self._record_event(
-                            conn,
-                            loop_id=loop_id,
-                            stage_id=stage_id,
-                            event_type=EventType.STAGE_ADVANCED,
-                            data={
-                                "from_state": stage.state,
-                                "to_state": auto_advance_to,
-                                "triggered_by": "email_sent",
-                            },
-                            actor_email=coordinator_email,
-                        )
 
             await queries.update_loop_timestamp(conn, id=loop_id)
 
