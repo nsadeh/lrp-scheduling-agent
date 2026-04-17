@@ -43,7 +43,8 @@ class SuggestionService:
     ) -> Suggestion:
         """Persist a single SuggestionItem from the classifier output."""
         sug_id = make_id("sug")
-        status = SuggestionStatus.AUTO_APPLIED if item.auto_advance else SuggestionStatus.PENDING
+        # All suggestions require coordinator approval — no auto-applied status.
+        status = SuggestionStatus.PENDING
 
         async with self._pool.connection() as conn, conn.transaction():
             row = await queries.create_suggestion(

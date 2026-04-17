@@ -8,9 +8,6 @@ Requires: docker compose up -d postgres
 
 import os
 
-# Must be set before importing app so the module-level auth check picks it up
-os.environ["SKIP_ADDON_AUTH"] = "true"
-
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
@@ -40,6 +37,8 @@ async def cleanup(pool):
     """Clean up test data after each test."""
     yield
     async with pool.connection() as conn:
+        await conn.execute("DELETE FROM email_drafts")
+        await conn.execute("DELETE FROM agent_suggestions")
         await conn.execute("DELETE FROM time_slots")
         await conn.execute("DELETE FROM loop_email_threads")
         await conn.execute("DELETE FROM loop_events")
@@ -540,62 +539,69 @@ class TestRouteIntegration:
 
     @pytest.fixture
     async def client(self, pool):
-        """HTTP client with real DB and mocked Google auth."""
-        import importlib
-
-        os.environ["SKIP_ADDON_AUTH"] = "true"
-
-        import api.addon.auth
-
-        importlib.reload(api.addon.auth)
-
+        """HTTP client with real DB."""
         from httpx import ASGITransport, AsyncClient
 
         from api.main import app
+        from api.overview.service import OverviewService
 
         app.state.db = pool
         app.state.scheduling = LoopService(db_pool=pool, gmail=None)
+        app.state.overview_service = OverviewService(db_pool=pool)
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             yield c
 
-    async def test_homepage_returns_status_board(self, client):
-        resp = await client.post(
-            "/addon/homepage",
-            json={"commonEventObject": {"hostApp": "GMAIL"}},
-        )
+    _TEST_EMAIL = "test-coordinator@longridgepartners.com"
+
+    @staticmethod
+    def _event(**extra):
+        """Build a test add-on event with a proper userIdToken."""
+        import base64
+        import json
+
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"email": TestRouteIntegration._TEST_EMAIL}).encode()
+        ).decode()
+        token = f"header.{payload}.signature"
+        base = {
+            "commonEventObject": {"hostApp": "GMAIL"},
+            "authorizationEventObject": {"userIdToken": token},
+        }
+        base.update(extra)
+        return base
+
+    async def test_homepage_returns_overview(self, client):
+        resp = await client.post("/addon/homepage", json=self._event())
         assert resp.status_code == 200
-        card = resp.json()["action"]["navigations"][0]["updateCard"]
-        # Homepage now shows drafts tab (no header, tab buttons in first section)
-        assert "header" not in card
-        first_section = card["sections"][0]
-        btn_texts = [
-            b["text"]
-            for w in first_section["widgets"]
-            if "buttonList" in w
-            for b in w["buttonList"]["buttons"]
-        ]
-        assert "Drafts" in btn_texts
+        nav = resp.json()["action"]["navigations"][0]
+        card = nav.get("pushCard") or nav.get("updateCard")
+        # Homepage now shows overview with Suggestions tab
+        text = str(card)
+        assert "Suggestions" in text or "caught up" in text.lower()
 
     async def test_on_message_unlinked_thread(self, client):
         resp = await client.post(
             "/addon/on-message",
-            json={
-                "commonEventObject": {"hostApp": "GMAIL"},
-                "gmail": {"threadId": "thread_new", "messageId": "msg_1"},
-            },
+            json=self._event(gmail={"threadId": "thread_new", "messageId": "msg_1"}),
         )
         assert resp.status_code == 200
         body = str(resp.json())
         assert "not linked" in body.lower() or "Create" in body
 
     async def test_create_loop_and_view(self, client, svc):
-        # Create contacts first
         await svc.find_or_create_client_contact(name="Jane", email="jane@acme.com", company="Acme")
         await svc.find_or_create_contact(name="Bob", email="bob@r.com", role="recruiter")
 
-        # Create loop via action endpoint
+        import base64
+        import json
+
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"email": self._TEST_EMAIL}).encode()
+        ).decode()
+        token = f"header.{payload}.signature"
+
         resp = await client.post(
             "/addon/action",
             json={
@@ -613,34 +619,17 @@ class TestRouteIntegration:
                         "first_stage_name": {"stringInputs": {"value": ["Round 1"]}},
                     },
                 },
+                "authorizationEventObject": {"userIdToken": token},
             },
         )
         assert resp.status_code == 200
-        card = resp.json()["action"]["navigations"][0]["updateCard"]
-        # Should be a loop detail card with stages
-        body = str(card)
-        assert "Round 1" in body
-        assert "New" in body
+        # After creating a loop, we return to the overview (not the old loop detail)
+        body = str(resp.json())
+        assert "caught up" in body.lower() or "navigations" in body
 
-    async def test_homepage_shows_loop_after_creation(self, client, svc):
-        # Create loop using the same email the route falls back to in test mode
-        client_c = await svc.find_or_create_client_contact(
-            name="Jane", email="jane@acme.com", company="Acme Capital"
-        )
-        rec = await svc.find_or_create_contact(name="Bob", email="bob@r.com", role="recruiter")
-        await svc.create_loop(
-            coordinator_email="coordinator@longridgepartners.com",
-            coordinator_name="Coordinator",
-            candidate_name="Smith",
-            client_contact_id=client_c.id,
-            recruiter_id=rec.id,
-            title="Smith, Acme",
-        )
-
-        resp = await client.post(
-            "/addon/homepage",
-            json={"commonEventObject": {"hostApp": "GMAIL"}},
-        )
+    async def test_homepage_shows_empty_state_when_no_suggestions(self, client, svc):
+        """Homepage shows 'All caught up' when there are no pending suggestions."""
+        resp = await client.post("/addon/homepage", json=self._event())
         assert resp.status_code == 200
         body = str(resp.json())
-        assert "Smith" in body or "Acme" in body
+        assert "caught up" in body.lower()

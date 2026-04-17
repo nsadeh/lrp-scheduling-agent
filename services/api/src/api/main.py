@@ -7,17 +7,22 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
+
+import sentry_sdk  # noqa: E402
 from arq import create_pool  # noqa: E402
 from arq.connections import RedisSettings  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
 
-from api.addon.routes import addon_router, oauth_router  # noqa: E402
+from api.addon.routes import addon_router, oauth_router, refresh_router  # noqa: E402
 from api.ai import init_langfuse, init_llm_service  # noqa: E402
+from api.classifier.hook import ClassifierHook  # noqa: E402
+from api.classifier.service import SuggestionService  # noqa: E402
+from api.drafts.service import DraftService  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
-from api.gmail.hooks import LoggingHook  # noqa: E402
 from api.gmail.webhook import webhook_router  # noqa: E402
 from api.observability import RequestIdMiddleware, init_sentry  # noqa: E402
 from api.scheduling.service import LoopService  # noqa: E402
@@ -56,50 +61,35 @@ async def lifespan(app: FastAPI):
         app.state.redis = None
         logger.warning("Redis not available — push pipeline disabled, poll fallback only")
 
-    # AI infrastructure — degrades gracefully when keys not set
+    # AI infrastructure — crashes on startup if not configured
     langfuse = init_langfuse()
     llm_service = init_llm_service()
     app.state.langfuse = langfuse
     app.state.llm_service = llm_service
 
-    # Draft service — available whenever AI infrastructure is up
-    draft_service = None
-    if langfuse and llm_service:
-        from api.drafts.service import DraftService
-
-        draft_service = DraftService(
-            db_pool=pool,
-            loop_service=app.state.scheduling,
-            llm=llm_service,
-            langfuse=langfuse,
-        )
-        logger.info("DraftService initialized")
+    draft_service = DraftService(
+        db_pool=pool,
+        loop_service=app.state.scheduling,
+        llm=llm_service,
+        langfuse=langfuse,
+    )
     app.state.draft_service = draft_service
+    logger.info("DraftService initialized")
 
-    # Email hook — ClassifierHook when enabled, LoggingHook as fallback
-    classifier_enabled = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
-    if classifier_enabled and langfuse and llm_service:
-        from api.classifier.hook import ClassifierHook
-        from api.classifier.service import SuggestionService
-
-        app.state.email_hook = ClassifierHook(
-            llm=llm_service,
-            langfuse=langfuse,
-            suggestion_service=SuggestionService(db_pool=pool),
-            loop_service=app.state.scheduling,
-            draft_service=draft_service,
-        )
-        logger.info("ClassifierHook active")
-    else:
-        app.state.email_hook = LoggingHook()
-        logger.info("LoggingHook active")
+    app.state.email_hook = ClassifierHook(
+        llm=llm_service,
+        langfuse=langfuse,
+        suggestion_service=SuggestionService(db_pool=pool),
+        loop_service=app.state.scheduling,
+        draft_service=draft_service,
+    )
+    logger.info("ClassifierHook active")
 
     yield
 
     # Cleanup — flush LangFuse traces before shutdown
-    if langfuse:
-        langfuse.flush()
-        langfuse.shutdown()
+    langfuse.flush()
+    langfuse.shutdown()
 
     redis = getattr(app.state, "redis", None)
     if redis:
@@ -116,14 +106,11 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 app.include_router(addon_router)
+app.include_router(refresh_router)
 app.include_router(oauth_router)
 app.include_router(webhook_router)
 
 
 @app.get("/health")
-async def health(request: Request):
-    components = {
-        "langfuse": getattr(request.app.state, "langfuse", None) is not None,
-        "llm_service": getattr(request.app.state, "llm_service", None) is not None,
-    }
-    return {"status": "ok", "ai": components}
+async def health():
+    return {"status": "ok"}

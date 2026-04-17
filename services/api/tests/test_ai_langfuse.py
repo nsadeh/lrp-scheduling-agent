@@ -9,13 +9,19 @@ from api.ai.langfuse_client import fetch_prompt, init_langfuse
 
 
 class TestInitLangfuse:
-    def test_returns_none_when_keys_not_set(self):
-        with patch.dict("os.environ", {}, clear=True):
-            assert init_langfuse() is None
+    def test_raises_when_keys_not_set(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            pytest.raises(RuntimeError, match="LANGFUSE"),
+        ):
+            init_langfuse()
 
-    def test_returns_none_when_only_public_key_set(self):
-        with patch.dict("os.environ", {"LANGFUSE_PUBLIC_KEY": "pk-123"}, clear=True):
-            assert init_langfuse() is None
+    def test_raises_when_only_public_key_set(self):
+        with (
+            patch.dict("os.environ", {"LANGFUSE_PUBLIC_KEY": "pk-123"}, clear=True),
+            pytest.raises(RuntimeError, match="LANGFUSE"),
+        ):
+            init_langfuse()
 
     def test_returns_client_when_both_keys_set(self):
         env = {

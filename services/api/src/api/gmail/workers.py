@@ -21,7 +21,6 @@ from api.gmail.client import GmailClient
 from api.gmail.exceptions import GmailNotFoundError, GmailScopeError
 from api.gmail.hooks import (
     EmailEvent,
-    LoggingHook,
     classify_direction,
     classify_message_type,
 )
@@ -33,12 +32,12 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "")
 DEBOUNCE_TTL = 60  # seconds
 
-# Feature flag: set CLASSIFIER_ENABLED=true to use the AI classifier
-CLASSIFIER_ENABLED = os.environ.get("CLASSIFIER_ENABLED", "false").lower() == "true"
-
 
 async def startup(ctx: dict) -> None:
-    """Initialize shared resources for all worker jobs."""
+    """Initialize shared resources for all worker jobs.
+
+    Crashes on startup if AI infrastructure (LangFuse, LLM provider keys) is not configured.
+    """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
     init_sentry(service="worker")
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
@@ -53,20 +52,7 @@ async def startup(ctx: dict) -> None:
     ctx["token_store"] = token_store
     ctx["gmail"] = gmail
 
-    # Email hook: ClassifierHook when enabled, LoggingHook as fallback
-    if CLASSIFIER_ENABLED:
-        hook = _init_classifier_hook(pool, gmail)
-        if hook:
-            ctx["hook"] = hook
-            logger.info("worker startup complete — ClassifierHook active")
-            return
-
-    ctx["hook"] = LoggingHook()
-    logger.info("worker startup complete — LoggingHook active")
-
-
-def _init_classifier_hook(pool, gmail):
-    """Create a ClassifierHook if AI infrastructure is available."""
+    # AI infrastructure — required, crashes if not configured
     from api.ai import init_langfuse, init_llm_service
     from api.classifier.hook import ClassifierHook
     from api.classifier.service import SuggestionService
@@ -76,15 +62,7 @@ def _init_classifier_hook(pool, gmail):
     langfuse = init_langfuse()
     llm = init_llm_service()
 
-    if not langfuse or not llm:
-        logger.warning(
-            "CLASSIFIER_ENABLED=true but AI infrastructure not available — "
-            "falling back to LoggingHook"
-        )
-        return None
-
     loop_service = LoopService(db_pool=pool, gmail=gmail)
-
     draft_service = DraftService(
         db_pool=pool,
         loop_service=loop_service,
@@ -92,13 +70,14 @@ def _init_classifier_hook(pool, gmail):
         langfuse=langfuse,
     )
 
-    return ClassifierHook(
+    ctx["hook"] = ClassifierHook(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=SuggestionService(db_pool=pool),
         loop_service=loop_service,
         draft_service=draft_service,
     )
+    logger.info("worker startup complete — ClassifierHook active")
 
 
 async def shutdown(ctx: dict) -> None:
@@ -155,9 +134,11 @@ async def process_gmail_push(ctx: dict, coordinator_email: str, history_id: str)
     # Use our stored cursor, not the push notification's history_id
     stored_history_id = await token_store.get_history_id(coordinator_email)
     if not stored_history_id:
-        # First push — establish baseline
-        logger.info("first push for %s, establishing baseline", coordinator_email)
-        await _establish_baseline(ctx, coordinator_email)
+        # No baseline yet (OAuth callback didn't set one, or legacy user).
+        # Use the push notification's history_id so we don't skip any messages.
+        logger.info("no baseline for %s, using push history_id=%s", coordinator_email, history_id)
+        await token_store.update_history_id(coordinator_email, history_id)
+        await _process_history(ctx, coordinator_email, history_id)
         return
 
     await _process_history(ctx, coordinator_email, stored_history_id)
@@ -351,10 +332,69 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
         await token_store.update_history_id(coordinator_email, str(new_history_id))
 
 
+async def reclassify_after_loop_creation(
+    ctx: dict,
+    coordinator_email: str,
+    gmail_message_id: str | None,
+    gmail_thread_id: str,
+) -> None:
+    """Re-run the classifier on a message after a loop is created for its thread.
+
+    Enqueued by the addon when a coordinator creates a new loop. The thread is
+    now linked, so the classifier will produce follow-up suggestions (DRAFT_EMAIL,
+    ADVANCE_STAGE) that weren't possible before.
+    """
+    gmail: GmailClient = ctx["gmail"]
+    hook = ctx["hook"]
+
+    try:
+        # Fetch the specific message, or fall back to latest on thread
+        if gmail_message_id:
+            message = await gmail.get_message(coordinator_email, gmail_message_id)
+        else:
+            thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
+            if not thread.messages:
+                logger.warning("empty thread %s — skipping reclassification", gmail_thread_id)
+                return
+            message = thread.messages[-1]
+
+        # Fetch full thread for context
+        thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
+        thread_messages = thread.messages
+
+        # Classify direction and type (same pattern as _process_history)
+        direction = classify_direction(message, coordinator_email)
+        prior_messages = [
+            m for m in thread_messages if m.id != message.id and m.date < message.date
+        ]
+        message_type, new_participants = classify_message_type(message, prior_messages)
+
+        event = EmailEvent(
+            message=message,
+            coordinator_email=coordinator_email,
+            direction=direction,
+            message_type=message_type,
+            new_participants=new_participants,
+            thread_messages=thread_messages,
+        )
+        await hook.on_email(event)
+        logger.info(
+            "reclassified message %s after loop creation (thread %s)",
+            message.id,
+            gmail_thread_id,
+        )
+    except Exception:
+        logger.exception(
+            "background reclassification failed for thread %s (coordinator %s)",
+            gmail_thread_id,
+            coordinator_email,
+        )
+
+
 class WorkerSettings:
     """arq worker configuration."""
 
-    functions = [process_gmail_push]  # noqa: RUF012
+    functions = [process_gmail_push, reclassify_after_loop_creation]  # noqa: RUF012
     cron_jobs = [  # noqa: RUF012
         cron(poll_gmail_history, second=0),  # every 60s
         cron(renew_gmail_watches, hour={0, 6, 12, 18}, minute=0, second=0),
@@ -366,4 +406,4 @@ class WorkerSettings:
     on_job_end = on_job_end
     redis_settings = RedisSettings.from_dsn(REDIS_URL)
     max_jobs = 50
-    job_timeout = 120
+    job_timeout = 180

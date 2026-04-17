@@ -56,4 +56,4 @@ export ENVIRONMENT="development"
 export PYTHONPATH="src:${PYTHONPATH:-}"
 echo "==> Starting dev server. Gmail [STAGING] add-on → https://${NGROK_DOMAIN}"
 echo "==> Press Ctrl+C to stop and restore staging."
-uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn api.main:app --reload --reload-dir src --reload-dir queries --host 0.0.0.0 --port 8000

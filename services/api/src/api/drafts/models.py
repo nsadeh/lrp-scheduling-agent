@@ -38,6 +38,7 @@ class EmailDraft(BaseModel):
     subject: str
     body: str = ""
     gmail_thread_id: str | None = None
+    is_forward: bool = False
     status: DraftStatus = DraftStatus.GENERATED
     sent_at: datetime | None = None
     created_at: datetime | None = None
@@ -63,6 +64,7 @@ class GenerateDraftInput(BaseModel):
     coordinator_name: str  # For the sign-off
     extracted_entities: str  # JSON string of availability, phone numbers, zoom links, etc.
     thread_messages: str  # Formatted list of recent emails for reply context
+    is_external: bool  # True when recipient is outside @longridgepartners.com
 
 
 class DraftOutput(BaseModel):

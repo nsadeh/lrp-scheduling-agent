@@ -5,34 +5,34 @@
 -- name: create_draft^
 INSERT INTO email_drafts (
     id, suggestion_id, loop_id, stage_id, coordinator_email,
-    to_emails, cc_emails, subject, body, gmail_thread_id, status
+    to_emails, cc_emails, subject, body, gmail_thread_id, is_forward, status
 )
 VALUES (
     :id, :suggestion_id, :loop_id, :stage_id, :coordinator_email,
-    :to_emails, :cc_emails, :subject, :body, :gmail_thread_id, :status
+    :to_emails, :cc_emails, :subject, :body, :gmail_thread_id, :is_forward, :status
 )
 RETURNING id, suggestion_id, loop_id, stage_id, coordinator_email,
           to_emails, cc_emails, subject, body, gmail_thread_id,
-          status, sent_at, created_at, updated_at;
+          is_forward, status, sent_at, created_at, updated_at;
 
 -- name: get_draft^
 SELECT id, suggestion_id, loop_id, stage_id, coordinator_email,
        to_emails, cc_emails, subject, body, gmail_thread_id,
-       status, sent_at, created_at, updated_at
+       is_forward, status, sent_at, created_at, updated_at
 FROM email_drafts
 WHERE id = :id;
 
 -- name: get_draft_for_suggestion^
 SELECT id, suggestion_id, loop_id, stage_id, coordinator_email,
        to_emails, cc_emails, subject, body, gmail_thread_id,
-       status, sent_at, created_at, updated_at
+       is_forward, status, sent_at, created_at, updated_at
 FROM email_drafts
 WHERE suggestion_id = :suggestion_id;
 
 -- name: get_pending_drafts_for_coordinator
 SELECT id, suggestion_id, loop_id, stage_id, coordinator_email,
        to_emails, cc_emails, subject, body, gmail_thread_id,
-       status, sent_at, created_at, updated_at
+       is_forward, status, sent_at, created_at, updated_at
 FROM email_drafts
 WHERE coordinator_email = :coordinator_email
   AND status IN ('generated', 'edited')

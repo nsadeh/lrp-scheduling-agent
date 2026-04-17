@@ -270,22 +270,30 @@ class GmailClient:
         to: list[str],
         subject: str,
         body: str,
+        cc: list[str] | None = None,
         thread_id: str | None = None,
         in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> Message:
-        """Compose and send a message directly (no draft step)."""
+        """Compose and send a message directly (no draft step).
+
+        For replies/forwards on existing threads, set thread_id plus
+        in_reply_to/references (RFC 2822 Message-ID headers) so the
+        recipient's email client threads the message correctly.
+        """
         if not to or not all(addr.strip() for addr in to):
             raise GmailValidationError(
                 "send_message requires at least one non-empty recipient address"
             )
-        logger.info("send_message user=%s to=%s", user_email, to)
+        logger.info("send_message user=%s to=%s thread_id=%s", user_email, to, thread_id)
         raw_msg = _build_raw_message(
             from_email=user_email,
             to=to,
             subject=subject,
             body=body,
+            cc=cc,
             in_reply_to=in_reply_to,
-            references=in_reply_to,
+            references=references or in_reply_to,
         )
         msg_body: dict = {"raw": raw_msg}
         if thread_id:

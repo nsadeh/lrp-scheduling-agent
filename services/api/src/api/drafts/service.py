@@ -30,6 +30,28 @@ if TYPE_CHECKING:
     from api.scheduling.models import Loop, Stage
     from api.scheduling.service import LoopService
 
+
+def _is_forward_draft(to_emails: list[str], thread_messages: list[Message] | None) -> bool:
+    """Determine if a draft is a forward by checking if any recipient is new to the thread.
+
+    A draft is a forward when it targets someone who hasn't participated in the
+    thread yet (not in any prior message's from/to/cc). If there are no prior
+    messages to compare against, we assume it's not a forward.
+    """
+    if not thread_messages or not to_emails:
+        return False
+
+    # Build set of all participants from prior thread messages
+    seen: set[str] = set()
+    for msg in thread_messages:
+        seen.add(msg.from_.email.lower())
+        for addr in msg.to + msg.cc:
+            seen.add(addr.email.lower())
+
+    # If any recipient is not in the thread, it's a forward
+    return any(email.lower() not in seen for email in to_emails)
+
+
 logger = logging.getLogger(__name__)
 
 # Maximum generated body length before truncation (scheduling emails are short)
@@ -151,6 +173,9 @@ class DraftService:
                     suggestion.id,
                 )
 
+        # Determine if this is a forward: are we sending to someone new?
+        is_forward = _is_forward_draft(to_emails, thread_messages)
+
         # Persist (using dict_row for clean dict→model conversion)
         draft_id = make_id("drf")
         async with self._pool.connection() as conn, conn.transaction():
@@ -168,6 +193,7 @@ class DraftService:
                     subject=subject,
                     body=body,
                     gmail_thread_id=suggestion.gmail_thread_id,
+                    is_forward=is_forward,
                     status=DraftStatus.GENERATED,
                 )
                 draft = _row_to_draft(row)
@@ -291,6 +317,11 @@ class DraftService:
                     suggestion.id,
                 )
 
+        to_emails, _ = resolve_recipients(loop, stage)
+        is_external = any(
+            not email.lower().endswith("@longridgepartners.com") for email in to_emails
+        )
+
         return GenerateDraftInput(
             draft_directive=directive,
             recipient_name=self._resolve_recipient_name(loop, stage),
@@ -298,4 +329,5 @@ class DraftService:
             coordinator_name=loop.coordinator.name if loop.coordinator else "Coordinator",
             extracted_entities=json.dumps(suggestion.extracted_entities),
             thread_messages=thread_text,
+            is_external=is_external,
         )
