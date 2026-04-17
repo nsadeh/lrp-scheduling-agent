@@ -7,8 +7,11 @@ contact management, and email sending.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime  # noqa: TC003
 from typing import TYPE_CHECKING, Any
+
+import sentry_sdk
 
 from api.ids import make_id
 from api.scheduling.models import (
@@ -39,6 +42,41 @@ if TYPE_CHECKING:
 async def _collect(async_gen) -> list:
     """Collect all rows from an aiosql async generator into a list."""
     return [row async for row in async_gen]
+
+
+def _email_domain(address: str) -> str:
+    """Return the lowercase domain from an email address, or empty string."""
+    _, _, domain = address.rpartition("@")
+    return domain.strip().lower()
+
+
+def _classify_recipients(
+    *, recipients: list[str], coordinator_email: str
+) -> tuple[list[str], bool]:
+    """Return (unique recipient domains, is_internal).
+
+    A send is internal when every recipient's domain is in
+    ``INTERNAL_EMAIL_DOMAINS`` (comma-separated env var). When the env var is
+    unset we fall back to the coordinator's own domain — coordinators are
+    always LRP employees, so this is a safe default for reporting.
+    """
+    configured = os.environ.get("INTERNAL_EMAIL_DOMAINS", "")
+    internal = {d.strip().lower() for d in configured.split(",") if d.strip()}
+    if not internal:
+        fallback = _email_domain(coordinator_email)
+        if fallback:
+            internal = {fallback}
+
+    domains: list[str] = []
+    seen: set[str] = set()
+    for address in recipients:
+        domain = _email_domain(address)
+        if domain and domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+
+    is_internal = bool(domains) and all(d in internal for d in domains)
+    return domains, is_internal
 
 
 class InvalidTransitionError(Exception):
@@ -445,6 +483,13 @@ class LoopService:
         auto_advance_to: StageState | None = None,
     ) -> None:
         """Send an email via Gmail and record the event. Optionally advance the stage."""
+        recipient_domains, is_internal = _classify_recipients(
+            recipients=to, coordinator_email=coordinator_email
+        )
+        scope = sentry_sdk.Scope.get_current_scope()
+        scope.set_tag("email.is_internal", is_internal)
+        scope.set_tag("email.recipient_domain", ",".join(recipient_domains))
+
         gmail_message_id = None
         if self._gmail:
             sent = await self._gmail.send_message(
@@ -468,6 +513,8 @@ class LoopService:
                     "subject": subject,
                     "gmail_message_id": gmail_message_id,
                     "gmail_thread_id": gmail_thread_id,
+                    "recipient_domains": recipient_domains,
+                    "is_internal": is_internal,
                 },
                 actor_email=coordinator_email,
             )

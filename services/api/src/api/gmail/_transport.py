@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+import sentry_sdk
 from googleapiclient.discovery import build
 
 if TYPE_CHECKING:
@@ -26,12 +27,16 @@ def _execute_sync(credentials: Credentials, fn) -> Any:
     return fn(service)
 
 
-async def execute(credentials: Credentials, fn) -> Any:
+async def execute(credentials: Credentials, fn, *, op_name: str = "gmail") -> Any:
     """Run a Gmail API call in a thread pool.
 
     Usage:
         result = await execute(creds, lambda svc: svc.users().messages().get(
             userId="me", id=msg_id, format="full"
         ).execute())
+
+    ``op_name`` is surfaced on the Sentry span so one transaction can show
+    distinct messages.get vs messages.send vs history.list calls.
     """
-    return await asyncio.to_thread(_execute_sync, credentials, fn)
+    with sentry_sdk.start_span(op="http.client", name=f"gmail:{op_name}"):
+        return await asyncio.to_thread(_execute_sync, credentials, fn)

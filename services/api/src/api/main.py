@@ -7,14 +7,11 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
-import sentry_sdk  # noqa: E402
 from arq import create_pool  # noqa: E402
 from arq.connections import RedisSettings  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
-from sentry_sdk.integrations.asyncio import AsyncioIntegration  # noqa: E402
-from sentry_sdk.integrations.fastapi import FastApiIntegration  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router  # noqa: E402
 from api.ai import init_langfuse, init_llm_service  # noqa: E402
@@ -22,19 +19,12 @@ from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
 from api.gmail.hooks import LoggingHook  # noqa: E402
 from api.gmail.webhook import webhook_router  # noqa: E402
+from api.observability import RequestIdMiddleware, init_sentry  # noqa: E402
 from api.scheduling.service import LoopService  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-sentry_sdk.init(
-    dsn=os.environ.get("SENTRY_DSN"),
-    environment=os.environ.get("ENVIRONMENT", "development"),
-    traces_sample_rate=0.2,
-    integrations=[
-        FastApiIntegration(),
-        AsyncioIntegration(),
-    ],
-)
+init_sentry(service="api")
 
 
 @asynccontextmanager
@@ -118,6 +108,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LRP Scheduling Agent", lifespan=lifespan)
+app.add_middleware(RequestIdMiddleware)
 
 # Static files (logo, etc.) — directory relative to working directory (services/api/)
 static_dir = Path(__file__).resolve().parent.parent.parent / "static"
