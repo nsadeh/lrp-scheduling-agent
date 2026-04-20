@@ -19,7 +19,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from api.addon.directory import DirectoryPerson, _parse_person
+from api.addon.directory import (
+    DirectoryPerson,
+    _match_rank,
+    _matches,
+    _parse_person,
+    _tokenize_query,
+    search_directory,
+)
 from api.addon.models import (
     OnClickAction,
     SuggestionItem,
@@ -252,6 +259,205 @@ class TestDirectoryPersonParsing:
         assert p is not None
         assert p.display_name == ""
         assert p.email == "s@lrp.com"
+
+
+# ---------------------------------------------------------------------------
+# Query matching — the core logic that replaces searchDirectoryPeople
+# ---------------------------------------------------------------------------
+
+
+def _person(name: str, email: str) -> DirectoryPerson:
+    return DirectoryPerson(
+        resource_name=f"people/{email}",
+        display_name=name,
+        email=email,
+        photo_url=None,
+    )
+
+
+class TestTokenizeQuery:
+    def test_plain_word(self):
+        assert _tokenize_query("adam") == ["adam"]
+
+    def test_lowercases(self):
+        assert _tokenize_query("Adam") == ["adam"]
+
+    def test_splits_on_at_sign(self):
+        """'adam@' → ['adam'] so the query matches emails like adam.smith@lrp.com."""
+        assert _tokenize_query("adam@") == ["adam"]
+
+    def test_splits_on_dot(self):
+        assert _tokenize_query("sarah.cheng") == ["sarah", "cheng"]
+
+    def test_splits_on_whitespace(self):
+        assert _tokenize_query("Sarah Cheng") == ["sarah", "cheng"]
+
+    def test_splits_on_email_shape(self):
+        assert _tokenize_query("adam@lrp.com") == ["adam", "lrp", "com"]
+
+    def test_empty_query_returns_empty_list(self):
+        assert _tokenize_query("") == []
+        assert _tokenize_query("   ") == []
+        assert _tokenize_query("@.") == []
+
+
+class TestMatches:
+    def test_name_substring_match(self):
+        assert _matches(_person("Adam Smith", "a@lrp.com"), ["adam"])
+
+    def test_email_substring_match(self):
+        assert _matches(_person("Someone", "adam@lrp.com"), ["adam"])
+
+    def test_case_insensitive(self):
+        assert _matches(_person("Adam Smith", "a@lrp.com"), ["ADAM"]) is False
+        # Tokens come from _tokenize_query which lowercases, so uppercase
+        # tokens shouldn't occur in practice. But the haystack is always
+        # lowercased — confirm that invariant.
+        assert _matches(_person("Adam Smith", "a@lrp.com"), ["adam"]) is True
+
+    def test_all_tokens_must_match(self):
+        assert _matches(_person("Adam Smith", "a@lrp.com"), ["adam", "smith"])
+        assert not _matches(_person("Adam Smith", "a@lrp.com"), ["adam", "jones"])
+
+    def test_matches_across_name_and_email_together(self):
+        """Tokens can satisfy via name OR email — they don't have to all be in one field."""
+        p = _person("Adam Smith", "adam@lrp.com")
+        assert _matches(p, ["smith", "lrp"])
+
+    def test_empty_tokens_matches_everyone(self):
+        # An empty token list is vacuously true; callers should guard
+        # against this themselves (search_directory does).
+        assert _matches(_person("Any", "any@x.com"), [])
+
+
+class TestMatchRank:
+    def test_name_prefix_beats_substring(self):
+        name_prefix = _person("Adam Smith", "s@lrp.com")
+        substring_only = _person("Sarah Adams", "s@lrp.com")
+        assert _match_rank(name_prefix, "adam") < _match_rank(substring_only, "adam")
+
+    def test_email_localpart_prefix_beats_substring(self):
+        email_prefix = _person("Someone Else", "adam@lrp.com")
+        name_substring = _person("Sarah Adams", "sarah@lrp.com")
+        assert _match_rank(email_prefix, "adam") < _match_rank(name_substring, "adam")
+
+    def test_same_rank_sorts_alphabetically(self):
+        # Both are prefix matches — ties break by name
+        adam = _person("Adam Smith", "adam@lrp.com")
+        adrian = _person("Adrian Jones", "adrian@lrp.com")
+        # Adam sorts before Adrian
+        assert _match_rank(adam, "ad") < _match_rank(adrian, "ad")
+
+
+# ---------------------------------------------------------------------------
+# search_directory integration: listDirectoryPeople + client-side filter
+# ---------------------------------------------------------------------------
+
+
+class TestSearchDirectory:
+    """Verify that search_directory fetches the full directory via
+    listDirectoryPeople and filters in Python."""
+
+    async def test_filters_by_name_substring(self):
+        creds = MagicMock()
+        creds.valid = True
+        creds.token = "fake-token"
+
+        with patch(
+            "api.addon.directory.list_directory",
+            new=AsyncMock(
+                return_value=[
+                    _person("Adam Smith", "adam.smith@lrp.com"),
+                    _person("Sarah Cheng", "sarah@lrp.com"),
+                    _person("Adrian Jones", "adrian@lrp.com"),
+                ]
+            ),
+        ):
+            results = await search_directory(creds, "adam")
+
+        names = [p.display_name for p in results]
+        # Adam Smith matches on name prefix; Sarah does not contain "adam"
+        assert "Adam Smith" in names
+        assert "Sarah Cheng" not in names
+
+    async def test_matches_email_local_part_from_query_with_at(self):
+        """The regression that motivated this switch: 'adam@' used to
+        return 0 results under searchDirectoryPeople because it required
+        a literal-'@' prefix. The list-then-filter path handles it."""
+        creds = MagicMock()
+        creds.valid = True
+        creds.token = "fake-token"
+
+        with patch(
+            "api.addon.directory.list_directory",
+            new=AsyncMock(return_value=[_person("Adam Smith", "adam.smith@lrp.com")]),
+        ):
+            results = await search_directory(creds, "adam@")
+
+        assert len(results) == 1
+        assert results[0].email == "adam.smith@lrp.com"
+
+    async def test_multi_token_query_requires_all(self):
+        creds = MagicMock()
+        creds.valid = True
+        creds.token = "fake-token"
+
+        with patch(
+            "api.addon.directory.list_directory",
+            new=AsyncMock(
+                return_value=[
+                    _person("Sarah Cheng", "sarah.cheng@lrp.com"),
+                    _person("Sarah Adams", "sarah@lrp.com"),
+                ]
+            ),
+        ):
+            results = await search_directory(creds, "sarah cheng")
+
+        assert len(results) == 1
+        assert results[0].display_name == "Sarah Cheng"
+
+    async def test_ranks_prefix_matches_first(self):
+        creds = MagicMock()
+        creds.valid = True
+        creds.token = "fake-token"
+
+        with patch(
+            "api.addon.directory.list_directory",
+            new=AsyncMock(
+                return_value=[
+                    _person("Sarah Adams", "sarah@lrp.com"),  # substring on "adam"
+                    _person("Adam Smith", "adam@lrp.com"),  # prefix on "adam"
+                ]
+            ),
+        ):
+            results = await search_directory(creds, "adam")
+
+        # Prefix match should sort first
+        assert results[0].display_name == "Adam Smith"
+        assert results[1].display_name == "Sarah Adams"
+
+    async def test_caps_at_page_size(self):
+        creds = MagicMock()
+        creds.valid = True
+        creds.token = "fake-token"
+        huge_directory = [_person(f"Person {i}", f"p{i}@lrp.com") for i in range(100)]
+        with patch(
+            "api.addon.directory.list_directory",
+            new=AsyncMock(return_value=huge_directory),
+        ):
+            results = await search_directory(creds, "person", page_size=5)
+
+        assert len(results) == 5
+
+    async def test_empty_query_returns_empty(self):
+        creds = MagicMock()
+        creds.valid = True
+        list_mock = AsyncMock()
+        with patch("api.addon.directory.list_directory", new=list_mock):
+            assert await search_directory(creds, "") == []
+            assert await search_directory(creds, "   ") == []
+        # Shouldn't even fetch the directory for an empty query
+        list_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
