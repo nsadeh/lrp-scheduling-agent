@@ -31,7 +31,6 @@ from api.addon.models import (
     OnClickAction,
     SuggestionItem,
     Suggestions,
-    SuggestionsActionResponse,
     SuggestionsResponse,
     TextInput,
 )
@@ -171,26 +170,28 @@ class TestFormatParseRoundtrip:
 
 class TestSuggestionsModels:
     def test_suggestions_response_serializes_to_googles_shape(self):
-        """The envelope Google expects: action.suggestions.items[] with text fields."""
+        """The envelope Google's GetAutocompletionResponse RPC expects.
+
+        Shape: ``{"autoComplete": {"items": [{"text": "..."}]}}``.
+        The top-level field is ``autoComplete`` (camelCase), *not*
+        ``suggestions`` — the inner type is named ``Suggestions`` in the
+        Apps Script SDK but the wire JSON uses ``autoComplete``.
+        """
         r = SuggestionsResponse(
-            action=SuggestionsActionResponse(
-                suggestions=Suggestions(
-                    items=[
-                        SuggestionItem(text="Sarah <s@x.com>"),
-                        SuggestionItem(text="Bob <b@x.com>"),
-                    ]
-                )
+            auto_complete=Suggestions(
+                items=[
+                    SuggestionItem(text="Sarah <s@x.com>"),
+                    SuggestionItem(text="Bob <b@x.com>"),
+                ]
             )
         )
         serialized = r.model_dump(by_alias=True, exclude_none=True)
         assert serialized == {
-            "action": {
-                "suggestions": {
-                    "items": [
-                        {"text": "Sarah <s@x.com>"},
-                        {"text": "Bob <b@x.com>"},
-                    ]
-                }
+            "autoComplete": {
+                "items": [
+                    {"text": "Sarah <s@x.com>"},
+                    {"text": "Bob <b@x.com>"},
+                ]
             }
         }
 
@@ -555,7 +556,7 @@ class TestDirectorySearchEndpoint:
             json=_autocomplete_event(value=""),
         )
         assert resp.status_code == 200
-        assert resp.json() == {"action": {"suggestions": {"items": []}}}
+        assert resp.json() == {"autoComplete": {"items": []}}
 
     async def test_returns_formatted_suggestions_from_form_inputs(
         self, client: AsyncClient, mock_gmail
@@ -586,7 +587,7 @@ class TestDirectorySearchEndpoint:
             )
 
         assert resp.status_code == 200
-        texts = [i["text"] for i in resp.json()["action"]["suggestions"]["items"]]
+        texts = [i["text"] for i in resp.json()["autoComplete"]["items"]]
         assert "Sarah Chen <sarah@lrp.com>" in texts
         assert "Sam Ray <sam@lrp.com>" in texts
 
@@ -625,7 +626,7 @@ class TestDirectorySearchEndpoint:
                 json=_autocomplete_event(value="sa"),
             )
         assert resp.status_code == 200
-        assert resp.json() == {"action": {"suggestions": {"items": []}}}
+        assert resp.json() == {"autoComplete": {"items": []}}
 
     async def test_returns_empty_when_scope_missing(self, client: AsyncClient, mock_gmail):
         """If the coordinator hasn't re-consented, suggestions return empty —
@@ -640,7 +641,7 @@ class TestDirectorySearchEndpoint:
             json=_autocomplete_event(value="sa"),
         )
         assert resp.status_code == 200
-        assert resp.json() == {"action": {"suggestions": {"items": []}}}
+        assert resp.json() == {"autoComplete": {"items": []}}
 
 
 # ---------------------------------------------------------------------------

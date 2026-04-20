@@ -288,15 +288,24 @@ class Suggestions(BaseModel):
     items: list[SuggestionItem]
 
 
-class SuggestionsActionResponse(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
-
-    suggestions: Suggestions
-
-
 class SuggestionsResponse(BaseModel):
-    """Top-level response Google expects from an autoCompleteAction callback."""
+    """Top-level response Google expects from an autoCompleteAction callback.
+
+    Per the `GetAutocompletionResponse` RPC schema (google.apps.card.v1):
+
+        {"autoComplete": {"items": [{"text": "..."}]}}
+
+    Note the top-level field is ``autoComplete``, NOT ``suggestions`` —
+    the *Apps Script type* is named ``Suggestions``/``SuggestionsResponse``
+    but the wire-format JSON field is ``autoComplete``. Apps Script's
+    ``SuggestionsResponseBuilder.build()`` does the translation; HTTP
+    runtime callbacks have to emit the raw shape directly. The inner
+    payload is a bare ``Suggestions`` (``items: [SuggestionItem]``) with
+    no ``suggestions`` wrapper key around it.
+
+    Ref: https://developers.google.com/workspace/add-ons/reference/rpc/google.apps.card.v1#getautocompletionresponse
+    """
 
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
-    action: SuggestionsActionResponse
+    auto_complete: Suggestions = Field(alias="autoComplete")

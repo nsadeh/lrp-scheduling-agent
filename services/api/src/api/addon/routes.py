@@ -21,7 +21,6 @@ from api.addon.models import (
     PushCard,
     SuggestionItem,
     Suggestions,
-    SuggestionsActionResponse,
     SuggestionsResponse,
     UpdateCard,
 )
@@ -472,14 +471,14 @@ async def addon_directory_search(body: AddonRequest, request: Request) -> dict:
         len(items),
         email,
     )
-    response = SuggestionsResponse(
-        action=SuggestionsActionResponse(suggestions=Suggestions(items=items))
-    )
-    return response.model_dump(by_alias=True, exclude_none=True)
+    response = SuggestionsResponse(auto_complete=Suggestions(items=items))
+    payload = response.model_dump(by_alias=True, exclude_none=True)
+    logger.info("directory/search: response_body=%s", payload)
+    return payload
 
 
 def _empty_suggestions() -> SuggestionsResponse:
-    return SuggestionsResponse(action=SuggestionsActionResponse(suggestions=Suggestions(items=[])))
+    return SuggestionsResponse(auto_complete=Suggestions(items=[]))
 
 
 # ---------------------------------------------------------------------------
