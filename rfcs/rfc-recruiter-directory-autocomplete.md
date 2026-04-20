@@ -5,7 +5,7 @@
 | **Author(s)** | Kinematic Labs                        |
 | **Status**    | Draft                                 |
 | **Created**   | 2026-04-20                            |
-| **Updated**   | 2026-04-20                            |
+| **Updated**   | 2026-04-20 (post-review revision)     |
 | **Reviewers** | LRP Engineering, LRP Coordinator team |
 | **Decider**   | Nim Sadeh                             |
 | **Issue**     | [#27](https://github.com/nsadeh/lrp-scheduling-agent/issues/27) |
@@ -14,7 +14,7 @@
 
 When a coordinator creates a scheduling loop from the add-on sidebar, `build_create_loop_form` in `services/api/src/api/scheduling/cards.py:201` renders the recruiter's name and email as two free-text `TextInput` widgets. Coordinators either type from memory or copy-paste from an email thread. Both are error-prone — typos silently corrupt the `contacts` table (no email validation), and coordinators frequently report they "don't remember the exact address." The customer raised this explicitly during a demo; they asked for a dropdown that filters to LRP Workspace members.
 
-This RFC proposes replacing the free-text inputs with an autocomplete backed by Google Workspace's directory. The change is narrow by design — it only touches the recruiter fields in the create-loop form, not the client contact or client manager fields, and it does not change the scheduling loop data model beyond adding a photo URL column. It also fixes a pre-existing dedup bug in `find_or_create_contact` discovered while designing this feature, bundled here because the code paths overlap.
+This RFC proposes replacing the free-text inputs with an autocomplete backed by Google Workspace's directory. The change is narrow by design — it only touches the recruiter fields in the create-loop form, not the client contact or client manager fields, and it does not change the scheduling loop data model beyond adding a photo URL column. The dedup bug originally bundled with this proposal has been fixed separately in [PR #34](https://github.com/nsadeh/lrp-scheduling-agent/pull/34) ([#32](https://github.com/nsadeh/lrp-scheduling-agent/issues/32)) via an app-level SELECT-before-INSERT in `find_or_create_contact`, so this RFC no longer touches the dedup path.
 
 ## Goals
 
@@ -22,7 +22,6 @@ This RFC proposes replacing the free-text inputs with an autocomplete backed by 
 - **G2: Atomic suggestion acceptance.** Selecting a suggestion populates both the name and email fields in the form. The coordinator does not have to re-type or reconcile the two fields.
 - **G3: Avatar on selection.** Once a loop is created with a directory-sourced recruiter, the recruiter's Google Workspace avatar renders in the Recruiter section of the loop detail card.
 - **G4: No regression on existing autocomplete.** Client-contact and client-manager autocomplete (backed by their respective tables) continues to work unchanged.
-- **G5: Contacts dedup fix.** The existing bug where `find_or_create_contact` always inserts (creating N duplicate rows for the same recruiter over time) is fixed. After this RFC ships, the invariant `COUNT(*) FROM contacts GROUP BY email, role HAVING COUNT(*) > 1` returns zero rows.
 
 ## Non-Goals
 
@@ -71,7 +70,7 @@ At these volumes, live-per-keystroke directory queries are trivial. Aggregate lo
 
 ### Overview
 
-Extend `REQUIRED_SCOPES` by one value. Add one backend endpoint that proxies directory search via the calling coordinator's own OAuth token. Wire the two recruiter `TextInput` widgets in the create-loop form to that endpoint via Google's `autoCompleteAction`. Persist the selected recruiter's avatar URL on the loop and render it on the detail card. Fix the pre-existing contacts dedup bug as part of the same migration.
+Extend `REQUIRED_SCOPES` by one value. Add one backend endpoint that proxies directory search via the calling coordinator's own OAuth token. Wire the two recruiter `TextInput` widgets in the create-loop form to that endpoint via Google's `autoCompleteAction`. Persist the selected recruiter's avatar URL on the `contacts` row and render it on the loop detail card.
 
 No new services, no new queues, no scheduled jobs, no new identities.
 
@@ -152,64 +151,29 @@ On form submit, the recruiter's `photoUrl` needs to flow through. We stash it as
 
 #### 4. Avatar persistence
 
-**File:** `services/api/migrations/0007_recruiter_photo_url.py` (new)
+**File:** `services/api/migrations/0008_recruiter_photo_url.py` (new)
 
 ```sql
 ALTER TABLE contacts ADD COLUMN photo_url TEXT;
 ```
 
-Store the photo URL on `contacts` rather than on `loops` — the avatar is a property of the person, not the loop, and it stays stable across multiple loops involving the same recruiter. `photo_url` is populated on upsert during loop creation (see next section).
+Store the photo URL on `contacts` rather than on `loops` — the avatar is a property of the person, not the loop, and it stays stable across multiple loops involving the same recruiter. `photo_url` is written into the new row the first time a directory-picked recruiter is referenced from a loop; on subsequent hits for the same contact it stays untouched (matching the stored-name semantics introduced in [PR #34](https://github.com/nsadeh/lrp-scheduling-agent/pull/34)).
 
 Loop detail card renders it via `DecoratedText.startIcon.iconUrl = contact.photo_url` in the Recruiter section. If null, fall back to no icon or a generic person glyph.
 
 We cache the photo URL as-provided by Google, with no refresh logic in this RFC. If URLs start 404-ing in the wild (observed lifetime is weeks-to-months), we add a refresh path in a follow-up. For now the degradation is "no avatar" which is no worse than today.
 
-#### 5. Contacts dedup fix (bundled bug)
+#### 5. Scope pre-check at form entry
 
-**File:** `services/api/migrations/0007_recruiter_photo_url.py` (same migration)
+The scope bump on `REQUIRED_SCOPES` triggers Google's scope-missing error the next time any handler calls `TokenStore.load_credentials`. The existing action dispatcher at `addon/routes.py:318-324` already catches `GmailScopeError` and swaps in a `build_auth_required` card that links to `/addon/oauth/start` — so for normal action handlers, re-consent is fully automatic (coordinator sees an "Authorize Gmail Access" card, clicks it, approves, comes back to their intended action on the next interaction).
 
-```sql
--- Deduplicate existing rows before adding the constraint
-WITH keepers AS (
-    SELECT DISTINCT ON (email, role) id FROM contacts ORDER BY email, role, created_at
-)
-DELETE FROM contacts WHERE id NOT IN (SELECT id FROM keepers);
+The wrinkle is specific to `autoCompleteAction` callbacks: those must return a `SuggestionsResponse`, not a card. If the suggestions handler is the first thing that triggers the scope check, there's no clean way to surface the re-consent card from a suggestions response — Google would either render nothing or render the card's text as a literal suggestion entry.
 
-ALTER TABLE contacts ADD CONSTRAINT contacts_email_role_unique UNIQUE (email, role);
-```
+The fix is to move the scope check **upstream** of the autocomplete path. The `show_create_loop_form` action handler calls `load_credentials(email)` (or a lightweight scope-only variant) before rendering the form. If the check raises `GmailScopeError`, the existing wrapper catches it and shows the auth card. The coordinator re-consents, the form re-renders with the directory scope already granted, and the autocomplete endpoint can assume its caller has the scope it needs. No scope-error branch required inside the suggestions handler.
 
-**File:** `services/api/queries/scheduling.sql`
-
-```sql
--- name: upsert_contact^
-INSERT INTO contacts (id, name, email, role, company, photo_url)
-VALUES (:id, :name, :email, :role, :company, :photo_url)
-ON CONFLICT (email, role) DO UPDATE
-    SET name = EXCLUDED.name,
-        photo_url = COALESCE(EXCLUDED.photo_url, contacts.photo_url)
-RETURNING id, name, email, role, company, photo_url, created_at;
-```
-
-`LoopService.find_or_create_contact` calls the new `upsert_contact` query. The old `create_contact` query is removed (no other callers after this change). Note the `COALESCE` — we never overwrite a stored photo URL with NULL, so manual edits don't regress a directory-sourced avatar.
-
-There is a subtle foreign-key concern in the dedup step: `loops.recruiter_id` and `loops.client_manager_id` both reference `contacts(id)`. If we delete a duplicate row that some loop still references, we'd violate the FK. The migration must therefore re-point those references before deleting:
-
-```sql
--- Re-point loop references to the canonical (earliest) contact row
-UPDATE loops l
-SET recruiter_id = keeper.id
-FROM (
-    SELECT DISTINCT ON (email, role) email, role, id FROM contacts ORDER BY email, role, created_at
-) keeper,
-    contacts dup
-WHERE l.recruiter_id = dup.id
-  AND dup.email = keeper.email AND dup.role = keeper.role
-  AND dup.id <> keeper.id;
--- Same for client_manager_id
--- Then delete orphans
-```
-
-This is slightly ugly SQL but runs in <1s at current data volumes (one loop in production) and is written so it's idempotent if re-run.
+Two edges to cover:
+- **Coordinators who never open the create form but hit an older loop detail card with a directory-sourced avatar rendering:** the avatar URL is rendered via the card, not via a live API call, so this path doesn't need the scope — it only needs the stored `contacts.photo_url` value, which pre-existing loops will have as NULL and degrade gracefully.
+- **Direct deep-link into the form from a classifier suggestion:** same path as the normal "show create form" action, same scope pre-check, same auth card. Works.
 
 ### Key Trade-offs
 
@@ -257,9 +221,9 @@ Skip this RFC entirely. When the Encore/Cluein ATS integration lands, the recrui
 
 ### Do Nothing / Status Quo
 
-Leave the form as free-text. Continue tolerating typos, continue tolerating "I don't remember their email" friction, continue creating duplicate `contacts` rows on every loop submission.
+Leave the form as free-text. Continue tolerating typos, continue tolerating "I don't remember their email" friction.
 
-**What happens:** Customer raised this in a demo. The UX hit is small per-loop but accumulates. Typo'd email addresses do two things over time: they corrupt the `contacts` cache (making it even less useful for downstream autocomplete), and they get embedded into real drafted emails that the coordinator then sends to an address that doesn't exist. Today coordinators catch these visually before sending, but the classifier and downstream agent infrastructure treat these typos as real contacts and may surface them as suggestions in future features.
+**What happens:** Customer raised this in a demo. The UX hit is small per-loop but accumulates. Typo'd email addresses do two things over time: they get stored as distinct `contacts` rows that downstream autocomplete treats as real people, and they get embedded into real drafted emails that the coordinator then sends to an address that doesn't exist. Today coordinators catch these visually before sending, but the classifier and downstream agent infrastructure treat these typos as real contacts and may surface them as suggestions in future features.
 
 **Why not:** The customer pain is real, and the fix is cheap. "Do nothing" is a viable short-term choice if the eng team is underwater — but it's not underwater, and this slots neatly into 2–3 days.
 
@@ -274,19 +238,17 @@ Leave the form as free-text. Continue tolerating typos, continue tolerating "I d
 | **G2: Atomic selection** | % of created loops where `recruiter_name` and `recruiter_email` come from a single autocomplete selection (detected by sentinel in form state) | > 80% over 2 weeks post-launch | Instrumentation on loop-create handler |
 | **G3: Avatar coverage** | % of new loops with non-null `contacts.photo_url` for recruiter | > 80% over 2 weeks post-launch | SQL query on `loops` joined with `contacts` |
 | **G4: No regression** | Existing client/CM autocomplete success rate | Unchanged from pre-launch baseline (within ±5%) | Same instrumentation on those paths |
-| **G5: Dedup holds** | Count of `(email, role)` groups in `contacts` with >1 row | 0 | Daily assertion query |
 
 ### Definition of Failure
 
 - **Re-consent adoption stalls.** After 2 weeks post-launch, fewer than 80% of active coordinators have re-consented. Diagnosis: either the consent screen language is confusing, or `GmailScopeError` is not reliably triggering the re-consent redirect in some addon contexts.
 - **Autocomplete latency exceeds 1s p95 after 1 week of tuning.** The widget feels broken; coordinators stop trusting it and revert to manual typing.
 - **Selection atomicity fails.** More than 15% of loops land with mismatched `recruiter_name` / `recruiter_email` domain (e.g., name from one person, email from another). Indicates `onChangeAction` peer-field update path doesn't work as designed and we need to fall back to the single combined field (Alternative 1 in §3).
-- **Dedup migration fails in production.** Foreign key violations during the re-point step. Migration is reversible; we roll back and re-plan the dedup.
 
 ### Evaluation Timeline
 
 - **T+1 week:** Re-consent adoption across all active coordinators. Confirm G1 and G2 metrics are tracking to target.
-- **T+2 weeks:** Full success check against all G1–G5 metrics. Decision on whether any follow-up work is needed (photo URL refresh, role-aware ranking, etc.).
+- **T+2 weeks:** Full success check against all G1–G4 metrics. Decision on whether any follow-up work is needed (photo URL refresh, role-aware ranking, etc.).
 - **T+6 weeks:** Retrospective — does the picker still feel right, or has Encore integration changed the calculus?
 
 ## Observability and Monitoring Plan
@@ -302,7 +264,6 @@ Leave the form as free-text. Continue tolerating typos, continue tolerating "I d
 | **Atomic-selection rate (G2)** | Log sentinel `recruiter_source=directory\|manual` written to a hidden form field at suggestion-select time; emitted on loop create | Addon Performance dashboard | Alert if < 70% for 2 consecutive weeks |
 | Loops created with `recruiter_photo_url` populated (G3) | DB query on `loops` ⨝ `contacts` | Weekly metrics report | No alert |
 | **Client / CM autocomplete regression (G4)** | Existing `search_contacts` / `search_client_contacts` call log | Addon Performance dashboard | Alert if call count drops > 50% week-over-week |
-| Contacts dedup invariant | Daily SQL assertion | Existing Sentry cron-hook | Alert on any non-zero count |
 
 ### Logging
 
@@ -313,7 +274,6 @@ Leave the form as free-text. Continue tolerating typos, continue tolerating "I d
 ### Alerting
 
 - Error rate and latency alerts above go to the existing on-call Sentry channel.
-- Dedup invariant alert is the only hard-fail cron alert. It should never fire; if it does we have a data integrity regression and the upsert query is broken.
 
 ### Dashboards
 
@@ -340,12 +300,10 @@ Live directory queries scale with coordinator keystrokes. At projected 5 coordin
 
 Staged rollout:
 1. Merge RFC, implement, ship to staging.
-2. Add `directory.readonly` to staging's `REQUIRED_SCOPES`. Nim re-consents in the staging addon, exercises a full loop-creation end-to-end. Verify all G1–G5 instrumentation fires correctly.
+2. Add `directory.readonly` to staging's `REQUIRED_SCOPES`. Nim re-consents in the staging addon, exercises a full loop-creation end-to-end. Verify all G1–G4 instrumentation fires correctly.
 3. Deploy to prod (code and `REQUIRED_SCOPES` update in the same release). First prod interaction from any coordinator triggers `GmailScopeError`, bounces to `/addon/oauth/start`, coordinator approves the one new scope, back to normal.
 
-Rollback: revert `REQUIRED_SCOPES` to the prior value, revert the code. Coordinators' existing tokens (which now have the wider scope) still work for the narrower scope check — no forced re-consent on rollback.
-
-The contacts dedup migration is the riskier piece. The migration is written idempotently and has a straightforward reverse (`DROP CONSTRAINT`; the duplicate rows cannot be restored but no production data is lost because the keeper row is the one that downstream loops reference after the re-point). If the migration fails mid-flight, partial state is recoverable via the standard yoyo rollback path.
+Rollback: revert `REQUIRED_SCOPES` to the prior value, revert the code. Coordinators' existing tokens (which now have the wider scope) still work for the narrower scope check — no forced re-consent on rollback. The `contacts.photo_url` column can stay in place on rollback (it's NULLable and unused code paths won't write to it).
 
 ## Open Questions
 
@@ -360,8 +318,7 @@ The contacts dedup migration is the riskier piece. The migration is written idem
 | Phase 1 | Scope change + consent flow verified in staging | 0.5 day |
 | Phase 2 | `/addon/directory/search` endpoint + People API wrapper | 0.5 day |
 | Phase 3 | Card form autocomplete wiring + `onChangeAction` spike | 1 day |
-| Phase 4 | Avatar persistence, rendering in loop detail card | 0.5 day |
-| Phase 5 | Contacts dedup migration + upsert SQL | 0.5 day |
-| Phase 6 | End-to-end testing in staging; Nim walkthrough | 0.5 day |
+| Phase 4 | Avatar persistence (migration + loop detail card render) | 0.5 day |
+| Phase 5 | End-to-end testing in staging; Nim walkthrough | 0.5 day |
 
-Total: **~3 days** of focused eng time. Deploy to prod at the end of the third day; success evaluation at T+1 week.
+Total: **~2.5 days** of focused eng time. Deploy to prod at the end of the third day; success evaluation at T+1 week.
