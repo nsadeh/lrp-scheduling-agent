@@ -32,6 +32,14 @@ RETURNING id, name, email, role, company, created_at;
 SELECT id, name, email, role, company, created_at
 FROM contacts WHERE id = :id;
 
+-- name: get_contact_by_email_and_role^
+-- Used to dedupe on loop creation: reuse an existing contact if the
+-- (email, role) pair already exists instead of inserting a duplicate.
+SELECT id, name, email, role, company, created_at
+FROM contacts
+WHERE email = :email AND role = :role
+LIMIT 1;
+
 -- name: search_contacts_by_prefix
 -- Autocomplete: search contacts by name prefix, optionally filtered by role.
 SELECT id, name, email, role, company, created_at
@@ -53,6 +61,14 @@ RETURNING id, name, email, company, created_at;
 -- name: get_client_contact^
 SELECT id, name, email, company, created_at
 FROM client_contacts WHERE id = :id;
+
+-- name: get_client_contact_by_email^
+-- Used to dedupe on loop creation: reuse an existing client contact if
+-- the email already exists instead of inserting a duplicate.
+SELECT id, name, email, company, created_at
+FROM client_contacts
+WHERE email = :email
+LIMIT 1;
 
 -- name: search_client_contacts_by_prefix
 SELECT id, name, email, company, created_at
