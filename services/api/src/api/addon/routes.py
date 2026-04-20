@@ -22,6 +22,7 @@ from api.addon.models import (
 )
 from api.classifier.models import SuggestedAction, SuggestionStatus
 from api.gmail.exceptions import GmailScopeError, GmailValidationError
+from api.gmail.forward import build_forwarded_body, prefix_forward_subject
 from api.overview.cards import build_overview
 from api.overview.service import OverviewService
 from api.scheduling.cards import (
@@ -579,28 +580,61 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     if edited_body is not None and edited_body != draft.body:
         await draft_svc.update_draft_body(draft.id, send_body)
 
-    # Resolve threading headers so the recipient sees this in the same thread.
-    # In-Reply-To + References are RFC 2822 headers that tell the recipient's
-    # email client to display this as a reply (or forward) in the thread.
-    in_reply_to = None
-    references = None
+    # Fetch the thread once, up-front. Two downstream blocks consume it:
+    #   (1) the RFC 2822 threading headers immediately below, and
+    #   (2) build_forwarded_body() for forwards (issue #36).
+    # Keeping the fetch separate from its consumers also lets the error policy
+    # branch on is_forward: replies soft-fallback (warn + send with no
+    # threading headers — the recipient is already on the thread, so Gmail
+    # shows them context regardless); forwards raise, because a forward
+    # without quoted history is exactly the bug we're fixing.
+    thread = None
     gmail = getattr(request.app.state, "gmail", None) if request else None
     if gmail and draft.gmail_thread_id:
         try:
             thread = await gmail.get_thread(email, draft.gmail_thread_id)
-            if thread.messages:
-                last_msg = thread.messages[-1]
-                in_reply_to = last_msg.message_id_header
-                # Build References chain from all messages in thread
-                ref_ids = [m.message_id_header for m in thread.messages if m.message_id_header]
-                if ref_ids:
-                    references = " ".join(ref_ids)
         except Exception:
+            if draft.is_forward:
+                logger.exception(
+                    "Failed to fetch thread %s for forward — aborting send",
+                    draft.gmail_thread_id,
+                )
+                raise
             logger.warning(
                 "Could not fetch thread %s for reply headers — sending without threading",
                 draft.gmail_thread_id,
                 exc_info=True,
             )
+
+    # RFC 2822 threading headers so the recipient's Gmail stitches this message
+    # into the existing conversation rather than showing it as a new thread.
+    #   In-Reply-To: the Message-ID of the message we're directly replying to
+    #     (i.e. the last one in the thread).
+    #   References: a space-separated chain of every prior Message-ID in the
+    #     thread — lets Gmail place this message at the right node in the
+    #     thread tree even if some intermediate messages went missing.
+    # Without these, Gmail renders the outgoing message as a standalone
+    # conversation in the recipient's inbox.
+    in_reply_to = None
+    references = None
+    if thread and thread.messages:
+        last_msg = thread.messages[-1]
+        in_reply_to = last_msg.message_id_header
+        ref_ids = [m.message_id_header for m in thread.messages if m.message_id_header]
+        if ref_ids:
+            references = " ".join(ref_ids)
+
+    # Forwards: quote the prior thread into the body and prefix "Fwd:" on the
+    # subject. Applied only on the wire — the persisted draft body stays short
+    # so the sidebar view remains compact.
+    send_subject = draft.subject
+    if draft.is_forward:
+        if not thread or not thread.messages:
+            raise RuntimeError(
+                f"Cannot forward draft {draft.id}: no thread history available to quote"
+            )
+        send_body = build_forwarded_body(send_body, thread)
+        send_subject = prefix_forward_subject(draft.subject)
 
     # Send email via existing LoopService path
     await svc.send_email(
@@ -608,7 +642,7 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
         stage_id=draft.stage_id,
         coordinator_email=email,
         to=draft.to_emails,
-        subject=draft.subject,
+        subject=send_subject,
         body=send_body,
         cc=draft.cc_emails or None,
         gmail_thread_id=draft.gmail_thread_id,
