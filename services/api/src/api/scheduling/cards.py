@@ -42,6 +42,31 @@ def set_action_url(url: str) -> None:
     _action_url = url
 
 
+def _directory_search_url() -> str:
+    """Derive the /addon/directory/search URL from the current action URL.
+
+    Both live under /addon/ on the same host, so swap the last segment.
+    Empty string when set_action_url hasn't been called (e.g. unit tests
+    that don't exercise HTTP).
+    """
+    if not _action_url:
+        return ""
+    return _action_url.rsplit("/addon/", 1)[0] + "/addon/directory/search"
+
+
+def _directory_autocomplete_action() -> OnClickAction:
+    """Build the autoCompleteAction that fires per-keystroke on recruiter fields."""
+    return OnClickAction(function=_directory_search_url())
+
+
+def _recruiter_selected_action() -> OnClickAction:
+    """Build the onChangeAction that parses "Name <email>" into peer fields."""
+    return OnClickAction(
+        function=_action_url,
+        parameters=[ActionParameter(key="action_name", value="recruiter_selected")],
+    )
+
+
 LRP_HEADER = CardHeader(
     title="LRP Scheduling",
     subtitle="Long Ridge Partners",
@@ -280,7 +305,13 @@ def build_create_loop_form(
         )
     )
 
-    # Recruiter section
+    # Recruiter section — directory-backed autocomplete on both fields.
+    # Coordinators can type into either the name OR email input and pick a
+    # Workspace member from the live dropdown. onChangeAction fires after
+    # selection; the handler parses "Name <email>" and re-renders this
+    # form with the two halves in their respective fields.
+    recruiter_autocomplete = _directory_autocomplete_action()
+    recruiter_onchange = _recruiter_selected_action()
     sections.append(
         Section(
             header="Recruiter",
@@ -291,6 +322,9 @@ def build_create_loop_form(
                         label="Name",
                         type="SINGLE_LINE",
                         value=prefill_recruiter_name,
+                        hint_text="Type to search your Workspace directory",
+                        auto_complete_action=recruiter_autocomplete,
+                        on_change_action=recruiter_onchange,
                     )
                 ),
                 TextInputWidget(
@@ -299,6 +333,8 @@ def build_create_loop_form(
                         label="Email",
                         type="SINGLE_LINE",
                         value=prefill_recruiter_email,
+                        auto_complete_action=recruiter_autocomplete,
+                        on_change_action=recruiter_onchange,
                     )
                 ),
             ],

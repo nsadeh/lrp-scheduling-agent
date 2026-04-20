@@ -111,7 +111,12 @@ class LoopService:
     # ------------------------------------------------------------------
 
     async def find_or_create_contact(
-        self, name: str, email: str, role: str, company: str | None = None
+        self,
+        name: str,
+        email: str,
+        role: str,
+        company: str | None = None,
+        photo_url: str | None = None,
     ) -> Contact:
         async with self._pool.connection() as conn, conn.transaction():
             existing = await queries.get_contact_by_email_and_role(conn, email=email, role=role)
@@ -121,7 +126,13 @@ class LoopService:
                 # silently clobber another coordinator's name.
                 return _row_to_contact(existing)
             row = await queries.create_contact(
-                conn, id=make_id("con"), name=name, email=email, role=role, company=company
+                conn,
+                id=make_id("con"),
+                name=name,
+                email=email,
+                role=role,
+                company=company,
+                photo_url=photo_url,
             )
             return _row_to_contact(row)
 
@@ -665,7 +676,13 @@ class LoopService:
 
 def _row_to_contact(row: tuple) -> Contact:
     return Contact(
-        id=row[0], name=row[1], email=row[2], role=row[3], company=row[4], created_at=row[5]
+        id=row[0],
+        name=row[1],
+        email=row[2],
+        role=row[3],
+        company=row[4],
+        photo_url=row[5],
+        created_at=row[6],
     )
 
 

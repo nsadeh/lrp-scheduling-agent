@@ -166,6 +166,12 @@ class TextInput(BaseModel):
     type: str | None = None  # "SINGLE_LINE" or "MULTIPLE_LINE"
     value: str | None = None
     hint_text: str | None = Field(default=None, alias="hintText")
+    # autoCompleteAction fires per-keystroke (after Google's debounce) and
+    # must return a SuggestionsResponse from the URL in `function`.
+    auto_complete_action: OnClickAction | None = Field(default=None, alias="autoCompleteAction")
+    # onChangeAction fires when the field's value changes (including after
+    # an autocomplete selection). Used to update peer fields atomically.
+    on_change_action: OnClickAction | None = Field(default=None, alias="onChangeAction")
 
 
 class TextInputWidget(BaseModel):
@@ -265,3 +271,41 @@ class CardResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
     action: ActionResponse
+
+
+# ---------------------------------------------------------------------------
+# Autocomplete (TextInput.autoCompleteAction)
+# ---------------------------------------------------------------------------
+
+
+class SuggestionItem(BaseModel):
+    """A single autocomplete entry shown as plain text under the input."""
+
+    text: str
+
+
+class Suggestions(BaseModel):
+    items: list[SuggestionItem]
+
+
+class SuggestionsResponse(BaseModel):
+    """Top-level response Google expects from an autoCompleteAction callback.
+
+    Per the `GetAutocompletionResponse` RPC schema (google.apps.card.v1):
+
+        {"autoComplete": {"items": [{"text": "..."}]}}
+
+    Note the top-level field is ``autoComplete``, NOT ``suggestions`` —
+    the *Apps Script type* is named ``Suggestions``/``SuggestionsResponse``
+    but the wire-format JSON field is ``autoComplete``. Apps Script's
+    ``SuggestionsResponseBuilder.build()`` does the translation; HTTP
+    runtime callbacks have to emit the raw shape directly. The inner
+    payload is a bare ``Suggestions`` (``items: [SuggestionItem]``) with
+    no ``suggestions`` wrapper key around it.
+
+    Ref: https://developers.google.com/workspace/add-ons/reference/rpc/google.apps.card.v1#getautocompletionresponse
+    """
+
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    auto_complete: Suggestions = Field(alias="autoComplete")
