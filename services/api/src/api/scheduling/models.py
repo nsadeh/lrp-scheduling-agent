@@ -88,6 +88,7 @@ class Contact(BaseModel):
     email: str
     role: str
     company: str | None = None
+    photo_url: str | None = None
     created_at: datetime
 
 
