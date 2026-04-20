@@ -362,6 +362,28 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
         except Exception:
             logger.warning("Could not fetch message %s for pre-fill", message_id, exc_info=True)
 
+    # If a pre-filled email matches an existing contact, prefer the stored
+    # name/company so the form shows what will actually be persisted on
+    # submit — the dedup logic in find_or_create_contact keeps the stored
+    # row untouched, so showing the classifier-suggested name here would
+    # mislead the coordinator.
+    if prefill_client_email:
+        existing_client = await svc.get_client_contact_by_email(prefill_client_email)
+        if existing_client is not None:
+            prefill_client_name = existing_client.name
+            if existing_client.company:
+                prefill_client_company = existing_client.company
+    if prefill_recruiter_email:
+        existing_recruiter = await svc.get_contact_by_email(
+            prefill_recruiter_email, role="recruiter"
+        )
+        if existing_recruiter is not None:
+            prefill_recruiter_name = existing_recruiter.name
+    if prefill_cm_email:
+        existing_cm = await svc.get_contact_by_email(prefill_cm_email, role="client_manager")
+        if existing_cm is not None:
+            prefill_cm_name = existing_cm.name
+
     # Pass suggestion_id through so create_loop can resolve it
     suggestion_id = _get_param(body, "suggestion_id")
 

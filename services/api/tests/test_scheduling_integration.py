@@ -143,6 +143,91 @@ class TestContacts:
         assert len(results) == 1
         assert results[0].name == "Jane Doe"
 
+    async def test_find_or_create_contact_reuses_existing_by_email_and_role(
+        self, svc: LoopService, pool
+    ):
+        first = await svc.find_or_create_contact(
+            name="Alice Adams", email="alice@lrp.com", role="recruiter"
+        )
+        # Second call with same (email, role) but a different typed name —
+        # must reuse the existing row and must NOT overwrite the name.
+        second = await svc.find_or_create_contact(
+            name="Alice A.", email="alice@lrp.com", role="recruiter"
+        )
+        assert second.id == first.id
+        assert second.name == "Alice Adams"
+
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT count(*), max(name) FROM contacts WHERE email = %s",
+                    ("alice@lrp.com",),
+                )
+            ).fetchone()
+        assert row[0] == 1
+        assert row[1] == "Alice Adams"
+
+    async def test_find_or_create_contact_same_email_different_role_creates_new(
+        self, svc: LoopService
+    ):
+        recruiter = await svc.find_or_create_contact(
+            name="Alex", email="alex@lrp.com", role="recruiter"
+        )
+        cm = await svc.find_or_create_contact(
+            name="Alex", email="alex@lrp.com", role="client_manager"
+        )
+        # Same email but different role = different logical contact.
+        assert recruiter.id != cm.id
+
+    async def test_find_or_create_contact_creates_new_when_email_differs(self, svc: LoopService):
+        a = await svc.find_or_create_contact(name="Alice", email="alice@lrp.com", role="recruiter")
+        b = await svc.find_or_create_contact(name="Bob", email="bob@lrp.com", role="recruiter")
+        assert a.id != b.id
+
+    async def test_find_or_create_client_contact_reuses_existing_by_email(
+        self, svc: LoopService, pool
+    ):
+        first = await svc.find_or_create_client_contact(
+            name="Jane Doe", email="jane@acme.com", company="Acme"
+        )
+        second = await svc.find_or_create_client_contact(
+            name="Jane D.", email="jane@acme.com", company="Different Co"
+        )
+        assert second.id == first.id
+        assert second.name == "Jane Doe"
+        assert second.company == "Acme"
+
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT count(*) FROM client_contacts WHERE email = %s",
+                    ("jane@acme.com",),
+                )
+            ).fetchone()
+        assert row[0] == 1
+
+    async def test_get_contact_by_email(self, svc: LoopService):
+        created = await svc.find_or_create_contact(
+            name="Alice", email="alice@lrp.com", role="recruiter"
+        )
+        found = await svc.get_contact_by_email("alice@lrp.com", role="recruiter")
+        assert found is not None
+        assert found.id == created.id
+
+        # Wrong role — no match.
+        assert await svc.get_contact_by_email("alice@lrp.com", role="client_manager") is None
+        # Unknown email — no match.
+        assert await svc.get_contact_by_email("nobody@lrp.com", role="recruiter") is None
+
+    async def test_get_client_contact_by_email(self, svc: LoopService):
+        created = await svc.find_or_create_client_contact(
+            name="Jane", email="jane@acme.com", company="Acme"
+        )
+        found = await svc.get_client_contact_by_email("jane@acme.com")
+        assert found is not None
+        assert found.id == created.id
+        assert await svc.get_client_contact_by_email("nobody@acme.com") is None
+
 
 class TestCreateLoop:
     async def test_creates_loop_with_stage_and_events(self, svc: LoopService):
