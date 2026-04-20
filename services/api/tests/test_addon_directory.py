@@ -144,6 +144,12 @@ class TestFormatParseRoundtrip:
         assert parse_name_email("") is None
         assert parse_name_email(None) is None  # type: ignore[arg-type]
 
+    def test_parse_rejects_angle_brackets_in_name(self):
+        """A crafted ``"A <script> B <real@x.com>"`` must not match — the
+        angle-bracket content would otherwise leak into the persisted name."""
+        assert parse_name_email("A <script> B <real@x.com>") is None
+        assert parse_name_email("Sarah > <s@x.com>") is None
+
     def test_roundtrip(self):
         # Format -> parse should give back the name and email we put in
         formatted = format_directory_suggestion("Sarah Chen", "sarah@longridgepartners.com")

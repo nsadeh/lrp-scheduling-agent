@@ -26,7 +26,11 @@ from api.addon.models import (
     UpdateCard,
 )
 from api.classifier.models import SuggestedAction, SuggestionStatus
-from api.gmail.exceptions import GmailScopeError, GmailValidationError
+from api.gmail.exceptions import (
+    GmailScopeError,
+    GmailUserNotAuthorizedError,
+    GmailValidationError,
+)
 from api.overview.cards import build_overview
 from api.overview.service import OverviewService
 from api.scheduling.cards import (
@@ -151,8 +155,11 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
 _GMAIL_CONTEXTUAL_ID_RE = re.compile(r"^(?:thread-f|msg-f):(\d+)$")
 
 # Format used in autocomplete dropdown items and parsed back out on selection.
-# Matching is anchored and tolerates spaces around the angle brackets.
-_NAME_EMAIL_RE = re.compile(r"^\s*(.+?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$")
+# Matching is anchored and tolerates spaces around the angle brackets. Both
+# the name and email groups exclude angle brackets so a crafted input like
+# ``"A <script> B <real@x.com>"`` cannot smuggle angle-bracket content into
+# the persisted name field.
+_NAME_EMAIL_RE = re.compile(r"^\s*([^<>]+?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$")
 
 
 def format_directory_suggestion(display_name: str, email: str) -> str:
@@ -347,8 +354,14 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     handler = _ACTION_HANDLERS.get(fn or "", _handle_unknown)
     try:
         card = await handler(body, svc, email, request=request)
-    except GmailScopeError as exc:
-        logger.warning("Gmail scope error in action %s: %s", fn, exc)
+    except (GmailScopeError, GmailUserNotAuthorizedError) as exc:
+        # Both share the same fix from the coordinator's POV: visit
+        # /addon/oauth/start to (re-)consent. Scope errors fire when an
+        # existing token is missing scopes; UserNotAuthorized fires when
+        # there's no token at all (rare in the action path because
+        # homepage/on-message gate it earlier, but possible if Google
+        # routes a stale action target to an unauthorized coordinator).
+        logger.warning("Gmail auth error in action %s: %s", fn, exc)
         base = str(request.url).rsplit("/addon/", 1)[0]
         auth_url = f"{base}/addon/oauth/start?user_email={email}"
         card = build_auth_required(auth_url)
@@ -467,15 +480,14 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
     request = kwargs.get("request")
     # Pre-check coordinator's directory.readonly scope here, BEFORE the
     # autocomplete callbacks fire on the rendered form. autoCompleteAction
-    # responses can't surface the auth-required card, so we have to bounce
-    # to re-consent at form-entry time. The action wrapper catches
-    # GmailScopeError and shows build_auth_required for us.
+    # responses can't surface the auth-required card, so we bounce to
+    # re-consent at form-entry time. The action wrapper catches both
+    # GmailScopeError (existing token missing scopes) and
+    # GmailUserNotAuthorizedError (no token at all) and shows
+    # build_auth_required, so we let either propagate.
     gmail = getattr(request.app.state, "gmail", None) if request else None
     if gmail is not None:
-        try:
-            await gmail._token_store.load_credentials(email)
-        except GmailScopeError:
-            raise
+        await gmail._token_store.load_credentials(email)
 
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     message_id = _get_param(body, "message_id")

@@ -7,6 +7,7 @@ in the create-loop form. Uses the calling coordinator's own OAuth token
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -41,10 +42,15 @@ class DirectoryPerson:
         self.photo_url = photo_url
 
 
-def _ensure_access_token(creds: Credentials) -> str:
-    """Refresh the access token if needed and return it."""
+async def _ensure_access_token(creds: Credentials) -> str:
+    """Refresh the access token if needed and return it.
+
+    google-auth's ``creds.refresh()`` issues a blocking HTTP call. Run it
+    in a worker thread so we don't stall the asyncio event loop while a
+    coordinator's ~hour-old access token is being refreshed.
+    """
     if not creds.valid:
-        creds.refresh(GAuthRequest())
+        await asyncio.to_thread(creds.refresh, GAuthRequest())
     return creds.token
 
 
@@ -84,7 +90,7 @@ async def search_directory(
     if not query:
         return []
 
-    token = _ensure_access_token(creds)
+    token = await _ensure_access_token(creds)
     params = {
         "query": query,
         "readMask": _READ_MASK,
