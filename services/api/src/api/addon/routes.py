@@ -71,10 +71,22 @@ def _get_base_url(request: Request) -> str:
 def _get_user_email(body: AddonRequest) -> str:
     """Extract coordinator email from the add-on request.
 
-    Tries userIdToken first. Falls back to userOAuthToken or systemIdToken
-    if available. All are Google-signed JWTs with an email claim.
+    Only ``userIdToken`` (Google-signed JWT with the coordinator's email
+    claim) is trusted as a user identity. ``systemIdToken`` is explicitly
+    NOT used here even though it has an ``email`` claim — that token's
+    email is the add-on framework's service-account identity, used to
+    prove the request came from Google (see ``addon/auth.py``), not to
+    identify the human coordinator. Falling back to it silently
+    masquerades the wrong principal: see the regression where adding a
+    sensitive scope to the deployment manifest's ``oauthScopes`` caused
+    Google to suppress ``userIdToken``, the silent fallback used the
+    service-account email, and the "Authorize Gmail Access" button then
+    asked the coordinator to log in as that service account.
 
-    Raises ValueError if the email cannot be determined.
+    Falls back to ``userOAuthToken`` → Google's userinfo endpoint as a
+    last resort (still a user-identifying token). Raises ``ValueError``
+    if no user-identifying token is present, so the failure is loud
+    instead of silently using the wrong identity.
     """
     import base64
     import json
@@ -84,15 +96,21 @@ def _get_user_email(body: AddonRequest) -> str:
         logger.error("No authorizationEventObject in request body")
         raise ValueError("No authorizationEventObject in add-on request")
 
-    # Try each token type — they're all JWTs with potential email claims
+    # User-identifying tokens only. Order: userIdToken (preferred),
+    # then the userinfo-endpoint fallback below for userOAuthToken.
     token_sources = [
         ("userIdToken", auth.user_id_token),
-        ("systemIdToken", auth.system_id_token),
     ]
 
-    # Log what we received for debugging
+    # Log what we received for debugging — surface presence of
+    # systemIdToken too because its absence/presence is diagnostic for
+    # add-on consent issues, even though we never read its email.
     available = [name for name, val in token_sources if val]
-    logger.info("Available tokens in request: %s", available)
+    logger.info(
+        "Available tokens in request: user-identifying=%s, systemIdToken_present=%s",
+        available,
+        bool(auth.system_id_token),
+    )
 
     for name, token_value in token_sources:
         if not token_value:
