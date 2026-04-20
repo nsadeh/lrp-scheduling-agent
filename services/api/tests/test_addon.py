@@ -2,13 +2,14 @@
 
 import base64
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from api.main import app
-from api.scheduling.models import StatusBoard
+from api.scheduling.models import ClientContact, Contact, StatusBoard
 
 # Build a fake JWT with an email claim for test requests
 _TEST_EMAIL = "test@longridgepartners.com"
@@ -22,6 +23,10 @@ def mock_scheduling():
     svc = AsyncMock()
     svc.get_status_board = AsyncMock(return_value=StatusBoard())
     svc.find_loop_by_thread = AsyncMock(return_value=None)
+    # Default to "no existing contact" so the pre-fill override is a no-op
+    # unless a test explicitly overrides these.
+    svc.get_contact_by_email = AsyncMock(return_value=None)
+    svc.get_client_contact_by_email = AsyncMock(return_value=None)
     return svc
 
 
@@ -125,6 +130,92 @@ class TestAction:
         data = resp.json()
         card = data["action"]["navigations"][0]["updateCard"]
         assert card["header"]["title"] == "New Scheduling Loop"
+
+    async def test_show_create_form_prefers_stored_contact_name(
+        self, client: AsyncClient, mock_scheduling
+    ):
+        """When a pre-filled email matches an existing contact, the form should
+        show the stored name, not the classifier-suggested one — so the coordinator
+        isn't surprised when submit silently reuses the existing row."""
+        mock_scheduling.get_contact_by_email.return_value = Contact(
+            id="con_test",
+            name="Alice Adams",
+            email="alice@lrp.com",
+            role="recruiter",
+            company=None,
+            created_at=datetime.now(UTC),
+        )
+        mock_scheduling.get_client_contact_by_email.return_value = ClientContact(
+            id="cli_test",
+            name="Jane Doe",
+            email="jane@acme.com",
+            company="Acme Capital",
+            created_at=datetime.now(UTC),
+        )
+        event = {
+            "commonEventObject": {
+                "hostApp": "GMAIL",
+                "platform": "WEB",
+                "parameters": {
+                    "action_name": "show_create_form",
+                    "prefill_recruiter_name": "Alice A.",
+                    "prefill_recruiter_email": "alice@lrp.com",
+                    "prefill_client_name": "Jane D.",
+                    "prefill_client_email": "jane@acme.com",
+                    "prefill_client_company": "Different Co",
+                },
+            },
+            "authorizationEventObject": {
+                "userIdToken": _FAKE_USER_ID_TOKEN,
+            },
+        }
+        resp = await client.post("/addon/action", json=event)
+        assert resp.status_code == 200
+        card = resp.json()["action"]["navigations"][0]["updateCard"]
+
+        inputs = {}
+        for section in card["sections"]:
+            for widget in section["widgets"]:
+                ti = widget.get("textInput")
+                if ti:
+                    inputs[ti["name"]] = ti.get("value")
+
+        assert inputs["recruiter_name"] == "Alice Adams"
+        assert inputs["recruiter_email"] == "alice@lrp.com"
+        assert inputs["client_name"] == "Jane Doe"
+        assert inputs["client_email"] == "jane@acme.com"
+        assert inputs["client_company"] == "Acme Capital"
+
+    async def test_show_create_form_keeps_prefill_when_contact_not_found(
+        self, client: AsyncClient, mock_scheduling
+    ):
+        """If no contact matches the pre-filled email, the classifier-suggested
+        name is shown as-is — the lookup is a no-op."""
+        # mock_scheduling already defaults to returning None for get_*_by_email
+        event = {
+            "commonEventObject": {
+                "hostApp": "GMAIL",
+                "platform": "WEB",
+                "parameters": {
+                    "action_name": "show_create_form",
+                    "prefill_recruiter_name": "Brand New Recruiter",
+                    "prefill_recruiter_email": "new@lrp.com",
+                },
+            },
+            "authorizationEventObject": {
+                "userIdToken": _FAKE_USER_ID_TOKEN,
+            },
+        }
+        resp = await client.post("/addon/action", json=event)
+        assert resp.status_code == 200
+        card = resp.json()["action"]["navigations"][0]["updateCard"]
+        inputs = {}
+        for section in card["sections"]:
+            for widget in section["widgets"]:
+                ti = widget.get("textInput")
+                if ti:
+                    inputs[ti["name"]] = ti.get("value")
+        assert inputs["recruiter_name"] == "Brand New Recruiter"
 
     async def test_unknown_function_returns_status_board(self, client: AsyncClient):
         event = {

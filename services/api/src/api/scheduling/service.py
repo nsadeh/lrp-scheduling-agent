@@ -114,6 +114,12 @@ class LoopService:
         self, name: str, email: str, role: str, company: str | None = None
     ) -> Contact:
         async with self._pool.connection() as conn, conn.transaction():
+            existing = await queries.get_contact_by_email_and_role(conn, email=email, role=role)
+            if existing is not None:
+                # Keep the stored row untouched — different loops may have
+                # typed different names for the same person; we must not
+                # silently clobber another coordinator's name.
+                return _row_to_contact(existing)
             row = await queries.create_contact(
                 conn, id=make_id("con"), name=name, email=email, role=role, company=company
             )
@@ -123,9 +129,26 @@ class LoopService:
         self, name: str, email: str, company: str
     ) -> ClientContact:
         async with self._pool.connection() as conn, conn.transaction():
+            existing = await queries.get_client_contact_by_email(conn, email=email)
+            if existing is not None:
+                return _row_to_client_contact(existing)
             row = await queries.create_client_contact(
                 conn, id=make_id("cli"), name=name, email=email, company=company
             )
+            return _row_to_client_contact(row)
+
+    async def get_contact_by_email(self, email: str, role: str) -> Contact | None:
+        async with self._pool.connection() as conn:
+            row = await queries.get_contact_by_email_and_role(conn, email=email, role=role)
+            if row is None:
+                return None
+            return _row_to_contact(row)
+
+    async def get_client_contact_by_email(self, email: str) -> ClientContact | None:
+        async with self._pool.connection() as conn:
+            row = await queries.get_client_contact_by_email(conn, email=email)
+            if row is None:
+                return None
             return _row_to_client_contact(row)
 
     async def find_or_create_candidate(self, name: str, notes: str | None = None) -> Candidate:
