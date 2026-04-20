@@ -13,11 +13,16 @@ import re
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from api.addon.directory import search_directory
 from api.addon.models import (
     ActionResponse,
     AddonRequest,
     CardResponse,
     PushCard,
+    SuggestionItem,
+    Suggestions,
+    SuggestionsActionResponse,
+    SuggestionsResponse,
     UpdateCard,
 )
 from api.classifier.models import SuggestedAction, SuggestionStatus
@@ -144,6 +149,31 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
 
 
 _GMAIL_CONTEXTUAL_ID_RE = re.compile(r"^(?:thread-f|msg-f):(\d+)$")
+
+# Format used in autocomplete dropdown items and parsed back out on selection.
+# Matching is anchored and tolerates spaces around the angle brackets.
+_NAME_EMAIL_RE = re.compile(r"^\s*(.+?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$")
+
+
+def format_directory_suggestion(display_name: str, email: str) -> str:
+    """Encode a directory result as a single dropdown text entry.
+
+    Picked back apart by ``parse_name_email`` after the coordinator selects.
+    Kept as a module-level function so tests can call it without importing
+    the routes module's HTTP plumbing.
+    """
+    name = (display_name or "").strip() or email.split("@")[0]
+    return f"{name} <{email}>"
+
+
+def parse_name_email(text: str) -> tuple[str, str] | None:
+    """Parse ``"Name <email>"`` back into ``(name, email)``. None if no match."""
+    if not text:
+        return None
+    m = _NAME_EMAIL_RE.match(text)
+    if m is None:
+        return None
+    return m.group(1), m.group(2)
 
 
 def _normalize_gmail_id(raw_id: str | None) -> str | None:
@@ -328,12 +358,125 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     return card.model_dump(by_alias=True, exclude_none=True)
 
 
+@addon_router.post("/directory/search")
+async def addon_directory_search(body: AddonRequest, request: Request) -> dict:
+    """Autocomplete callback for recruiter fields in the create-loop form.
+
+    Wired from ``TextInput.autoCompleteAction`` — Google POSTs here per
+    keystroke (after its own debounce) with the current input value as the
+    ``query`` parameter. Returns a flat ``SuggestionsResponse`` with
+    ``"Name <email>"`` strings drawn from the calling coordinator's
+    Workspace directory via the People API.
+    """
+    email = _get_user_email(body)
+    query = (_get_param(body, "query") or "").strip()
+    if not query:
+        return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
+
+    gmail = getattr(request.app.state, "gmail", None)
+    if gmail is None:
+        logger.warning("directory/search: no gmail client configured")
+        return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
+
+    try:
+        creds = await gmail._token_store.load_credentials(email)
+    except GmailScopeError:
+        # Suggestions can't surface the auth card; the show_create_form path
+        # below pre-checks scopes so this branch is only hit if a coordinator
+        # opens the form before the wrapper noticed missing scopes (race).
+        logger.info("directory/search: scope error for %s, returning empty", email)
+        return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
+    except Exception:
+        logger.exception("directory/search: failed to load creds for %s", email)
+        return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
+
+    try:
+        people = await search_directory(creds, query, page_size=10)
+    except Exception:
+        logger.exception("directory/search: People API call failed for %s", email)
+        return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
+
+    items = [
+        SuggestionItem(text=format_directory_suggestion(p.display_name, p.email)) for p in people
+    ]
+    logger.info(
+        "directory/search: query_len=%d, results=%d, coordinator=%s",
+        len(query),
+        len(items),
+        email,
+    )
+    response = SuggestionsResponse(
+        action=SuggestionsActionResponse(suggestions=Suggestions(items=items))
+    )
+    return response.model_dump(by_alias=True, exclude_none=True)
+
+
+def _empty_suggestions() -> SuggestionsResponse:
+    return SuggestionsResponse(action=SuggestionsActionResponse(suggestions=Suggestions(items=[])))
+
+
 # ---------------------------------------------------------------------------
 # Action handlers
 # ---------------------------------------------------------------------------
 
 
+async def _fetch_recruiter_photo_url(
+    *,
+    request: Request | None,
+    svc: LoopService,
+    coordinator_email: str,
+    recruiter_email: str,
+) -> str | None:
+    """Look up the recruiter's Workspace directory photo by email, else None.
+
+    Returns None fast when we already have a contact row for this email
+    (existing photo_url is preserved by the service layer's dedup path) or
+    when the directory lookup fails for any reason — the feature must
+    degrade gracefully to "no avatar" rather than block loop creation.
+    """
+    if not recruiter_email:
+        return None
+    existing = await svc.get_contact_by_email(recruiter_email, role="recruiter")
+    if existing is not None:
+        return None
+
+    if request is None:
+        return None
+    gmail = getattr(request.app.state, "gmail", None)
+    if gmail is None:
+        return None
+    try:
+        creds = await gmail._token_store.load_credentials(coordinator_email)
+        results = await search_directory(creds, recruiter_email, page_size=5)
+    except Exception:
+        logger.warning(
+            "photo-url lookup failed for %s (recruiter=%s)",
+            coordinator_email,
+            recruiter_email,
+            exc_info=True,
+        )
+        return None
+    match = next(
+        (p for p in results if p.email.lower() == recruiter_email.lower()),
+        None,
+    )
+    return match.photo_url if match else None
+
+
 async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    request = kwargs.get("request")
+    # Pre-check coordinator's directory.readonly scope here, BEFORE the
+    # autocomplete callbacks fire on the rendered form. autoCompleteAction
+    # responses can't surface the auth-required card, so we have to bounce
+    # to re-consent at form-entry time. The action wrapper catches
+    # GmailScopeError and shows build_auth_required for us.
+    gmail = getattr(request.app.state, "gmail", None) if request else None
+    if gmail is not None:
+        try:
+            await gmail._token_store.load_credentials(email)
+        except GmailScopeError:
+            raise
+
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     message_id = _get_param(body, "message_id")
 
@@ -403,6 +546,54 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
     )
 
 
+async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """onChangeAction handler — split ``"Name <email>"`` into name+email fields.
+
+    Fired when either recruiter field changes in the STANDALONE create-loop
+    form. If the value matches our "Display Name <email@domain>" sentinel
+    (what the directory suggestion dropdown emits), split it into
+    ``recruiter_name`` and ``recruiter_email``. Otherwise leave both fields
+    as-is. Always preserves the other form fields — the UpdateCard re-renders
+    the full form, so every input value round-trips through prefill_* kwargs.
+
+    For the inline form inside overview suggestion cards this handler is not
+    wired: that card can't be re-rendered in isolation. Inline callers rely
+    on the defensive parse in ``_handle_create_loop`` instead.
+    """
+    suggestion_id = _get_param(body, "suggestion_id")
+
+    def _field(name: str) -> str | None:
+        return _get_form_value(body, name)
+
+    raw_name = _field("recruiter_name") or ""
+    raw_email = _field("recruiter_email") or ""
+
+    # Either field may carry the "Name <email>" payload (the coordinator
+    # could have typed in either one and picked from its autocomplete).
+    parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
+    if parsed is not None:
+        new_name, new_email = parsed
+    else:
+        # Not a directory selection — leave fields as the coordinator typed.
+        new_name, new_email = raw_name, raw_email
+
+    return build_create_loop_form(
+        gmail_thread_id=_get_param(body, "gmail_thread_id"),
+        gmail_subject=_get_param(body, "gmail_subject"),
+        gmail_message_id=_get_param(body, "gmail_message_id"),
+        prefill_candidate_name=_field("candidate_name"),
+        prefill_client_name=_field("client_name"),
+        prefill_client_email=_field("client_email"),
+        prefill_client_company=_field("client_company"),
+        prefill_recruiter_name=new_name or None,
+        prefill_recruiter_email=new_email or None,
+        prefill_cm_name=_field("cm_name"),
+        prefill_cm_email=_field("cm_email"),
+        prefill_first_stage=_field("first_stage_name"),
+        suggestion_id=suggestion_id,
+    )
+
+
 async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     request = kwargs.get("request")
     suggestion_id = _get_param(body, "suggestion_id")
@@ -422,6 +613,15 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     client_company = _field("client_company") or ""
     recruiter_name = _field("recruiter_name") or "Unknown"
     recruiter_email = (_field("recruiter_email") or "").strip()
+
+    # If the coordinator selected a directory suggestion but clicked Create
+    # before onChangeAction fired (or if onChangeAction peer-field updates
+    # don't behave as the RFC assumes), either field can still hold
+    # "Name <email>" — split it out here defensively.
+    parsed = parse_name_email(recruiter_name) or parse_name_email(recruiter_email)
+    if parsed is not None:
+        recruiter_name, recruiter_email = parsed
+        recruiter_email = recruiter_email.strip()
 
     cm_name = _field("cm_name")
     cm_email = _field("cm_email")
@@ -456,8 +656,21 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     client_contact = await svc.find_or_create_client_contact(
         name=client_name, email=client_email, company=client_company
     )
+
+    # Look up the recruiter's Workspace photo URL only when we're about to
+    # create a new contact row. Existing rows keep whatever photo_url they
+    # already have (matches the stored-name dedup semantics).
+    recruiter_photo_url = await _fetch_recruiter_photo_url(
+        request=request,
+        svc=svc,
+        coordinator_email=email,
+        recruiter_email=recruiter_email,
+    )
     recruiter = await svc.find_or_create_contact(
-        name=recruiter_name, email=recruiter_email, role="recruiter"
+        name=recruiter_name,
+        email=recruiter_email,
+        role="recruiter",
+        photo_url=recruiter_photo_url,
     )
     cm_id = None
     if cm_name and cm_email:
@@ -747,6 +960,7 @@ _ACTION_HANDLERS = {
     # Loop creation (used by CREATE_LOOP suggestion)
     "show_create_form": _handle_show_create_form,
     "create_loop": _handle_create_loop,
+    "recruiter_selected": _handle_recruiter_selected,
     # AI draft actions
     "view_draft": _handle_view_draft,
     "send_draft": _handle_send_draft,

@@ -166,6 +166,12 @@ class TextInput(BaseModel):
     type: str | None = None  # "SINGLE_LINE" or "MULTIPLE_LINE"
     value: str | None = None
     hint_text: str | None = Field(default=None, alias="hintText")
+    # autoCompleteAction fires per-keystroke (after Google's debounce) and
+    # must return a SuggestionsResponse from the URL in `function`.
+    auto_complete_action: OnClickAction | None = Field(default=None, alias="autoCompleteAction")
+    # onChangeAction fires when the field's value changes (including after
+    # an autocomplete selection). Used to update peer fields atomically.
+    on_change_action: OnClickAction | None = Field(default=None, alias="onChangeAction")
 
 
 class TextInputWidget(BaseModel):
@@ -265,3 +271,32 @@ class CardResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
     action: ActionResponse
+
+
+# ---------------------------------------------------------------------------
+# Autocomplete (TextInput.autoCompleteAction)
+# ---------------------------------------------------------------------------
+
+
+class SuggestionItem(BaseModel):
+    """A single autocomplete entry shown as plain text under the input."""
+
+    text: str
+
+
+class Suggestions(BaseModel):
+    items: list[SuggestionItem]
+
+
+class SuggestionsActionResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    suggestions: Suggestions
+
+
+class SuggestionsResponse(BaseModel):
+    """Top-level response Google expects from an autoCompleteAction callback."""
+
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    action: SuggestionsActionResponse

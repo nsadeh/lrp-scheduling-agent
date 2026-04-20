@@ -27,6 +27,7 @@ from api.scheduling.cards import (
     _button,
     _buttons,
     _decorated,
+    _directory_autocomplete_action,
     _divider,
     _text,
     _update_card,
@@ -195,6 +196,11 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
             )
         )
     )
+    # Recruiter fields get directory autocomplete but no onChangeAction —
+    # this inline form lives inside the overview card and can't be
+    # re-rendered in isolation. The create_loop handler defensively parses
+    # "Name <email>" out of whichever field carries it at submit time.
+    recruiter_autocomplete = _directory_autocomplete_action()
     widgets.append(
         TextInputWidget(
             text_input=TextInput(
@@ -202,6 +208,8 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
                 label="Recruiter Name",
                 type="SINGLE_LINE",
                 value=_val("recruiter_name"),
+                hint_text="Type to search your Workspace directory",
+                auto_complete_action=recruiter_autocomplete,
             )
         )
     )
@@ -212,6 +220,7 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
                 label="Recruiter Email",
                 type="SINGLE_LINE",
                 value=_val("recruiter_email"),
+                auto_complete_action=recruiter_autocomplete,
             )
         )
     )

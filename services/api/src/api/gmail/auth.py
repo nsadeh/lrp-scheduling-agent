@@ -15,7 +15,15 @@ if TYPE_CHECKING:
 
     from psycopg_pool import AsyncConnectionPool
 
-_DEFAULT_SCOPES = "https://www.googleapis.com/auth/gmail.modify"
+# gmail.modify: read messages, send email on coordinator's behalf.
+# directory.readonly: People API access for the recruiter directory
+# autocomplete in the create-loop form (Workspace member typeahead).
+_DEFAULT_SCOPES = ",".join(
+    [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/directory.readonly",
+    ]
+)
 SCOPES = os.environ.get("REQUIRED_SCOPES", _DEFAULT_SCOPES).split(",")
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
