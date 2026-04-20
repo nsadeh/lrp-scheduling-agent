@@ -320,23 +320,41 @@ class TestCreateLoopFormAutocomplete:
 # ---------------------------------------------------------------------------
 
 
+def _autocomplete_event(
+    field: str = "recruiter_name", value: str = "sa", via_form_inputs: bool = True
+) -> dict:
+    """Build the POST body Google actually sends for an autoCompleteAction.
+
+    The currently-typed text lives under
+    ``commonEventObject.formInputs[<name>].stringInputs.value[0]`` in HTTP
+    add-ons (same path as any field value). Our endpoint also accepts a
+    legacy ``parameters["query"]`` fallback; set via_form_inputs=False to
+    exercise that path.
+    """
+    common: dict = {"hostApp": "GMAIL", "platform": "WEB"}
+    if via_form_inputs:
+        common["formInputs"] = {field: {"stringInputs": {"value": [value]}}}
+    else:
+        common["parameters"] = {"query": value}
+    return {
+        "commonEventObject": common,
+        "authorizationEventObject": {"userIdToken": _FAKE_USER_ID_TOKEN},
+    }
+
+
 class TestDirectorySearchEndpoint:
     async def test_empty_query_returns_no_suggestions(self, client: AsyncClient):
-        event = {
-            "commonEventObject": {
-                "hostApp": "GMAIL",
-                "platform": "WEB",
-                "parameters": {"query": ""},
-            },
-            "authorizationEventObject": {"userIdToken": _FAKE_USER_ID_TOKEN},
-        }
-        resp = await client.post("/addon/directory/search", json=event)
+        resp = await client.post(
+            "/addon/directory/search",
+            json=_autocomplete_event(value=""),
+        )
         assert resp.status_code == 200
-        data = resp.json()
-        assert data == {"action": {"suggestions": {"items": []}}}
+        assert resp.json() == {"action": {"suggestions": {"items": []}}}
 
-    async def test_returns_formatted_suggestions(self, client: AsyncClient, mock_gmail):
-        # Patch the People API search call to avoid real HTTP
+    async def test_returns_formatted_suggestions_from_form_inputs(
+        self, client: AsyncClient, mock_gmail
+    ):
+        """Primary path — Google sends the typed text via formInputs."""
         with patch(
             "api.addon.routes.search_directory",
             new=AsyncMock(
@@ -356,22 +374,39 @@ class TestDirectorySearchEndpoint:
                 ]
             ),
         ):
-            event = {
-                "commonEventObject": {
-                    "hostApp": "GMAIL",
-                    "platform": "WEB",
-                    "parameters": {"query": "sa"},
-                },
-                "authorizationEventObject": {"userIdToken": _FAKE_USER_ID_TOKEN},
-            }
-            resp = await client.post("/addon/directory/search", json=event)
+            resp = await client.post(
+                "/addon/directory/search",
+                json=_autocomplete_event(field="recruiter_name", value="sa"),
+            )
 
         assert resp.status_code == 200
-        data = resp.json()
-        items = data["action"]["suggestions"]["items"]
-        texts = [i["text"] for i in items]
+        texts = [i["text"] for i in resp.json()["action"]["suggestions"]["items"]]
         assert "Sarah Chen <sarah@lrp.com>" in texts
         assert "Sam Ray <sam@lrp.com>" in texts
+
+    async def test_reads_query_from_email_field_too(self, client: AsyncClient, mock_gmail):
+        """Coordinator might be typing in the email field instead — same handler
+        should accept either recruiter field as the query source."""
+        search = AsyncMock(return_value=[])
+        with patch("api.addon.routes.search_directory", new=search):
+            await client.post(
+                "/addon/directory/search",
+                json=_autocomplete_event(field="recruiter_email", value="fi"),
+            )
+        search.assert_awaited_once()
+        # Second positional arg to search_directory is the query string
+        assert search.await_args.args[1] == "fi"
+
+    async def test_parameters_query_is_fallback(self, client: AsyncClient, mock_gmail):
+        """Legacy fallback: if Google ever sends via parameters (or a test
+        exercises that path), still extract the query correctly."""
+        search = AsyncMock(return_value=[])
+        with patch("api.addon.routes.search_directory", new=search):
+            await client.post(
+                "/addon/directory/search",
+                json=_autocomplete_event(value="sa", via_form_inputs=False),
+            )
+        assert search.await_args.args[1] == "sa"
 
     async def test_returns_empty_when_people_api_fails(self, client: AsyncClient, mock_gmail):
         """Endpoint must degrade to empty, not 500 — autocomplete can't show errors."""
@@ -379,15 +414,10 @@ class TestDirectorySearchEndpoint:
             "api.addon.routes.search_directory",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ):
-            event = {
-                "commonEventObject": {
-                    "hostApp": "GMAIL",
-                    "platform": "WEB",
-                    "parameters": {"query": "sa"},
-                },
-                "authorizationEventObject": {"userIdToken": _FAKE_USER_ID_TOKEN},
-            }
-            resp = await client.post("/addon/directory/search", json=event)
+            resp = await client.post(
+                "/addon/directory/search",
+                json=_autocomplete_event(value="sa"),
+            )
         assert resp.status_code == 200
         assert resp.json() == {"action": {"suggestions": {"items": []}}}
 
@@ -399,15 +429,10 @@ class TestDirectorySearchEndpoint:
         mock_gmail._token_store.load_credentials = AsyncMock(
             side_effect=GmailScopeError("missing", missing_scopes=["directory.readonly"])
         )
-        event = {
-            "commonEventObject": {
-                "hostApp": "GMAIL",
-                "platform": "WEB",
-                "parameters": {"query": "sa"},
-            },
-            "authorizationEventObject": {"userIdToken": _FAKE_USER_ID_TOKEN},
-        }
-        resp = await client.post("/addon/directory/search", json=event)
+        resp = await client.post(
+            "/addon/directory/search",
+            json=_autocomplete_event(value="sa"),
+        )
         assert resp.status_code == 200
         assert resp.json() == {"action": {"suggestions": {"items": []}}}
 

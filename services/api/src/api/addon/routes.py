@@ -170,6 +170,31 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
     return body.common_event_object.parameters.get(key)
 
 
+# Fields that can fire the recruiter autocomplete — either side of the
+# Name / Email pair, whichever the coordinator is typing into.
+_AUTOCOMPLETE_RECRUITER_FIELDS = ("recruiter_name", "recruiter_email")
+
+
+def _extract_autocomplete_query(body: AddonRequest) -> str:
+    """Pull the currently-typed text out of an autoCompleteAction request.
+
+    HTTP-based add-ons put the triggering field's partial value in
+    ``commonEventObject.formInputs[<name>]``, same path as any other
+    field value. ``parameters["query"]`` is also probed as a belt-and-
+    suspenders fallback in case Google's behavior shifts — the cost is
+    zero and it's free insurance for the "we never verified this
+    empirically" risk flagged in the RFC's Open Questions.
+    """
+    # Primary: whichever recruiter field has non-empty text.
+    for field in _AUTOCOMPLETE_RECRUITER_FIELDS:
+        val = _get_form_value(body, field)
+        if val and val.strip():
+            return val.strip()
+    # Fallback: static parameter form (what our tests historically used).
+    param_q = _get_param(body, "query") or ""
+    return param_q.strip()
+
+
 _GMAIL_CONTEXTUAL_ID_RE = re.compile(r"^(?:thread-f|msg-f):(\d+)$")
 
 # Format used in autocomplete dropdown items and parsed back out on selection.
@@ -393,14 +418,18 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
 async def addon_directory_search(body: AddonRequest, request: Request) -> dict:
     """Autocomplete callback for recruiter fields in the create-loop form.
 
-    Wired from ``TextInput.autoCompleteAction`` — Google POSTs here per
-    keystroke (after its own debounce) with the current input value as the
-    ``query`` parameter. Returns a flat ``SuggestionsResponse`` with
+    Wired from ``TextInput.autoCompleteAction``. Google POSTs here after
+    its own debounce. The currently-typed text lives in
+    ``commonEventObject.formInputs[<inputName>]`` — the same path used by
+    every other field value in HTTP add-ons — because autoCompleteAction
+    doesn't populate a separate ``query`` parameter. We accept input from
+    either recruiter field (name or email), whichever the coordinator is
+    typing into. Returns a flat ``SuggestionsResponse`` with
     ``"Name <email>"`` strings drawn from the calling coordinator's
     Workspace directory via the People API.
     """
     email = _get_user_email(body)
-    query = (_get_param(body, "query") or "").strip()
+    query = _extract_autocomplete_query(body)
     if not query:
         return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
 
@@ -411,11 +440,18 @@ async def addon_directory_search(body: AddonRequest, request: Request) -> dict:
 
     try:
         creds = await gmail._token_store.load_credentials(email)
-    except GmailScopeError:
-        # Suggestions can't surface the auth card; the show_create_form path
-        # below pre-checks scopes so this branch is only hit if a coordinator
-        # opens the form before the wrapper noticed missing scopes (race).
-        logger.info("directory/search: scope error for %s, returning empty", email)
+    except GmailScopeError as exc:
+        # Suggestions can't surface the auth card. show_create_form
+        # pre-checks scopes, so hitting this branch means either a race
+        # (coordinator already had the form open when the scope list
+        # grew) or the pre-check was bypassed. Log at WARNING so this
+        # doesn't silently swallow real bugs like "coordinator's token
+        # actually lacks directory.readonly."
+        logger.warning(
+            "directory/search: scope error for %s (missing=%s) — returning empty",
+            email,
+            getattr(exc, "missing_scopes", None),
+        )
         return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
     except Exception:
         logger.exception("directory/search: failed to load creds for %s", email)
