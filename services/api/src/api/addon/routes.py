@@ -580,8 +580,14 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     if edited_body is not None and edited_body != draft.body:
         await draft_svc.update_draft_body(draft.id, send_body)
 
-    # Fetch the thread once — needed for threading headers and, on forwards, for
-    # quoting the prior history into the body.
+    # Fetch the thread once, up-front. Two downstream blocks consume it:
+    #   (1) the RFC 2822 threading headers immediately below, and
+    #   (2) build_forwarded_body() for forwards (issue #36).
+    # Keeping the fetch separate from its consumers also lets the error policy
+    # branch on is_forward: replies soft-fallback (warn + send with no
+    # threading headers — the recipient is already on the thread, so Gmail
+    # shows them context regardless); forwards raise, because a forward
+    # without quoted history is exactly the bug we're fixing.
     thread = None
     gmail = getattr(request.app.state, "gmail", None) if request else None
     if gmail and draft.gmail_thread_id:
@@ -589,9 +595,6 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
             thread = await gmail.get_thread(email, draft.gmail_thread_id)
         except Exception:
             if draft.is_forward:
-                # A forward without quoted history leaves the new recipient with
-                # no context (issue #36). Fail loudly rather than silently send
-                # a bare note.
                 logger.exception(
                     "Failed to fetch thread %s for forward — aborting send",
                     draft.gmail_thread_id,
@@ -603,9 +606,15 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
                 exc_info=True,
             )
 
-    # Resolve threading headers so the recipient sees this in the same thread.
-    # In-Reply-To + References are RFC 2822 headers that tell the recipient's
-    # email client to display this as a reply (or forward) in the thread.
+    # RFC 2822 threading headers so the recipient's Gmail stitches this message
+    # into the existing conversation rather than showing it as a new thread.
+    #   In-Reply-To: the Message-ID of the message we're directly replying to
+    #     (i.e. the last one in the thread).
+    #   References: a space-separated chain of every prior Message-ID in the
+    #     thread — lets Gmail place this message at the right node in the
+    #     thread tree even if some intermediate messages went missing.
+    # Without these, Gmail renders the outgoing message as a standalone
+    # conversation in the recipient's inbox.
     in_reply_to = None
     references = None
     if thread and thread.messages:
