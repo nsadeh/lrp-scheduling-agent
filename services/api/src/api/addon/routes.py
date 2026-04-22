@@ -140,6 +140,13 @@ def _get_user_email(body: AddonRequest) -> str:
                 if email:
                     logger.info("Got user email from userinfo endpoint: %s", email)
                     return email
+                logger.warning("userinfo 200 but no email in body: %s", resp.text[:500])
+            else:
+                logger.warning(
+                    "userinfo rejected userOAuthToken: status=%s body=%s",
+                    resp.status_code,
+                    resp.text[:500],
+                )
         except Exception:
             logger.warning("Failed to fetch userinfo", exc_info=True)
 
@@ -296,10 +303,11 @@ async def addon_homepage(body: AddonRequest, request: Request) -> dict:
         has_id = body.authorization_event_object.user_id_token is not None
         has_oauth = body.authorization_event_object.user_oauth_token is not None
         logger.info(
-            "Homepage auth keys: %s, userIdToken: %s, userOAuthToken: %s",
+            "Homepage auth keys: %s, userIdToken: %s, userOAuthToken: %s, authorizedScopes: %s",
             list(auth_dump.keys()),
             has_id,
             has_oauth,
+            auth_dump.get("authorizedScopes") or auth_dump.get("authorized_scopes"),
         )
     else:
         logger.warning("Homepage request has NO authorizationEventObject")
