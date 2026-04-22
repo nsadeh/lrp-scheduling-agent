@@ -69,7 +69,12 @@ INTERNAL_EMAIL_DOMAINS
 
 Every app service (api + worker) in each env has the full required env-var set. Shared values (`DATABASE_URL`, `REDIS_URL`) use Railway reference variables so rotating a password in Postgres/Redis propagates automatically.
 
-Both the api and the worker build from the same [services/api/Dockerfile](../services/api/Dockerfile). The worker service overrides Railway's start command to `uv run python -m arq api.gmail.workers.WorkerSettings` and has its healthcheck disabled (arq has no HTTP endpoint).
+Both the api and the worker build from the same [services/api/Dockerfile](../services/api/Dockerfile). They are differentiated by Railway's config-as-code file:
+
+- api services use [services/api/railway.toml](../services/api/railway.toml) (default) — runs the Dockerfile's `CMD` (migrations + uvicorn), healthcheck on `/health`.
+- worker services use [services/api/railway.worker.toml](../services/api/railway.worker.toml) — overrides the start command to `uv run python -m arq api.gmail.workers.WorkerSettings`, no healthcheck (arq serves no HTTP, so the `/health` probe would restart-loop the worker).
+
+> **Important — Railway config precedence**: values in the config-as-code file **override** the service's UI settings. Trying to clear the healthcheck in the UI for a worker pointed at `railway.toml` silently reverts on every deploy. The worker service must be pointed at `railway.worker.toml` via **Service Settings → Config-as-code File Path**.
 
 ---
 
@@ -140,16 +145,17 @@ Values above come from the developer's current local `.env` — confirm they're 
 
 ### S3. Create the staging `staging-arq-worker` service
 
-Fastest path via dashboard: **New → Empty Service**, set these in the service settings:
+Via dashboard: **New → Empty Service**, then in **Service Settings**:
 
 - **Name**: `staging-arq-worker`
 - **Root directory**: `services/api` (same as the api service; source is uploaded per deploy by `railway up`, no GitHub connection required)
-- **Dockerfile path**: `Dockerfile` (inherits from [services/api/railway.toml](../services/api/railway.toml))
-- **Start command**: `uv run python -m arq api.gmail.workers.WorkerSettings`
-- **Healthcheck path**: **blank** — the default `/health` from `railway.toml` would put the worker in a crash-loop since arq serves no HTTP.
-- **Restart policy**: ON_FAILURE, max retries 3
+- **Config-as-code File Path**: `railway.worker.toml`
 
-CLI equivalent for the service creation (exact flags vary by `railway` version — dashboard is more reliable for first-time service creation):
+That config file (checked into [services/api/railway.worker.toml](../services/api/railway.worker.toml)) sets the Dockerfile path, the arq start command, and the restart policy — and critically does **not** set `healthcheckPath`, so no HTTP probe runs.
+
+> **Do not** set the start command or clear the healthcheck in the UI. Those fields will be overwritten by the config file on every deploy; if they mismatch, the config file wins and the UI silently lies about current state. Put all worker config in `railway.worker.toml`.
+
+CLI equivalent for the service creation itself (exact flags vary by CLI version — dashboard is more reliable for first-time service creation):
 
 ```bash
 railway add  # → select "empty service", name it "staging-arq-worker"
@@ -239,7 +245,9 @@ Generate a **new** `GMAIL_TOKEN_ENCRYPTION_KEY` for prod if the current one was 
 
 ### P4. Create `arq-worker` service
 
-Same as S3 but name it `arq-worker`. (Yes, the prod worker is the unprefixed name and the staging worker is `staging-arq-worker` — confusing, but [scripts/deploy.sh](../scripts/deploy.sh) hard-codes both.)
+Same as S3 but name it `arq-worker`. Don't forget to set the **Config-as-code File Path** to `railway.worker.toml` — without it, the worker will use the default `railway.toml` and crash-loop on the `/health` probe.
+
+(Yes, the prod worker is the unprefixed name and the staging worker is `staging-arq-worker` — confusing, but [scripts/deploy.sh](../scripts/deploy.sh) hard-codes both.)
 
 ### P5. Copy vars to `arq-worker`
 
