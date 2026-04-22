@@ -1,0 +1,16 @@
+# Railway config for the arq worker services (staging-arq-worker, arq-worker).
+# Shares the api's Dockerfile but runs arq instead of uvicorn and has no
+# healthcheck — arq serves no HTTP, so the api's /health probe would
+# restart-loop the worker.
+#
+# This file is only used when a Railway service is explicitly configured to
+# read from `railway.worker.toml` (Service Settings → Config-as-code File Path).
+# The default `railway.toml` next to this file is used by the api services.
+
+[build]
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "uv run python -m arq api.gmail.workers.WorkerSettings"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

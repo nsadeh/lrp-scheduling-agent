@@ -43,20 +43,12 @@ In a call, I showed them the Cursor "tab" button that is a gag gift for develope
 - RFCs go in rfcs/ — use the rfc-writer skill
 - Reference docs go in references/
 - Database IDs use prefixed NanoIDs (e.g., `thr_` for threads, `cli_` for clients, `crd_` for coordinators)
+- **Railway changes must update the deployment guide.** Whenever a PR introduces a new Railway service, a new required env var, a provisioning step, or any other action that a human has to take in the Railway dashboard or CLI to ship the change, update [references/railway-deployment.md](references/railway-deployment.md) in the same PR. The guide is the single source of truth for what prod/staging need to look like — if it's not in there, it's not going to get done.
+- **Env var additions must update the env var reference.** When adding or removing an `os.environ.get(...)` call, update [references/env-vars.md](references/env-vars.md) to match. Keep entries grounded in `file:line` citations so the doc ages gracefully.
 
 ## Environment Variables
 
-- `DATABASE_URL` — Postgres connection string
-- `REDIS_URL` — Redis connection string
-- `GOOGLE_SERVICE_ACCOUNT_KEY` — Service account JSON for Gmail/Calendar domain-wide delegation
-- `ENCORE_API_URL` — Cluein data connector endpoint for Encore
-- `ENCORE_API_KEY` — Cluein API key
-- `ANTHROPIC_API_KEY` — Claude API key for agent reasoning
-- `PUBSUB_TOPIC` — Google Cloud Pub/Sub topic for Gmail push notifications (e.g., `projects/my-project/topics/gmail-push`)
-- `PUBSUB_WEBHOOK_AUDIENCE` — Expected OIDC audience for verifying Pub/Sub push tokens (must be set in production)
-- `PUBSUB_SERVICE_ACCOUNT` — Email of the service account that signs Pub/Sub push messages (default: `gmail-api-push@system.gserviceaccount.com`)
-- `GMAIL_TOKEN_ENCRYPTION_KEY` — Fernet key for encrypting stored Gmail OAuth refresh tokens
-- `REQUIRED_SCOPES` — Comma-separated list of Gmail OAuth scopes required for coordinator tokens
+See [references/env-vars.md](references/env-vars.md) for the full inventory — every var read by the codebase, with file:line citations, defaults, and current dev status.
 
 ## Metrics (Business Impact)
 
