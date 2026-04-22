@@ -40,11 +40,17 @@ if [[ "$ENV" == "production" ]]; then
   WORKER_SERVICE="arq-worker"
   DEPLOYMENT_FILE="services/api/deployment.prod.json"
   DEPLOYMENT_NAME="lrp-scheduling-prod"
+  # GCP project that hosts the Workspace Add-on deployment for prod.
+  # This is DIFFERENT from the GCP project in `gcloud config get-value project`
+  # — do not rely on the ambient default or the manifest silently updates a
+  # phantom deployment in the wrong project (real incident, 2026-04-22).
+  GCP_PROJECT="ai-agents-492712"
 else
   API_SERVICE="api"
   WORKER_SERVICE="staging-arq-worker"
   DEPLOYMENT_FILE="services/api/deployment.staging.json"
   DEPLOYMENT_NAME="lrp-scheduling-staging"
+  GCP_PROJECT="ai-agents-dev-492713"
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -132,10 +138,13 @@ if [[ "$FILTER" == "all" || "$FILTER" == "api" ]]; then
   echo "==> Updating GCP add-on deployment ($DEPLOYMENT_NAME)..."
   cd "$REPO_ROOT"
   if ! gcloud workspace-add-ons deployments replace "$DEPLOYMENT_NAME" \
+    --project="$GCP_PROJECT" \
     --deployment-file="$DEPLOYMENT_FILE"; then
     echo ""
     echo "ERROR: Railway deployed but GCP add-on update failed. Manual intervention required:"
-    echo "  gcloud workspace-add-ons deployments replace $DEPLOYMENT_NAME --deployment-file=$DEPLOYMENT_FILE"
+    echo "  gcloud workspace-add-ons deployments replace $DEPLOYMENT_NAME \\"
+    echo "    --project=$GCP_PROJECT \\"
+    echo "    --deployment-file=$DEPLOYMENT_FILE"
     exit 1
   fi
 fi
