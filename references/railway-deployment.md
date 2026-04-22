@@ -62,12 +62,14 @@ INTERNAL_EMAIL_DOMAINS
 
 ## Goal state
 
-| Env          | Services                                       |
-| ------------ | ---------------------------------------------- |
-| `production` | `prod-api`, `prod-worker`, `Postgres`, `Redis` |
-| `staging`    | `api`, `worker`, `Postgres`, `Redis`           |
+| Env          | Services                                              |
+| ------------ | ----------------------------------------------------- |
+| `production` | `prod-api`, `arq-worker`, `Postgres`, `Redis`         |
+| `staging`    | `api`, `staging-arq-worker`, `Postgres`, `Redis`      |
 
 Every app service (api + worker) in each env has the full required env-var set. Shared values (`DATABASE_URL`, `REDIS_URL`) use Railway reference variables so rotating a password in Postgres/Redis propagates automatically.
+
+Both the api and the worker build from the same [services/api/Dockerfile](../services/api/Dockerfile). The worker service overrides Railway's start command to `uv run python -m arq api.gmail.workers.WorkerSettings` and has its healthcheck disabled (arq has no HTTP endpoint).
 
 ---
 
@@ -136,21 +138,21 @@ Values above come from the developer's current local `.env` — confirm they're 
 
 > **Check**: `railway variables --kv` should list all of the above. The service will auto-redeploy; `railway logs` should show `LangFuse client initialized`, `Redis pool connected for push pipeline`, `ClassifierHook active`.
 
-### S3. Create the staging `worker` service
+### S3. Create the staging `staging-arq-worker` service
 
-Fastest path via dashboard: **New → GitHub Repo**, pick the same repo, set these in the service settings:
+Fastest path via dashboard: **New → Empty Service**, set these in the service settings:
 
-- **Name**: `worker`
-- **Root directory**: `services/api` (same as the api service)
-- **Dockerfile path**: `Dockerfile` (inherits from `railway.toml`, no change needed)
+- **Name**: `staging-arq-worker`
+- **Root directory**: `services/api` (same as the api service; source is uploaded per deploy by `railway up`, no GitHub connection required)
+- **Dockerfile path**: `Dockerfile` (inherits from [services/api/railway.toml](../services/api/railway.toml))
 - **Start command**: `uv run python -m arq api.gmail.workers.WorkerSettings`
-- **Healthcheck**: disabled (arq has no HTTP endpoint)
+- **Healthcheck path**: **blank** — the default `/health` from `railway.toml` would put the worker in a crash-loop since arq serves no HTTP.
 - **Restart policy**: ON_FAILURE, max retries 3
 
-CLI equivalent (exact flags vary by `railway` version — dashboard is more reliable for first-time service creation):
+CLI equivalent for the service creation (exact flags vary by `railway` version — dashboard is more reliable for first-time service creation):
 
 ```bash
-railway add  # → select "empty service", name it "worker"
+railway add  # → select "empty service", name it "staging-arq-worker"
 ```
 
 ### S4. Copy all app env vars to the worker
@@ -181,10 +183,20 @@ SENTRY_DSN                (optional, same as api)
 INTERNAL_EMAIL_DOMAINS    (optional, same as api)
 ```
 
-### S5. Verify staging end-to-end
+### S5. Deploy and verify staging end-to-end
+
+First-time and subsequent deploys both go through [scripts/deploy.sh](../scripts/deploy.sh), which deploys api then worker in order and waits for each to reach `SUCCESS` before moving on:
 
 ```bash
-railway logs --service worker
+./scripts/deploy.sh staging                # both api + worker
+./scripts/deploy.sh staging worker         # worker only
+./scripts/deploy.sh staging api            # api only
+```
+
+Then watch logs:
+
+```bash
+railway logs -s staging-arq-worker -e staging
 ```
 
 Expect on startup:
@@ -225,17 +237,21 @@ Same pattern as S2 but with production values:
 
 Generate a **new** `GMAIL_TOKEN_ENCRYPTION_KEY` for prod if the current one was shared with staging. If they've been sharing the same key, any re-key rotates every stored coordinator token — plan the cutover.
 
-### P4. Create `prod-worker` service
+### P4. Create `arq-worker` service
 
-Same as S3 but name it `prod-worker` to match the `prod-api` naming convention.
+Same as S3 but name it `arq-worker`. (Yes, the prod worker is the unprefixed name and the staging worker is `staging-arq-worker` — confusing, but [scripts/deploy.sh](../scripts/deploy.sh) hard-codes both.)
 
-### P5. Copy vars to `prod-worker`
+### P5. Copy vars to `arq-worker`
 
-Same as S4, minus `PUBSUB_WEBHOOK_AUDIENCE`.
+Same as S4, minus `PUBSUB_WEBHOOK_AUDIENCE`. Remember `LANGFUSE_ENVIRONMENT=production` on this service too.
 
-### P6. Verify production end-to-end
+### P6. Deploy and verify production end-to-end
 
-Same drill as S5, then watch it for 24h. The `renew_gmail_watches` cron fires 4×/day (hour 0/6/12/18) — you want to see at least one run succeed before declaring victory.
+```bash
+./scripts/deploy.sh production
+```
+
+Watch it for 24h. The `renew_gmail_watches` cron fires 4×/day (hour 0/6/12/18) — you want to see at least one run succeed before declaring victory.
 
 ---
 
@@ -250,7 +266,8 @@ If the worker misbehaves:
 
 ## Ongoing operations
 
+- **Regular deploys**: `./scripts/deploy.sh staging` or `./scripts/deploy.sh production` — deploys api then worker in order and refreshes the GCP add-on descriptor. Accepts `api` or `worker` as a second arg to deploy just one side.
 - **Adding a new env var**: add it to both services in both environments. Easy to forget the worker when you're debugging the api.
-- **Rotating a secret** (API key, encryption key): change it on api and worker simultaneously. Redeploy both.
+- **Rotating a secret** (API key, encryption key): change it on api and worker simultaneously. Redeploy both with `./scripts/deploy.sh <env>`.
 - **Scaling**: api is stateless; add replicas via Railway's replica setting. Worker should stay at 1 replica unless throughput becomes a bottleneck — multiple arq workers off one Redis queue is supported but not tested in this app's code paths.
 - **Monitoring the worker**: no health endpoint means no HTTP probe. Rely on Sentry (worker tags all events `service=worker`) and the `poll_gmail_history` heartbeat every 60s in logs.
