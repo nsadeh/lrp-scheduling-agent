@@ -248,8 +248,12 @@ Only the new manual-path extractor gets `CreateLoopExtraction`; the classifier k
 
 ## Risks and Open Questions
 
-- **R1: Latency overrun.** Haiku + short prompt should be well under 2s, but p99 excursions happen. **Mitigation:** set a hard 5s timeout on the extractor call (LiteLLM-level). If it exceeds, log and fall back to deterministic prefill — the coordinator sees the same form they see today, not an error. The spinner returns control in ≤5s no matter what.
-- **R2: Hallucinated recruiter fields.** The prompt explicitly instructs "leave recruiter fields null unless clearly present," but models sometimes fabricate. **Mitigation:** add an eval set of ~15 threads (mix of recruiter-visible and recruiter-absent) and track recruiter-field false-positive rate specifically. Ship with a low threshold; tighten the prompt if fabrication shows up.
+- **R1: Latency overrun.** Haiku + short prompt should be well under 2s, but p99 excursions happen. **Mitigation:** set a hard 10s timeout on the extractor call (LiteLLM-level). If it exceeds, log and fall back to deterministic prefill — the coordinator sees the same form they see today, not an error. The spinner returns control in ≤10s no matter what.
+- **R2: Hallucinated recruiter fields (and other extraction errors).** The prompt explicitly instructs "leave recruiter fields null unless clearly present," but models sometimes fabricate. Candidate name can get mis-attributed when multiple people are named in the thread; client company can get inferred from an email signature block rather than the actual employer. **Mitigation:** ship a **supervised eval** for this endpoint as a first-class deliverable of PR 2, not a follow-up. Concretely:
+    - **Dataset.** ~30 labeled Gmail threads drawn from staging/prod with the coordinators' help — a mix of (a) recruiter visibly CC'd, (b) recruiter absent, (c) multi-candidate threads, (d) forwarded threads with nested signatures, (e) threads where the client company is ambiguous. Each thread is labeled with the ground-truth `CreateLoopExtraction` (per-field expected value, including explicit nulls). Stored in `services/api/tests/evals/create_loop_extraction/` as `{thread_id}.json` alongside the raw formatted thread.
+    - **Graders.** Per-field exact-match for `*_email`. Per-field normalized string match (lowercase, whitespace-collapsed, diacritic-folded) for names/company. **Null-agreement** is a first-class metric: "the model correctly left this field null when the thread doesn't identify it." Recruiter fields get a dedicated **false-positive rate** metric (model-filled but truth was null) since fabricating a recruiter is the most damaging failure mode.
+    - **Runner.** Uses the existing LangFuse experiment harness the classifier eval uses. Runs on every prompt version bump and nightly against the pinned prompt in staging. Results persisted in LangFuse so prompt-change PRs can cite the diff.
+    - **Ship criteria for PR 3.** Minimum bar before we wire the extractor into the live handler: ≥ 0.85 null-agreement on recruiter fields, ≥ 0.90 exact-match on `client_email` and `cm_email`, ≥ 0.80 normalized match on `candidate_name`. Below any threshold we iterate the prompt rather than ship.
 - **R3: Existing-contact merge order.** Current behavior overwrites classifier-provided `client_name` with the stored contact's name when an email match exists (see [routes.py:587](services/api/src/api/addon/routes.py:587)). This must also apply to the new extractor output — tested explicitly.
 - **R4: Feature-flag or no?** Per project conventions (see user memory), **no feature flag**. The fallback path is the existing deterministic prefill — if extraction goes wrong, coordinators see today's behavior, not a broken flow. That's a safe enough rollout posture.
 - **OQ1: Should `first_stage_name` extraction even be attempted?** The classifier prompt doesn't extract this today; the form defaults to `"Round 1"`. Email threads rarely state the stage explicitly. Recommendation: leave it out of v1 — keep the default — and revisit after we have signal on the other fields.
@@ -261,10 +265,10 @@ Only the new manual-path extractor gets `CreateLoopExtraction`; the classifier k
    - Add `CreateLoopExtraction` to `classifier/models.py`.
    - Update classifier prompt + response parser to populate `action_data` with the typed model (keep writing `extracted_entities` temporarily).
    - Tests: classifier integration tests assert `action_data` shape.
-2. **PR 2 — Extractor endpoint + LangFuse prompt.**
+2. **PR 2 — Extractor endpoint + LangFuse prompt + supervised eval.**
    - Add `create_loop_extractor.py` + reference prompt copy in `prompts.py`.
    - Publish `scheduling-create-loop-extractor-v1` to LangFuse with `production` label.
-   - Eval dataset of ~15 hand-labeled threads; smoke run in LangFuse.
+   - **Supervised eval shipped in this PR** (see R2): labeled dataset under `services/api/tests/evals/create_loop_extraction/`, per-field graders, LangFuse experiment wiring. This is a blocker for PR 3 — the eval numbers determine whether the extractor is good enough to turn on.
    - No user-visible change yet — endpoint is defined but not called.
 3. **PR 3 — Wire into `show_create_form` + loading state.**
    - Extend `OnClickAction` with `load_indicator`.
