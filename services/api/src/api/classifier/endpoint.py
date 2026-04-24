@@ -31,6 +31,8 @@ class ClassifyEmailInput(BaseModel):
     active_loops_summary: str
     events: str
     direction: str
+    coordinator: str
+    date: str
 
 
 classify_email = llm_endpoint(

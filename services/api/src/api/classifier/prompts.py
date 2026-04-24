@@ -7,7 +7,8 @@ The prompts use LangFuse template variables ({{variable}}) that are filled by
 the formatters module at runtime.
 
 System-level variables: stage_states, transitions
-User-level variables: email, thread_history, loop_state, active_loops_summary, events, direction
+User-level variables: email, thread_history, loop_state, active_loops_summary, events,
+  direction, coordinator, date
 
 LangFuse prompt config should set:
   model: anthropic/claude-sonnet-4-6
@@ -82,6 +83,14 @@ Respond with a JSON object matching the ClassificationResult schema:
 
 USER_PROMPT = """\
 Classify the following email and suggest next actions.
+
+## Coordinator
+
+{{coordinator}}
+
+## Today's Date (UTC)
+
+{{date}}
 
 ## Current Email
 
