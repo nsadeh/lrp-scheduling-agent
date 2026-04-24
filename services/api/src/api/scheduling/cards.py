@@ -76,6 +76,7 @@ LRP_HEADER = CardHeader(
 def _action(
     action_name: str,
     required_widgets: list[str] | None = None,
+    load_indicator: str | None = None,
     **params: str,
 ) -> OnClick:
     """Build an OnClick that POSTs to our /addon/action endpoint.
@@ -90,6 +91,7 @@ def _action(
             function=_action_url,
             parameters=parameters,
             required_widgets=required_widgets,
+            load_indicator=load_indicator,
         )
     )
 
@@ -98,11 +100,17 @@ def _button(
     text: str,
     action_name: str,
     required_widgets: list[str] | None = None,
+    load_indicator: str | None = None,
     **params: str,
 ) -> Button:
     return Button(
         text=text,
-        on_click=_action(action_name, required_widgets=required_widgets, **params),
+        on_click=_action(
+            action_name,
+            required_widgets=required_widgets,
+            load_indicator=load_indicator,
+            **params,
+        ),
     )
 
 
@@ -199,7 +207,12 @@ def build_contextual_unlinked(gmail_thread_id: str, message_id: str | None = Non
                     widgets=[
                         _text("This thread is not linked to a scheduling loop."),
                         _buttons(
-                            _button("Create New Loop", "show_create_form", **btn_params),
+                            _button(
+                                "Create New Loop",
+                                "show_create_form",
+                                load_indicator="SPINNER",
+                                **btn_params,
+                            ),
                         ),
                     ]
                 ),
@@ -237,9 +250,21 @@ def build_create_loop_form(
     prefill_client_company: str | None = None,
     prefill_first_stage: str | None = None,
     error_message: str | None = None,
+    banner: str | None = None,
     suggestion_id: str | None = None,
 ) -> CardResponse:
     sections = []
+
+    # Informational banner (when the AI extractor contributed prefills).
+    # Rendered above any error banner so the coordinator sees context first.
+    if banner:
+        sections.append(
+            Section(
+                widgets=[
+                    TextParagraphWidget(text_paragraph=TextParagraph(text=f"<i>{banner}</i>")),
+                ]
+            )
+        )
 
     # Error banner (if any)
     if error_message:

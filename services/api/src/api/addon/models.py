@@ -120,6 +120,11 @@ class OnClickAction(BaseModel):
     parameters: list[ActionParameter] | None = None
     required_widgets: list[str] | None = Field(default=None, alias="requiredWidgets")
     all_widgets_are_required: bool | None = Field(default=None, alias="allWidgetsAreRequired")
+    # Card v2 load indicator — "SPINNER" dims the button and shows a spinning
+    # icon while the action's HTTP round-trip is in flight. Use for actions
+    # known to take >1s (e.g., LLM-backed handlers). "NONE" suppresses the
+    # default indicator.
+    load_indicator: str | None = Field(default=None, alias="loadIndicator")
 
 
 class OpenLink(BaseModel):

@@ -26,6 +26,7 @@ from api.classifier.formatters import (
 )
 from api.classifier.models import (
     ClassificationResult,
+    CreateLoopExtraction,
     SuggestedAction,
     SuggestionItem,
 )
@@ -49,6 +50,48 @@ LINK_THREAD_MIN_CONFIDENCE = 0.9
 
 # Rate limit: max classifications per coordinator per hour
 MAX_CLASSIFICATIONS_PER_HOUR = 100
+
+
+# Fields lifted from the loose extracted_entities dict into the typed
+# CreateLoopExtraction payload on action_data. Kept in sync with
+# classifier/models.py:CreateLoopExtraction.
+_CREATE_LOOP_FIELDS = (
+    "candidate_name",
+    "client_name",
+    "client_email",
+    "client_company",
+    "cm_name",
+    "cm_email",
+    "recruiter_name",
+    "recruiter_email",
+)
+
+
+def _coerce_create_loop_action_data(item: SuggestionItem) -> SuggestionItem:
+    """Parallel-write typed CreateLoopExtraction into action_data for CREATE_LOOP.
+
+    The classifier emits CREATE_LOOP fields into extracted_entities (loose
+    dict). Downstream readers (overview card, show_create_form handler)
+    prefer action_data over extracted_entities via _val(). This coercion
+    populates action_data with the same values as a typed
+    CreateLoopExtraction dump so both paths see a consistent shape.
+
+    We keep writing extracted_entities for one release as a compat shim
+    — per rfcs/rfc-infer-create-loop-fields.md §Rollout.
+    """
+    if item.action != SuggestedAction.CREATE_LOOP:
+        return item
+    if item.action_data:
+        # Classifier already produced typed data — trust it.
+        return item
+
+    values: dict[str, str | None] = {}
+    for field in _CREATE_LOOP_FIELDS:
+        raw = item.extracted_entities.get(field)
+        values[field] = raw if isinstance(raw, str) and raw else None
+
+    extraction = CreateLoopExtraction(**values)
+    return item.model_copy(update={"action_data": extraction.model_dump()})
 
 
 class ClassifierHook:
@@ -148,6 +191,7 @@ class ClassifierHook:
                 continue
 
             item = self._apply_guardrails(item, linked_loop)
+            item = _coerce_create_loop_action_data(item)
             suggestion = await self._suggestions.create_suggestion(
                 coordinator_email=event.coordinator_email,
                 gmail_message_id=msg.id,
