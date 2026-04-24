@@ -16,6 +16,8 @@ from fastapi import APIRouter, Request, Response
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
+from api.app_state import get_gmail, get_redis
+
 logger = logging.getLogger(__name__)
 
 webhook_router = APIRouter(tags=["gmail-push"])
@@ -97,7 +99,7 @@ async def gmail_webhook(request: Request) -> Response:
         return Response(status_code=200)
 
     # Check if we have credentials for this coordinator
-    gmail = getattr(request.app.state, "gmail", None)
+    gmail = get_gmail(request)
     if not gmail:
         logger.warning("GmailClient not initialized — cannot process webhook")
         return Response(status_code=200)
@@ -106,7 +108,7 @@ async def gmail_webhook(request: Request) -> Response:
         return Response(status_code=200)
 
     # Enqueue background job
-    redis = getattr(request.app.state, "redis", None)
+    redis = get_redis(request)
     if redis is None:
         logger.warning("redis not available — cannot enqueue push job")
         return Response(status_code=200)

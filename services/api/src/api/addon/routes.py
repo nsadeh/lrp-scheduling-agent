@@ -6,6 +6,7 @@ Token verification is applied at the router level via Depends().
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -24,7 +25,21 @@ from api.addon.models import (
     SuggestionsResponse,
     UpdateCard,
 )
-from api.classifier.models import SuggestedAction, SuggestionStatus
+from api.app_state import (
+    get_draft_service,
+    get_gmail,
+    get_langfuse,
+    get_llm,
+    get_overview_service,
+    get_redis,
+    get_scheduling,
+)
+from api.classifier.create_loop_extractor import (
+    ExtractCreateLoopInput,
+    extract_create_loop_fields,
+)
+from api.classifier.formatters import format_thread_history
+from api.classifier.models import CreateLoopExtraction, SuggestedAction, SuggestionStatus
 from api.gmail.exceptions import (
     GmailScopeError,
     GmailUserNotAuthorizedError,
@@ -50,12 +65,8 @@ addon_router = APIRouter(
 )
 
 
-def _get_scheduling(request: Request) -> LoopService:
-    return request.app.state.scheduling
-
-
 def _get_overview_service(request: Request) -> OverviewService:
-    svc = getattr(request.app.state, "overview_service", None)
+    svc = get_overview_service(request)
     if svc is None:
         # Lazily create from the db pool
         svc = OverviewService(request.app.state.db)
@@ -253,7 +264,7 @@ async def _check_gmail_auth(request: Request, user_email: str) -> CardResponse |
 
     Returns an auth-required card if not, or None if authorized.
     """
-    gmail = getattr(request.app.state, "gmail", None)
+    gmail = get_gmail(request)
     if not gmail:
         return None  # GmailClient not configured — skip auth check
     has = await gmail.has_token(user_email)
@@ -368,7 +379,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
         card = build_overview(groups, base_url=base_url)
     else:
         # No suggestions for this thread — check if it's linked to a loop
-        svc = _get_scheduling(request)
+        svc = get_scheduling(request)
         loop = await svc.find_loop_by_thread(thread_id)
         logger.info(
             "on-message: thread_id=%s, linked_loop=%s",
@@ -393,7 +404,7 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     """
     _ensure_action_url(request)
 
-    svc = _get_scheduling(request)
+    svc = get_scheduling(request)
     email = _get_user_email(body)
 
     # Read action name from parameters (set by our card builders)
@@ -441,7 +452,7 @@ async def addon_directory_search(body: AddonRequest, request: Request) -> dict:
     if not query:
         return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
 
-    gmail = getattr(request.app.state, "gmail", None)
+    gmail = get_gmail(request)
     if gmail is None:
         logger.warning("directory/search: no gmail client configured")
         return _empty_suggestions().model_dump(by_alias=True, exclude_none=True)
@@ -517,7 +528,7 @@ async def _fetch_recruiter_photo_url(
 
     if request is None:
         return None
-    gmail = getattr(request.app.state, "gmail", None)
+    gmail = get_gmail(request)
     if gmail is None:
         return None
     try:
@@ -538,6 +549,84 @@ async def _fetch_recruiter_photo_url(
     return match.photo_url if match else None
 
 
+# Hard cap on the create-loop extractor round-trip. Beyond this we give up
+# and render the form with deterministic prefill only (RFC R1).
+_EXTRACTOR_TIMEOUT_SECONDS = 10.0
+
+_CREATE_LOOP_BANNER = "Filled in from the thread — please review before creating."
+
+
+def _merge_prefill(
+    deterministic: CreateLoopExtraction, extracted: CreateLoopExtraction
+) -> CreateLoopExtraction:
+    """Overlay extractor values on top of deterministic prefill.
+
+    Deterministic values (from the current message's ``from_`` / ``cc[0]``)
+    win for any field they populate — the model should never overwrite a
+    signal we already have. Extractor fills the blanks, including fields
+    with no deterministic counterpart (candidate_name, client_company).
+    """
+    return CreateLoopExtraction(
+        candidate_name=deterministic.candidate_name or extracted.candidate_name,
+        client_name=deterministic.client_name or extracted.client_name,
+        client_email=deterministic.client_email or extracted.client_email,
+        client_company=deterministic.client_company or extracted.client_company,
+        cm_name=deterministic.cm_name or extracted.cm_name,
+        cm_email=deterministic.cm_email or extracted.cm_email,
+        recruiter_name=deterministic.recruiter_name or extracted.recruiter_name,
+        recruiter_email=deterministic.recruiter_email or extracted.recruiter_email,
+    )
+
+
+async def _run_create_loop_extractor(
+    *,
+    request: Request | None,
+    svc: LoopService,
+    email: str,
+    gmail_thread_id: str | None,
+    message_id: str | None,
+) -> CreateLoopExtraction | None:
+    """Invoke the typed LLM extractor with a hard timeout.
+
+    Returns None on timeout, error, or when prerequisites (request state,
+    Gmail client, thread id) are missing. Callers fall back to deterministic
+    prefill when this returns None.
+    """
+    if request is None or not gmail_thread_id or svc._gmail is None:
+        return None
+
+    llm = get_llm(request)
+    langfuse = get_langfuse(request)
+    if llm is None or langfuse is None:
+        return None
+
+    try:
+        thread = await svc._gmail.get_thread(email, gmail_thread_id)
+        # Pass "" for current_message_id so NO message is excluded — the
+        # extractor prompt has no separate {{email}} section, so it must see
+        # every message in the thread, including the one the coordinator is
+        # looking at (which is usually THE message we want to extract from).
+        formatted = format_thread_history(thread.messages, current_message_id="")
+        return await asyncio.wait_for(
+            extract_create_loop_fields(
+                llm=llm,
+                langfuse=langfuse,
+                data=ExtractCreateLoopInput(
+                    thread_history=formatted,
+                    coordinator_email=email,
+                ),
+            ),
+            timeout=_EXTRACTOR_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.warning(
+            "create-loop extractor failed for thread %s — falling back to deterministic prefill",
+            gmail_thread_id,
+            exc_info=True,
+        )
+        return None
+
+
 async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     request = kwargs.get("request")
     # Pre-check coordinator's directory.readonly scope here, BEFORE the
@@ -547,59 +636,94 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
     # GmailScopeError (existing token missing scopes) and
     # GmailUserNotAuthorizedError (no token at all) and shows
     # build_auth_required, so we let either propagate.
-    gmail = getattr(request.app.state, "gmail", None) if request else None
+    gmail = get_gmail(request) if request else None
     if gmail is not None:
         await gmail._token_store.load_credentials(email)
 
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     message_id = _get_param(body, "message_id")
 
-    # Check for prefill params from suggestion entities (passed by overview card)
-    prefill_candidate_name = _get_param(body, "prefill_candidate_name")
-    prefill_client_name = _get_param(body, "prefill_client_name")
-    prefill_client_email = _get_param(body, "prefill_client_email")
-    prefill_client_company = _get_param(body, "prefill_client_company")
-    prefill_recruiter_name = _get_param(body, "prefill_recruiter_name")
-    prefill_recruiter_email = _get_param(body, "prefill_recruiter_email")
-    prefill_cm_name = _get_param(body, "prefill_cm_name")
-    prefill_cm_email = _get_param(body, "prefill_cm_email")
+    # Prefill params passed from the overview suggestion card (classifier path)
+    # short-circuit AI extraction — the classifier already did this work and
+    # its output is on action_data/extracted_entities.
+    has_suggestion_prefill = any(
+        _get_param(body, f"prefill_{field}")
+        for field in (
+            "candidate_name",
+            "client_name",
+            "client_email",
+            "client_company",
+            "recruiter_name",
+            "recruiter_email",
+            "cm_name",
+            "cm_email",
+        )
+    )
+    prefill = CreateLoopExtraction(
+        candidate_name=_get_param(body, "prefill_candidate_name") or None,
+        client_name=_get_param(body, "prefill_client_name") or None,
+        client_email=_get_param(body, "prefill_client_email") or None,
+        client_company=_get_param(body, "prefill_client_company") or None,
+        recruiter_name=_get_param(body, "prefill_recruiter_name") or None,
+        recruiter_email=_get_param(body, "prefill_recruiter_email") or None,
+        cm_name=_get_param(body, "prefill_cm_name") or None,
+        cm_email=_get_param(body, "prefill_cm_email") or None,
+    )
     gmail_subject = None
+    banner: str | None = None
 
-    # If no prefill from suggestion, try Gmail message metadata
-    if not prefill_client_email and message_id and svc._gmail:
+    # Deterministic prefill from the current message: from_ → client contact,
+    # cc[0] → client manager. Only applies on the manual path (no prefill
+    # from a suggestion).
+    if not has_suggestion_prefill and message_id and svc._gmail:
         try:
             msg = await svc._gmail.get_message(email, message_id)
             if msg.from_:
-                prefill_client_name = prefill_client_name or msg.from_.name or ""
-                prefill_client_email = msg.from_.email
+                prefill.client_name = prefill.client_name or (msg.from_.name or None)
+                prefill.client_email = prefill.client_email or msg.from_.email
             if msg.cc:
-                prefill_cm_name = prefill_cm_name or msg.cc[0].name or ""
-                prefill_cm_email = prefill_cm_email or msg.cc[0].email
+                prefill.cm_name = prefill.cm_name or (msg.cc[0].name or None)
+                prefill.cm_email = prefill.cm_email or msg.cc[0].email
             gmail_subject = msg.subject
         except Exception:
             logger.warning("Could not fetch message %s for pre-fill", message_id, exc_info=True)
+
+    # AI extraction: only on the manual path. When the user arrived from a
+    # classifier suggestion, that suggestion's extracted_entities already
+    # populated prefill_* — re-running extraction wastes LLM cost.
+    if not has_suggestion_prefill:
+        extracted = await _run_create_loop_extractor(
+            request=request,
+            svc=svc,
+            email=email,
+            gmail_thread_id=gmail_thread_id,
+            message_id=message_id,
+        )
+        if extracted is not None:
+            prefill = _merge_prefill(deterministic=prefill, extracted=extracted)
+            banner = _CREATE_LOOP_BANNER
 
     # If a pre-filled email matches an existing contact, prefer the stored
     # name/company so the form shows what will actually be persisted on
     # submit — the dedup logic in find_or_create_contact keeps the stored
     # row untouched, so showing the classifier-suggested name here would
     # mislead the coordinator.
-    if prefill_client_email:
-        existing_client = await svc.get_client_contact_by_email(prefill_client_email)
+    if prefill.client_email:
+        existing_client = await svc.get_client_contact_by_email(prefill.client_email)
         if existing_client is not None:
-            prefill_client_name = existing_client.name
+            prefill.client_name = existing_client.name
             if existing_client.company:
-                prefill_client_company = existing_client.company
-    if prefill_recruiter_email:
+                prefill.client_company = existing_client.company
+    if prefill.recruiter_email:
         existing_recruiter = await svc.get_contact_by_email(
-            prefill_recruiter_email, role="recruiter"
+            prefill.recruiter_email, role="recruiter"
         )
         if existing_recruiter is not None:
-            prefill_recruiter_name = existing_recruiter.name
-    if prefill_cm_email:
-        existing_cm = await svc.get_contact_by_email(prefill_cm_email, role="client_manager")
+            prefill.recruiter_name = existing_recruiter.name
+    if prefill.cm_email:
+        existing_cm = await svc.get_contact_by_email(prefill.cm_email, role="client_manager")
         if existing_cm is not None:
-            prefill_cm_name = existing_cm.name
+            prefill.cm_name = existing_cm.name
 
     # Pass suggestion_id through so create_loop can resolve it
     suggestion_id = _get_param(body, "suggestion_id")
@@ -608,14 +732,15 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
         gmail_thread_id=gmail_thread_id,
         gmail_subject=gmail_subject,
         gmail_message_id=message_id,
-        prefill_candidate_name=prefill_candidate_name,
-        prefill_client_name=prefill_client_name,
-        prefill_client_email=prefill_client_email,
-        prefill_client_company=prefill_client_company,
-        prefill_recruiter_name=prefill_recruiter_name,
-        prefill_recruiter_email=prefill_recruiter_email,
-        prefill_cm_name=prefill_cm_name,
-        prefill_cm_email=prefill_cm_email,
+        prefill_candidate_name=prefill.candidate_name,
+        prefill_client_name=prefill.client_name,
+        prefill_client_email=prefill.client_email,
+        prefill_client_company=prefill.client_company,
+        prefill_recruiter_name=prefill.recruiter_name,
+        prefill_recruiter_email=prefill.recruiter_email,
+        prefill_cm_name=prefill.cm_name,
+        prefill_cm_email=prefill.cm_email,
+        banner=banner,
         suggestion_id=suggestion_id,
     )
 
@@ -778,7 +903,7 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     # (e.g. DRAFT_EMAIL to recruiter). Runs async so the UI returns instantly.
     gmail_message_id = _get_param(body, "gmail_message_id")
     if gmail_thread_id and request:
-        redis = getattr(request.app.state, "redis", None)
+        redis = get_redis(request)
         if redis:
             try:
                 await redis.enqueue_job(
@@ -811,10 +936,10 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
 
 
 def _get_draft_service(request: Request | None):
-    """Get DraftService from app state, or None if not available."""
+    """Get DraftService from app state, or None when request is missing."""
     if request is None:
         return None
-    return getattr(request.app.state, "draft_service", None)
+    return get_draft_service(request)
 
 
 async def _handle_view_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -875,7 +1000,7 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     # shows them context regardless); forwards raise, because a forward
     # without quoted history is exactly the bug we're fixing.
     thread = None
-    gmail = getattr(request.app.state, "gmail", None) if request else None
+    gmail = get_gmail(request) if request else None
     if gmail and draft.gmail_thread_id:
         try:
             thread = await gmail.get_thread(email, draft.gmail_thread_id)
@@ -1182,7 +1307,11 @@ async def oauth_callback(code: str, state: str, request: Request):
         )
 
     # Store the refresh token
-    gmail = request.app.state.gmail
+    gmail = get_gmail(request)
+    if gmail is None:
+        return HTMLResponse(
+            "<html><body>Server misconfigured: Gmail not available.</body></html>", status_code=503
+        )
     await gmail._token_store.store_token(
         user_email=user_email,
         refresh_token=refresh_token,

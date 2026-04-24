@@ -68,6 +68,26 @@ class DraftEmailData(BaseModel):
     recipient_type: str  # "client" or "recruiter"
 
 
+class CreateLoopExtraction(BaseModel):
+    """Typed payload for CREATE_LOOP action_data.
+
+    Emitted by the classifier's CREATE_LOOP suggestions AND by the on-demand
+    manual-path extractor (``extract_create_loop_fields``). Every field is
+    optional — the consumer (the create-loop form) tolerates any subset and
+    falls back to deterministic prefill / stored contact rows when a field
+    is null. See rfcs/rfc-infer-create-loop-fields.md.
+    """
+
+    candidate_name: str | None = None
+    client_name: str | None = None
+    client_email: str | None = None
+    client_company: str | None = None
+    cm_name: str | None = None
+    cm_email: str | None = None
+    recruiter_name: str | None = None
+    recruiter_email: str | None = None
+
+
 # -- LLM output schema --
 
 
