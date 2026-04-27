@@ -12,6 +12,7 @@ from api.classifier.models import (
     SuggestedAction,
     SuggestionItem,
 )
+from api.classifier.sender_blacklist import SenderBlacklist
 from api.gmail.hooks import EmailEvent, MessageDirection, MessageType
 from api.gmail.models import EmailAddress, Message
 from api.scheduling.models import (
@@ -24,12 +25,12 @@ from api.scheduling.models import (
 )
 
 
-def _msg(msg_id="msg1", thread_id="thread1") -> Message:
+def _msg(msg_id="msg1", thread_id="thread1", from_email="alice@example.com") -> Message:
     return Message(
         id=msg_id,
         thread_id=thread_id,
         subject="Interview",
-        **{"from": EmailAddress(name="Alice", email="alice@example.com")},
+        **{"from": EmailAddress(name="Alice", email=from_email)},
         to=[EmailAddress(email="coord@lrp.com")],
         date=datetime(2026, 4, 15, 10, 0, tzinfo=UTC),
         body_text="Hello world",
@@ -40,9 +41,10 @@ def _event(
     direction=MessageDirection.INCOMING,
     msg_id="msg1",
     thread_id="thread1",
+    from_email="alice@example.com",
 ) -> EmailEvent:
     return EmailEvent(
-        message=_msg(msg_id, thread_id),
+        message=_msg(msg_id, thread_id, from_email=from_email),
         coordinator_email="coord@lrp.com",
         direction=direction,
         message_type=MessageType.REPLY,
@@ -115,7 +117,7 @@ def _classification_result(items=None, reasoning="test"):
     )
 
 
-def _make_hook():
+def _make_hook(sender_blacklist: SenderBlacklist | None = None):
     """Create a ClassifierHook with mocked dependencies."""
     llm = MagicMock()
     langfuse = MagicMock()
@@ -134,6 +136,7 @@ def _make_hook():
         langfuse=langfuse,
         suggestion_service=suggestion_service,
         loop_service=loop_service,
+        sender_blacklist=sender_blacklist,
     )
     return hook, llm, langfuse, suggestion_service, loop_service
 
@@ -231,3 +234,78 @@ class TestErrorHandling:
         call_kwargs = suggestion_service.create_suggestion.call_args.kwargs
         assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
         assert call_kwargs["item"].confidence == 0.0
+
+
+class TestSenderBlacklist:
+    """Pre-classifier sender blacklist — silent skip on unlinked threads."""
+
+    @pytest.mark.asyncio
+    async def test_blacklisted_sender_on_unlinked_thread_skips(self):
+        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
+        hook, _, _, suggestion_service, loop_service = _make_hook(sender_blacklist=blacklist)
+        loop_service.find_loop_by_thread.return_value = None
+
+        # classify_email patched only to assert it isn't called
+        with patch(
+            "api.classifier.hook.classify_email",
+            new_callable=AsyncMock,
+        ) as mock_classify:
+            event = _event(from_email="alerts@withintelligence-email.com")
+            await hook.on_email(event)
+
+        mock_classify.assert_not_called()
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_blacklisted_sender_on_linked_thread_still_classifies(self):
+        """Linked threads bypass the blacklist — newsletters forwarded into an
+        active candidate conversation should still be classified."""
+        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
+        hook, _, _, suggestion_service, loop_service = _make_hook(sender_blacklist=blacklist)
+        loop_service.find_loop_by_thread.return_value = _loop()
+
+        with patch(
+            "api.classifier.hook.classify_email",
+            new_callable=AsyncMock,
+            return_value=_classification_result(),
+        ) as mock_classify:
+            event = _event(from_email="alerts@withintelligence-email.com")
+            await hook.on_email(event)
+
+        mock_classify.assert_called_once()
+        suggestion_service.create_suggestion.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_blacklisted_sender_classifies_normally(self):
+        # The sender domain is NOT in the blacklist — the LLM should run.
+        # (Whether a suggestion ultimately persists is a downstream guardrail
+        # decision unrelated to the blacklist; we only assert classify was called.)
+        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
+        hook, _, _, _, loop_service = _make_hook(sender_blacklist=blacklist)
+        loop_service.find_loop_by_thread.return_value = None
+
+        with patch(
+            "api.classifier.hook.classify_email",
+            new_callable=AsyncMock,
+            return_value=_classification_result(),
+        ) as mock_classify:
+            event = _event(from_email="alice@candidate.com")
+            await hook.on_email(event)
+
+        mock_classify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_blacklist_passed_uses_empty_default(self):
+        """When no blacklist is injected, default is empty — nothing is blocked."""
+        hook, _, _, _, loop_service = _make_hook(sender_blacklist=None)
+        loop_service.find_loop_by_thread.return_value = None
+
+        with patch(
+            "api.classifier.hook.classify_email",
+            new_callable=AsyncMock,
+            return_value=_classification_result(),
+        ) as mock_classify:
+            event = _event(from_email="alerts@withintelligence-email.com")
+            await hook.on_email(event)
+
+        mock_classify.assert_called_once()

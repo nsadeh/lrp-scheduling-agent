@@ -30,6 +30,7 @@ from api.classifier.models import (
     SuggestedAction,
     SuggestionItem,
 )
+from api.classifier.sender_blacklist import SenderBlacklist
 from api.classifier.service import SuggestionService  # noqa: TC001 — used at runtime in __init__
 from api.gmail.hooks import EmailEvent, MessageDirection
 from api.scheduling.models import ALLOWED_TRANSITIONS, StageState
@@ -105,12 +106,16 @@ class ClassifierHook:
         suggestion_service: SuggestionService,
         loop_service: LoopService,
         draft_service: DraftService | None = None,
+        sender_blacklist: SenderBlacklist | None = None,
     ):
         self._llm = llm
         self._langfuse = langfuse
         self._suggestions = suggestion_service
         self._loops = loop_service
         self._draft_service = draft_service
+        # Default to empty when not injected — preserves test compatibility
+        # and makes the blacklist a strict opt-in for production wiring.
+        self._sender_blacklist = sender_blacklist or SenderBlacklist.empty()
 
     async def on_email(self, event: EmailEvent) -> None:
         """Process an email event — classify and persist suggestions."""
@@ -130,6 +135,21 @@ class ClassifierHook:
 
         # Incoming email — check for linked loop, classify either way
         linked_loop = await self._loops.find_loop_by_thread(msg.thread_id)
+
+        # Sender blacklist: skip incoming emails from known non-client senders
+        # (newsletters, transactional notifications, cold outreach) when the
+        # thread isn't already linked to a scheduling loop. We deliberately
+        # do NOT apply the blacklist on linked threads — if a newsletter
+        # somehow lands inside an active candidate conversation, we still
+        # want the classifier to see it.
+        if linked_loop is None and self._sender_blacklist.is_blocked(msg.from_.email):
+            logger.debug(
+                "skipping blacklisted sender %s on unlinked thread %s",
+                msg.from_.email,
+                msg.thread_id,
+            )
+            return
+
         await self._classify_and_persist(event, linked_loop)
 
     async def _classify_and_persist(

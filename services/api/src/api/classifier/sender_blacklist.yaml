@@ -1,0 +1,77 @@
+# Sender blacklist for the email classifier.
+#
+# Emails from these senders short-circuit the classifier: no LLM call, no
+# row in agent_suggestions, no Langfuse trace. The check only applies to
+# incoming emails on threads that are NOT linked to a scheduling loop —
+# linked threads always get classified, in case a newsletter ever shows
+# up inside an active candidate conversation.
+#
+# Seeded from references/non-client-senders-2026-04-24.csv. To add a sender,
+# open a PR and edit this file. Domains and emails are matched
+# case-insensitively against the bare address (the part Gmail parses out
+# of the From header — see api.gmail.models.parse_email_address).
+#
+# Domain match: full-string equality on the domain portion (everything
+# after the last "@"). Subdomains are NOT auto-matched — list each
+# subdomain explicitly. This keeps false-positive risk near zero at the
+# cost of more lines.
+
+domains:
+  # ---- Industry newsletters / news digests ----
+  - alm.com
+  - bounces.albourne.com
+  - e.buyoutsinsider.com
+  - greenstreetnews.com
+  - mail.beehiiv.com
+  - mail.fortune.com
+  - mail.pei.group
+  - mail.privateequityinternational.com
+  - morning7.theskimm.com
+  - news.pitchbook.com
+  - theskimm.com
+  - visualcapitalist.com
+  - withintelligence-email.com
+
+  # ---- LinkedIn (all auto-notification subdomains share linkedin.com) ----
+  - linkedin.com
+
+  # ---- SaaS transactional / marketing ----
+  - adobesign.com
+  - airmason.com
+  - appsheet.com
+  - campaign.eventbrite.com
+  - catsone.com
+  - corecruit.com
+  - e.adobe.com
+  - engage.canva.com
+  - followupthen.com
+  - googlemail.com  # mailer-daemon@googlemail.com bounce notifications
+  - greenhouse.io
+  - mail.instagram.com
+  - notifications.adobe.com
+  - paycomonline.com
+  - signupgenius.com
+  - webflow.com
+  - zoom.us
+
+  # ---- Webinar / event promotions ----
+  - cretech.com
+  - governancesolutions.worketc.com
+  - mail.hrlearninghub.com
+
+  # ---- Consumer / personal noise ----
+  - business.samsungusa.com
+  - email.streeteasy.com
+  - getbento.com
+  - gngrlabs.com
+  - mamannyc.com
+  - mgs.opentable.com
+  - onceagainhome.com
+  - travel2.hiltongrandvacations.com
+
+emails:
+  # Cold outreach from individual @gmail/@personal addresses that aren't
+  # safe to block at the domain level. Add new entries here only after
+  # confirming the sender is genuinely non-client.
+  - karenleone707@gmail.com
+  - nehpetsesd@optonline.net
