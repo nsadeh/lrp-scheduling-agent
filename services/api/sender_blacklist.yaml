@@ -6,10 +6,13 @@
 # linked threads always get classified, in case a newsletter ever shows
 # up inside an active candidate conversation.
 #
-# Seeded from references/non-client-senders-2026-04-24.csv. To add a sender,
-# open a PR and edit this file. Domains and emails are matched
-# case-insensitively against the bare address (the part Gmail parses out
-# of the From header — see api.gmail.models.parse_email_address).
+# To add a sender, open a PR and edit this file. Audit production traffic
+# via the Langfuse classify_email traces (filter classification=not_scheduling)
+# to find new offenders.
+#
+# Domains and emails are matched case-insensitively against the bare
+# address (the part Gmail parses out of the From header — see
+# api.gmail.models.parse_email_address).
 #
 # Domain match: full-string equality on the domain portion (everything
 # after the last "@"). Subdomains are NOT auto-matched — list each

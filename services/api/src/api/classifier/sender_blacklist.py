@@ -4,7 +4,10 @@ Loaded once at app startup from sender_blacklist.yaml. The check runs in
 ClassifierHook.on_email() before any LLM work, only for incoming emails on
 threads that are not linked to a scheduling loop.
 
-See sender_blacklist.yaml for the seed list and the rationale.
+See ``services/api/sender_blacklist.yaml`` for the seed list and the rationale.
+The YAML lives at the api project root (alongside pyproject.toml, railway.toml,
+etc.) — same pattern as other runtime data dirs (queries/, migrations/), so
+config sits outside src/.
 """
 
 from __future__ import annotations
@@ -18,7 +21,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PATH = Path(__file__).parent / "sender_blacklist.yaml"
+# services/api/src/api/classifier/sender_blacklist.py → services/api/sender_blacklist.yaml
+# Mirrors the path-walking pattern used by api.scheduling.queries (parent x4).
+DEFAULT_PATH = Path(__file__).resolve().parent.parent.parent.parent / "sender_blacklist.yaml"
 
 
 @dataclass(frozen=True)
