@@ -21,9 +21,23 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# services/api/src/api/classifier/sender_blacklist.py → services/api/sender_blacklist.yaml
-# Mirrors the path-walking pattern used by api.scheduling.queries (parent x4).
-DEFAULT_PATH = Path(__file__).resolve().parent.parent.parent.parent / "sender_blacklist.yaml"
+
+def _find_api_root() -> Path:
+    """Walk up from this file to ``services/api/`` (marked by ``pyproject.toml``).
+
+    Robust to anyone moving this module to a different depth inside ``src/``.
+    Standard Python idiom — ``python-dotenv``'s ``find_dotenv`` does the same.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    raise RuntimeError(
+        "could not locate api root: no pyproject.toml in any parent of "
+        f"{Path(__file__).resolve()}"
+    )
+
+
+DEFAULT_PATH = _find_api_root() / "sender_blacklist.yaml"
 
 
 @dataclass(frozen=True)
