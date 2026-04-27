@@ -55,6 +55,7 @@ async def startup(ctx: dict) -> None:
     # AI infrastructure — required, crashes if not configured
     from api.ai import init_langfuse, init_llm_service
     from api.classifier.hook import ClassifierHook
+    from api.classifier.sender_blacklist import load_blacklist
     from api.classifier.service import SuggestionService
     from api.drafts.service import DraftService
     from api.scheduling.service import LoopService
@@ -76,6 +77,7 @@ async def startup(ctx: dict) -> None:
         suggestion_service=SuggestionService(db_pool=pool),
         loop_service=loop_service,
         draft_service=draft_service,
+        sender_blacklist=load_blacklist(),
     )
     logger.info("worker startup complete — ClassifierHook active")
 
