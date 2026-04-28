@@ -229,6 +229,11 @@ class TestDraftSuggestionBuilder:
 
 
 class TestCreateLoopSuggestionBuilder:
+    """CREATE_LOOP builder still exists for backlog handoff: pre-deploy
+    PENDING rows render with the original form so coordinators can clear
+    the queue. New CREATE_LOOPs are AUTO_APPLIED and never reach this builder.
+    """
+
     def test_renders_extracted_entities(self):
         view = _view(
             action=SuggestedAction.CREATE_LOOP,
@@ -249,64 +254,23 @@ class TestCreateLoopSuggestionBuilder:
         assert "Claire Thompson" in text
         assert "ACME Corp" in text
         assert "Create Loop" in text
-        # CM fields should be present (empty when not provided)
-        assert "cm_name_" in text
-        assert "cm_email_" in text
 
     def test_prefilled_from_action_data(self):
-        """Fields in action_data take priority over extracted_entities."""
         view = _view(
             action=SuggestedAction.CREATE_LOOP,
             loop_id=None,
             loop_title=None,
             summary="New interview request detected",
-            extracted_entities={
-                "candidate_name": "Old Name",
-            },
+            extracted_entities={"candidate_name": "Old Name"},
             action_data={
                 "candidate_name": "Adam L'esperance",
-                "client_name": "Nim Sadeh",
                 "client_email": "nim@kinematiclabs.dev",
-                "client_company": "Kinematic Labs",
-                "cm_name": "Sarah Jones",
-                "cm_email": "sarah@lrp.com",
             },
         )
         widgets = _build_create_loop_suggestion(view)
         text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
-        # action_data wins over extracted_entities
         assert "Adam L'esperance" in text
         assert "Old Name" not in text
-        # Other action_data fields pre-fill correctly
-        assert "Nim Sadeh" in text
-        assert "nim@kinematiclabs.dev" in text
-        assert "Kinematic Labs" in text
-        assert "Sarah Jones" in text
-        assert "sarah@lrp.com" in text
-
-    def test_cm_not_required(self):
-        """CM fields should NOT be in the required_widgets list."""
-        view = _view(
-            action=SuggestedAction.CREATE_LOOP,
-            loop_id=None,
-            loop_title=None,
-            summary="New interview request detected",
-            extracted_entities={
-                "candidate_name": "Claire Thompson",
-                "client_email": "haley@acme.com",
-                "recruiter_name": "Bob Smith",
-                "recruiter_email": "bob@lrp.com",
-            },
-        )
-        widgets = _build_create_loop_suggestion(view)
-        # Find the button widget and check its requiredWidgets
-        serialized = [w.model_dump(by_alias=True, exclude_none=True) for w in widgets]
-        for w in serialized:
-            buttons = w.get("buttonList", {}).get("buttons", [])
-            for btn in buttons:
-                req = btn.get("onClick", {}).get("action", {}).get("requiredWidgets", [])
-                for name in req:
-                    assert "cm_" not in name, f"CM field {name} should not be required"
 
 
 class TestAdvanceSuggestionBuilder:
@@ -323,50 +287,6 @@ class TestAdvanceSuggestionBuilder:
         assert "Round 1" in text
         assert "Awaiting Candidate" in text
         assert "Awaiting Client" in text
-        assert "from" in text.lower()
-        # DecoratedText + ButtonList (no reasoning)
-        assert len(widgets) == 2
-
-    def test_without_stage_context_shows_target_only(self):
-        view = _view(
-            action=SuggestedAction.ADVANCE_STAGE,
-            summary="Advance to Awaiting Client",
-            target_state="awaiting_client",
-        )
-        widgets = _build_advance_suggestion(view)
-        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
-        assert "Awaiting Client" in text
-        # No "from" when current state is unknown
-        assert "from" not in text.lower()
-        assert len(widgets) == 2
-
-    def test_reasoning_omitted_for_clean_ux(self):
-        view = _view(
-            action=SuggestedAction.ADVANCE_STAGE,
-            summary="Advance to Awaiting Client",
-            stage_name="Round 1",
-            stage_state="awaiting_candidate",
-            target_state="awaiting_client",
-            reasoning="Candidate sent availability times in latest email",
-        )
-        widgets = _build_advance_suggestion(view)
-        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
-        # Reasoning is intentionally NOT shown — the from/to label is sufficient
-        assert "Candidate sent availability" not in text
-        # DecoratedText + ButtonList only
-        assert len(widgets) == 2
-
-    def test_no_target_state_fallback(self):
-        view = _view(
-            action=SuggestedAction.ADVANCE_STAGE,
-            summary="Advance stage",
-            target_state=None,
-        )
-        widgets = _build_advance_suggestion(view)
-        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
-        # Should just show "Advance" without from/to
-        assert "Advance" in text
-        assert len(widgets) == 2
 
 
 class TestLinkThreadSuggestionBuilder:

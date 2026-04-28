@@ -131,6 +131,25 @@ ORDER BY l.updated_at DESC;
 -- name: update_loop_timestamp!
 UPDATE loops SET updated_at = now() WHERE id = :id;
 
+-- name: set_loop_recruiter!
+-- Patch a loop's recruiter_id. Used when JIT contact info is supplied at
+-- send time on a loop that was created without a recruiter.
+UPDATE loops SET recruiter_id = :recruiter_id, updated_at = now() WHERE id = :id;
+
+-- name: set_loop_client_contact!
+-- Patch a loop's client_contact_id. Same JIT pattern as set_loop_recruiter.
+UPDATE loops SET client_contact_id = :client_contact_id, updated_at = now() WHERE id = :id;
+
+-- name: set_loop_client_manager!
+-- Patch a loop's client_manager_id (already nullable since 0002).
+UPDATE loops SET client_manager_id = :client_manager_id, updated_at = now() WHERE id = :id;
+
+-- name: update_candidate_name!
+-- Rename a candidate. Used by the inline rename affordance when the
+-- classifier auto-resolved CREATE_LOOP with the placeholder
+-- "Unknown Candidate".
+UPDATE candidates SET name = :name WHERE id = :id;
+
 -- ============================================================
 -- Stages
 -- ============================================================
@@ -197,12 +216,24 @@ ORDER BY linked_at;
 
 -- name: find_loop_by_gmail_thread_id^
 -- Find the loop linked to a Gmail thread. Returns NULL if not linked.
+-- Multi-loop threads are possible — this returns the first one (legacy
+-- single-loop callers). New code should prefer find_loops_by_gmail_thread_id.
 SELECT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
        l.client_manager_id, l.candidate_id, l.title, l.notes, l.created_at, l.updated_at
 FROM loops l
 JOIN loop_email_threads let ON let.loop_id = l.id
 WHERE let.gmail_thread_id = :gmail_thread_id
 LIMIT 1;
+
+-- name: find_loops_by_gmail_thread_id
+-- All loops linked to a Gmail thread (a thread can be linked to multiple
+-- loops, e.g. when two candidates are discussed in one chain).
+SELECT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
+       l.client_manager_id, l.candidate_id, l.title, l.notes, l.created_at, l.updated_at
+FROM loops l
+JOIN loop_email_threads let ON let.loop_id = l.id
+WHERE let.gmail_thread_id = :gmail_thread_id
+ORDER BY l.created_at;
 
 -- ============================================================
 -- Time slots

@@ -24,6 +24,15 @@ class SuggestionView(BaseModel):
     stage_name: str | None = None
     stage_state: str | None = None
     draft: EmailDraft | None = None
+    # Known actor emails on the loop — surfaced as small-print hints under
+    # JIT inputs so coordinators can see what we already have when asking
+    # for a missing one.
+    client_contact_name: str | None = None
+    client_contact_email: str | None = None
+    recruiter_name: str | None = None
+    recruiter_email: str | None = None
+    client_manager_name: str | None = None
+    client_manager_email: str | None = None
 
 
 class LoopSuggestionGroup(BaseModel):

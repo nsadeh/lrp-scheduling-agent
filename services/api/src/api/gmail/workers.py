@@ -71,6 +71,10 @@ async def startup(ctx: dict) -> None:
         langfuse=langfuse,
     )
 
+    # The hook needs an arq pool to enqueue follow-up reclassification
+    # jobs (after CREATE_LOOP / LINK_THREAD auto-resolve), but we don't
+    # create one here — arq exposes its own pool to job functions via
+    # ``ctx["redis"]``, and each job passes that into ``hook.on_email``.
     ctx["hook"] = ClassifierHook(
         llm=llm,
         langfuse=langfuse,
@@ -314,7 +318,9 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
             ]
             message_type, new_participants = classify_message_type(message, prior_messages)
 
-            # Build and fire event
+            # Build and fire event. Pass arq's own pool through so
+            # auto-resolvers can enqueue follow-up reclassify jobs without
+            # us needing a second Redis connection.
             event = EmailEvent(
                 message=message,
                 coordinator_email=coordinator_email,
@@ -323,7 +329,7 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
                 new_participants=new_participants,
                 thread_messages=thread_messages,
             )
-            await hook.on_email(event)
+            await hook.on_email(event, arq_pool=ctx.get("redis"))
 
         except GmailNotFoundError:
             logger.info(
@@ -385,7 +391,7 @@ async def reclassify_after_loop_creation(
             new_participants=new_participants,
             thread_messages=thread_messages,
         )
-        await hook.on_email(event)
+        await hook.on_email(event, arq_pool=ctx.get("redis"))
         logger.info(
             "reclassified message %s after loop creation (thread %s)",
             message.id,

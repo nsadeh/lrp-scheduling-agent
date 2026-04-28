@@ -2,10 +2,20 @@
 
 Pure functions returning CardResponse models for the Gmail sidebar.
 Reuses shared helpers from scheduling/cards.py.
+
+CREATE_LOOP / ADVANCE_STAGE / LINK_THREAD are auto-resolved by
+classifier/resolvers.py for new suggestions (the resolver marks them
+AUTO_APPLIED and the SQL filter `status='pending'` hides them). The
+original card builders for these actions are kept so:
+  1. Pre-deploy PENDING rows still render with the old UI — coordinators
+     can clear the backlog rather than have it disappear.
+  2. If a resolver fails (Sentry-and-drop), the suggestion stays PENDING
+     and the coordinator can finish manually.
 """
 
 from __future__ import annotations
 
+from api.addon.contact_inputs import build_client_inputs, build_recruiter_inputs
 from api.addon.models import (
     Button,
     Card,
@@ -18,7 +28,8 @@ from api.addon.models import (
     Widget,
 )
 from api.classifier.models import SuggestedAction
-from api.overview.models import (  # noqa: TC001 — needed at runtime
+from api.classifier.resolvers import DEFAULT_CANDIDATE_NAME
+from api.overview.models import (  # noqa: TC001 - needed at runtime
     LoopSuggestionGroup,
     SuggestionView,
 )
@@ -31,8 +42,18 @@ from api.scheduling.cards import (
     _divider,
     _text,
     _update_card,
-    set_action_url,  # noqa: F401 — re-exported for routes
+    directory_search_url,
+    get_action_url,
+    set_action_url,  # noqa: F401 - re-exported for routes
 )
+from api.scheduling.models import StageState
+
+# Stage states where the draft is sent to the recruiter (vs. client).
+# Mirrors `resolve_recipients` in drafts/service.py - the single source
+# of truth for routing - but we need it inline at render time to decide
+# which JIT inputs to show.
+_RECRUITER_STAGES = {StageState.NEW.value}
+
 
 # ---------------------------------------------------------------------------
 # Tab navigation
@@ -45,7 +66,7 @@ def _overview_header_buttons(base_url: str | None = None) -> Section | None:
 
     if base_url:
         refresh_btn = Button(
-            text="\u21bb Refresh",
+            text="↻ Refresh",
             on_click=OnClick(
                 open_link=OpenLink(
                     url=f"{base_url}/addon/refresh",
@@ -69,93 +90,334 @@ def _overview_header_buttons(base_url: str | None = None) -> Section | None:
 def _dismiss_button(suggestion_id: str) -> Button:
     """Dismiss button shared across all suggestion types."""
     return Button(
-        text="\u2715",
+        text="✕",
         on_click=_action("reject_suggestion", suggestion_id=suggestion_id),
     )
 
 
+def _format_known_actors(view: SuggestionView, *, exclude: str) -> str:
+    """Render a small-print line of actor emails the loop already has.
+
+    Used as a context hint under the JIT input. Shows the client contact
+    and the client manager (when present) — never the recruiter, since
+    showing the recruiter when we're asking for them is redundant, and
+    showing them when asking for the client clutters the card.
+    ``exclude`` skips the role we're currently asking for.
+    """
+    parts: list[str] = []
+    if exclude != "client_contact" and view.client_contact_email:
+        label = view.client_contact_name or "Client"
+        parts.append(f"Client: {label} &lt;{view.client_contact_email}&gt;")
+    if view.client_manager_email:
+        label = view.client_manager_name or "CM"
+        parts.append(f"CM: {label} &lt;{view.client_manager_email}&gt;")
+    return " · ".join(parts)
+
+
+def _missing_recipient_role(view: SuggestionView) -> tuple[bool, bool]:
+    """Return (needs_recruiter, needs_client) for a draft view.
+
+    A draft has a missing recipient when its `to_emails` is empty - the
+    loop's relevant contact is null. The role is determined by stage state
+    (same logic as `resolve_recipients` in drafts/service.py). Mutually
+    exclusive: a draft only ever needs one role at a time.
+    """
+    draft = view.draft
+    if draft is None or draft.to_emails:
+        return (False, False)
+    if view.stage_state in _RECRUITER_STAGES:
+        return (True, False)
+    return (False, True)
+
+
 def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
-    """DRAFT_EMAIL — inline editable draft with Send/Forward + Dismiss."""
+    """DRAFT_EMAIL - inline editable draft with Send/Forward + Dismiss.
+
+    When the loop is missing a contact this card needs (recruiter for
+    NEW-stage drafts, client for later stages, CM whenever it's null),
+    the card collects it inline. Picks are staged on
+    ``draft.pending_jit_data`` rather than committed to the loop, so
+    misclicks can be undone with the small "x" button before Send.
+    Contacts are only created and attached to the loop at Send time.
+    """
     widgets: list[Widget] = []
     sug = view.suggestion
     draft = view.draft
 
-    # Summary header
-    widgets.append(_text(f"<b>\u2709 {sug.summary}</b>"))
+    widgets.append(_text(f"<b>✉ {sug.summary}</b>"))
 
-    if draft:
-        is_fwd = draft.is_forward
+    if not draft:
+        widgets.append(_text("<i>Draft is being generated… tap Refresh to check.</i>"))
+        widgets.append(
+            _buttons(
+                _button("↻ Refresh", "show_suggestions_tab"),
+                _dismiss_button(sug.id),
+            )
+        )
+        return widgets
 
-        # Recipients (read-only)
+    is_fwd = draft.is_forward
+    pending = draft.pending_jit_data or {}
+    needs_recruiter, needs_client = _missing_recipient_role(view)
+    needs_cm = view.client_manager_email is None
+
+    # ---- Recipients --------------------------------------------------
+    if draft.to_emails:
         widgets.append(_decorated(", ".join(draft.to_emails), "To"))
         if draft.cc_emails:
             widgets.append(_decorated(", ".join(draft.cc_emails), "CC"))
-        widgets.append(_decorated(draft.subject, "Subject"))
-        widgets.append(_divider())
+    elif needs_recruiter:
+        widgets.extend(_render_recruiter_jit(sug.id, draft.id, pending))
+        known = _format_known_actors(view, exclude="recruiter")
+        if known:
+            widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
+    elif needs_client:
+        widgets.extend(_render_client_jit(sug.id, draft.id, pending))
+        known = _format_known_actors(view, exclude="client_contact")
+        if known:
+            widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
 
-        # Editable body — unique name per suggestion to avoid collisions.
-        # For forwards the note is optional (coordinator may just forward
-        # without commentary); for replies the message is always required.
-        input_name = f"draft_body_{sug.id}"
-        widgets.append(
-            TextInputWidget(
-                text_input=TextInput(
-                    name=input_name,
-                    label="Forward note" if is_fwd else "Message",
-                    type="MULTIPLE_LINE",
-                    value=draft.body,
-                )
+    # ---- CM JIT (independent of TO/recipient role) ------------------
+    # Always offered when the loop has no CM, so the coordinator can
+    # supply someone to CC. Optional — does not gate Send.
+    if needs_cm:
+        widgets.extend(_render_cm_jit(sug.id, draft.id, pending))
+
+    widgets.append(_decorated(draft.subject, "Subject"))
+    widgets.append(_divider())
+
+    # Editable body
+    input_name = f"draft_body_{sug.id}"
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=input_name,
+                label="Forward note" if is_fwd else "Message",
+                type="MULTIPLE_LINE",
+                value=draft.body,
             )
         )
+    )
 
-        # Dismiss (left) / Send or Forward (right)
-        send_label = "Forward" if is_fwd else "Send"
-        send_required = [] if is_fwd else [input_name]
-        widgets.append(
-            _buttons(
-                _dismiss_button(sug.id),
-                _button(
-                    send_label,
-                    "send_draft",
-                    required_widgets=send_required,
-                    draft_id=draft.id,
-                    suggestion_id=sug.id,
-                ),
+    # Send is enabled when the required role (recruiter for NEW, client
+    # otherwise) is either already on the loop OR staged in pending_jit_data.
+    # CM is optional; it doesn't gate Send.
+    send_disabled = False
+    if not draft.to_emails:
+        if needs_recruiter and not pending.get("recruiter", {}).get("email"):
+            send_disabled = True
+        if needs_client and not pending.get("client_contact", {}).get("email"):
+            send_disabled = True
+
+    send_label = "Forward" if is_fwd else "Send"
+    send_required = [] if is_fwd else [input_name]
+    send_button = Button(
+        text=send_label,
+        on_click=_action(
+            "send_draft",
+            required_widgets=send_required,
+            draft_id=draft.id,
+            suggestion_id=sug.id,
+        ),
+        disabled=send_disabled,
+    )
+    widgets.append(_buttons(_dismiss_button(sug.id), send_button))
+    return widgets
+
+
+def _render_recruiter_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
+    """JIT inputs (or "selected" badge) for recruiter."""
+    selected = pending.get("recruiter") or {}
+    if selected.get("email"):
+        return _render_jit_selected(
+            label="Recruiter",
+            name=selected.get("name") or selected["email"],
+            email=selected["email"],
+            sug_id=sug_id,
+            draft_id=draft_id,
+            role="recruiter",
+        )
+    widgets: list[Widget] = [
+        _text("<i>Add the recruiter so this draft can be sent.</i>"),
+    ]
+    widgets.extend(
+        build_recruiter_inputs(
+            action_url=get_action_url(),
+            directory_search_url=directory_search_url(),
+            name_field=f"jit_recruiter_name_{sug_id}",
+            email_field=f"jit_recruiter_email_{sug_id}",
+            on_change_extra_params={
+                "suggestion_id": sug_id,
+                "draft_id": draft_id,
+                "jit_role": "recruiter",
+            },
+        )
+    )
+    return widgets
+
+
+def _render_client_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
+    """JIT inputs (or "selected" badge) for client contact."""
+    selected = pending.get("client_contact") or {}
+    if selected.get("email"):
+        return _render_jit_selected(
+            label="Client contact",
+            name=selected.get("name") or selected["email"],
+            email=selected["email"],
+            sug_id=sug_id,
+            draft_id=draft_id,
+            role="client_contact",
+        )
+    widgets: list[Widget] = [
+        _text("<i>Add the client contact so this draft can be sent.</i>"),
+    ]
+    widgets.extend(
+        build_client_inputs(
+            name_field=f"jit_client_name_{sug_id}",
+            email_field=f"jit_client_email_{sug_id}",
+            company_field=f"jit_client_company_{sug_id}",
+        )
+    )
+    return widgets
+
+
+def _render_cm_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
+    """JIT inputs (or "selected" badge) for client manager. Optional."""
+    selected = pending.get("client_manager") or {}
+    if selected.get("email"):
+        return _render_jit_selected(
+            label="CM (CC)",
+            name=selected.get("name") or selected["email"],
+            email=selected["email"],
+            sug_id=sug_id,
+            draft_id=draft_id,
+            role="client_manager",
+        )
+    widgets: list[Widget] = [
+        _text("<i>No client manager on this loop — add one to CC, or send without.</i>"),
+    ]
+    # Reuse the same Workspace-directory autocomplete (CMs are LRP folks).
+    widgets.extend(
+        build_recruiter_inputs(
+            action_url=get_action_url(),
+            directory_search_url=directory_search_url(),
+            name_field=f"jit_cm_name_{sug_id}",
+            email_field=f"jit_cm_email_{sug_id}",
+            on_change_extra_params={
+                "suggestion_id": sug_id,
+                "draft_id": draft_id,
+                "jit_role": "client_manager",
+            },
+        )
+    )
+    return widgets
+
+
+def _render_jit_selected(
+    *,
+    label: str,
+    name: str,
+    email: str,
+    sug_id: str,
+    draft_id: str,
+    role: str,
+) -> list[Widget]:
+    """Show a staged JIT pick with a small "x" button to clear it.
+
+    The pick lives on ``draft.pending_jit_data[role]`` and isn't committed
+    to the loop until Send. The "x" button hits ``clear_jit`` which wipes
+    that role and re-renders the empty inputs.
+    """
+    clear_button = Button(
+        text="✕ Clear",
+        on_click=_action(
+            "clear_jit",
+            draft_id=draft_id,
+            suggestion_id=sug_id,
+            jit_role=role,
+        ),
+    )
+    return [
+        _decorated(f"{name} <{email}>", label),
+        _buttons(clear_button),
+    ]
+
+
+def _build_mark_cold_suggestion(view: SuggestionView) -> list[Widget]:
+    """MARK_COLD - reasoning + one-click."""
+    sug = view.suggestion
+    widgets: list[Widget] = [
+        _decorated(sug.summary, "❄ Mark Cold"),
+    ]
+
+    if sug.reasoning:
+        widgets.append(_text(f"<i>{sug.reasoning}</i>"))
+
+    widgets.append(
+        _buttons(
+            _button("Mark Cold", "accept_suggestion", suggestion_id=sug.id),
+            _dismiss_button(sug.id),
+        )
+    )
+    return widgets
+
+
+def _build_ask_suggestion(view: SuggestionView) -> list[Widget]:
+    """ASK_COORDINATOR - question + text input + disabled respond."""
+    sug = view.suggestion
+    widgets: list[Widget] = [
+        _text("<b>❓ Agent needs clarification</b>"),
+    ]
+
+    # Show question(s)
+    for q in sug.questions:
+        widgets.append(_text(f'"{q}"'))
+
+    # Text input for response
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=f"coordinator_response_{sug.id}",
+                label="Your response",
+                type="MULTIPLE_LINE",
             )
         )
-    else:
-        # Draft not yet generated — show refresh button so user can re-check
-        widgets.append(_text("<i>Draft is being generated\u2026 tap Refresh to check.</i>"))
-        widgets.append(
-            _buttons(
-                _button("\u21bb Refresh", "show_suggestions_tab"),
-                _dismiss_button(sug.id),
-            )
-        )
+    )
 
+    # Respond button (disabled - backend not implemented yet)
+    widgets.append(
+        _buttons(
+            Button(
+                text="Respond (coming soon)",
+                on_click=_action("accept_suggestion", suggestion_id=sug.id),
+                disabled=True,
+            ),
+            _dismiss_button(sug.id),
+        )
+    )
     return widgets
 
 
 def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
-    """CREATE_LOOP — inline form with pre-filled TextInputs from extracted entities.
+    """CREATE_LOOP - inline form with pre-filled TextInputs.
 
-    Renders an editable form directly in the suggestion card so coordinators
-    can review/edit the extracted data and create the loop with one click —
-    no navigation to a separate form.
+    New CREATE_LOOP suggestions are auto-resolved (status=AUTO_APPLIED) and
+    never reach this builder. It runs only for: (1) PENDING rows that
+    pre-date the auto-resolver deploy, so the backlog is finishable; and
+    (2) post-deploy rows whose resolver raised and was Sentry-and-dropped.
+    Both cases want the original click-to-create form.
     """
     widgets: list[Widget] = []
     sug = view.suggestion
     entities = sug.extracted_entities
     action_data = sug.action_data or {}
-    sid = sug.id  # suffix for unique input names
+    sid = sug.id
 
-    # Read from action_data first, fall back to extracted_entities
     def _val(key: str, default: str = "") -> str:
         return action_data.get(key) or entities.get(key, default)
 
     widgets.append(_text("<b>+ New loop detected</b>"))
 
-    # Inline form fields — pre-filled from classifier output
     widgets.append(
         TextInputWidget(
             text_input=TextInput(
@@ -196,10 +458,6 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
             )
         )
     )
-    # Recruiter fields get directory autocomplete but no onChangeAction —
-    # this inline form lives inside the overview card and can't be
-    # re-rendered in isolation. The create_loop handler defensively parses
-    # "Name <email>" out of whichever field carries it at submit time.
     recruiter_autocomplete = _directory_autocomplete_action()
     widgets.append(
         TextInputWidget(
@@ -224,8 +482,6 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
             )
         )
     )
-
-    # Client Manager — optional
     widgets.append(
         TextInputWidget(
             text_input=TextInput(
@@ -247,17 +503,7 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
         )
     )
 
-    # Create button — calls create_loop directly (no form navigation)
-    required = [
-        f"candidate_name_{sid}",
-        f"client_email_{sid}",
-        f"recruiter_name_{sid}",
-        f"recruiter_email_{sid}",
-    ]
-
-    create_params: dict[str, str] = {
-        "suggestion_id": sug.id,
-    }
+    create_params: dict[str, str] = {"suggestion_id": sug.id}
     if sug.gmail_thread_id:
         create_params["gmail_thread_id"] = sug.gmail_thread_id
     if sug.gmail_message_id:
@@ -268,13 +514,12 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
             _button(
                 "Create Loop",
                 "create_loop",
-                required_widgets=required,
+                required_widgets=[f"candidate_name_{sid}"],
                 **create_params,
             ),
             _dismiss_button(sug.id),
         )
     )
-
     return widgets
 
 
@@ -284,15 +529,14 @@ def _format_state_label(state: str) -> str:
 
 
 def _build_advance_suggestion(view: SuggestionView) -> list[Widget]:
-    """ADVANCE_STAGE — concise "from → to" label with Accept/Dismiss.
+    """ADVANCE_STAGE - concise "from -> to" label with Accept/Dismiss.
 
-    Reasoning is intentionally omitted from the card — the from/to label
-    is self-explanatory for the coordinator, and classifier reasoning
-    would clutter the one-click approve flow.
+    Same fallback story as _build_create_loop_suggestion: only renders for
+    pre-deploy backlog or resolver-failure cases. New ADVANCE_STAGE
+    suggestions are AUTO_APPLIED and filtered out.
     """
     sug = view.suggestion
 
-    # Build a descriptive label: "Advance <stage> from <current> to <target>"
     parts = ["Advance"]
     if view.stage_name:
         parts.append(view.stage_name)
@@ -305,7 +549,7 @@ def _build_advance_suggestion(view: SuggestionView) -> list[Widget]:
     label = " ".join(parts)
 
     return [
-        _decorated(label, "\u2191 Advance"),
+        _decorated(label, "↑ Advance"),
         _buttons(
             _button("Accept", "accept_suggestion", suggestion_id=sug.id),
             _dismiss_button(sug.id),
@@ -314,77 +558,21 @@ def _build_advance_suggestion(view: SuggestionView) -> list[Widget]:
 
 
 def _build_link_thread_suggestion(view: SuggestionView) -> list[Widget]:
-    """LINK_THREAD — target loop + collapsible reasoning."""
-    sug = view.suggestion
+    """LINK_THREAD - target loop + collapsible reasoning.
 
-    # Link target display
+    Backlog/failure fallback only — new LINK_THREAD suggestions are
+    AUTO_APPLIED.
+    """
+    sug = view.suggestion
     target_title = view.loop_title or sug.summary
     widgets: list[Widget] = [
-        _decorated(target_title, "\U0001f517 Link to"),
+        _decorated(target_title, "🔗 Link to"),
     ]
-
-    # Collapsible reasoning
     if sug.reasoning:
         widgets.append(_text(f"<i>{sug.reasoning}</i>"))
-
     widgets.append(
         _buttons(
             _button("Link", "accept_suggestion", suggestion_id=sug.id),
-            _dismiss_button(sug.id),
-        )
-    )
-    return widgets
-
-
-def _build_mark_cold_suggestion(view: SuggestionView) -> list[Widget]:
-    """MARK_COLD — reasoning + one-click."""
-    sug = view.suggestion
-    widgets: list[Widget] = [
-        _decorated(sug.summary, "\u2744 Mark Cold"),
-    ]
-
-    if sug.reasoning:
-        widgets.append(_text(f"<i>{sug.reasoning}</i>"))
-
-    widgets.append(
-        _buttons(
-            _button("Mark Cold", "accept_suggestion", suggestion_id=sug.id),
-            _dismiss_button(sug.id),
-        )
-    )
-    return widgets
-
-
-def _build_ask_suggestion(view: SuggestionView) -> list[Widget]:
-    """ASK_COORDINATOR — question + text input + disabled respond."""
-    sug = view.suggestion
-    widgets: list[Widget] = [
-        _text("<b>\u2753 Agent needs clarification</b>"),
-    ]
-
-    # Show question(s)
-    for q in sug.questions:
-        widgets.append(_text(f'"{q}"'))
-
-    # Text input for response
-    widgets.append(
-        TextInputWidget(
-            text_input=TextInput(
-                name=f"coordinator_response_{sug.id}",
-                label="Your response",
-                type="MULTIPLE_LINE",
-            )
-        )
-    )
-
-    # Respond button (disabled — backend not implemented yet)
-    widgets.append(
-        _buttons(
-            Button(
-                text="Respond (coming soon)",
-                on_click=_action("accept_suggestion", suggestion_id=sug.id),
-                disabled=True,
-            ),
             _dismiss_button(sug.id),
         )
     )
@@ -395,6 +583,10 @@ def _build_ask_suggestion(view: SuggestionView) -> list[Widget]:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+# All builders are present. CREATE_LOOP / ADVANCE_STAGE / LINK_THREAD are
+# auto-resolved for new suggestions, but their builders stay in the
+# dispatcher so the pre-deploy backlog and resolver-failure cases still
+# render usefully.
 _SUGGESTION_BUILDERS = {
     SuggestedAction.DRAFT_EMAIL: _build_draft_suggestion,
     SuggestedAction.CREATE_LOOP: _build_create_loop_suggestion,
@@ -410,8 +602,42 @@ def _build_suggestion_widgets(view: SuggestionView) -> list[Widget]:
     builder = _SUGGESTION_BUILDERS.get(view.suggestion.action)
     if builder:
         return builder(view)
-    # Fallback for unknown action types
     return [_text(f"<i>Unknown suggestion: {view.suggestion.summary}</i>")]
+
+
+# ---------------------------------------------------------------------------
+# Candidate rename affordance
+# ---------------------------------------------------------------------------
+
+
+def _build_candidate_rename(group: LoopSuggestionGroup) -> list[Widget]:
+    """Inline rename input shown when the loop has a placeholder candidate.
+
+    Only rendered when `candidate_name == "Unknown Candidate"` - i.e. the
+    classifier auto-resolved CREATE_LOOP without a candidate name. The
+    coordinator can fix it from the same card without leaving the sidebar.
+    """
+    if not group.loop_id or group.candidate_name != DEFAULT_CANDIDATE_NAME:
+        return []
+    field_name = f"candidate_name_{group.loop_id}"
+    return [
+        _text("<i>Candidate name not detected. Set it here:</i>"),
+        TextInputWidget(
+            text_input=TextInput(
+                name=field_name,
+                label="Candidate Name",
+                type="SINGLE_LINE",
+            )
+        ),
+        _buttons(
+            _button(
+                "Save name",
+                "update_candidate_name",
+                required_widgets=[field_name],
+                loop_id=group.loop_id,
+            ),
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +664,7 @@ def build_overview(
         sections.append(
             Section(
                 widgets=[
-                    _text("All caught up \u2014 no actions needed."),
+                    _text("All caught up — no actions needed."),
                 ]
             )
         )
@@ -447,6 +673,14 @@ def build_overview(
     for group in groups:
         # Build all widgets for suggestions in this group
         group_widgets: list[Widget] = []
+
+        # Candidate rename (only for placeholder names) appears at the top
+        # of the section, before any suggestion widgets.
+        rename_widgets = _build_candidate_rename(group)
+        if rename_widgets:
+            group_widgets.extend(rename_widgets)
+            group_widgets.append(_divider())
+
         for i, view in enumerate(group.suggestions):
             if i > 0:
                 group_widgets.append(_divider())
@@ -457,7 +691,7 @@ def build_overview(
         if group.loop_id and group.loop_title:
             header = group.loop_title
         elif group.loop_id:
-            # Loop exists but no title — use candidate/company if available
+            # Loop exists but no title - use candidate/company if available
             parts = [p for p in [group.candidate_name, group.client_company] if p]
             header = ", ".join(parts) if parts else f"Loop {group.loop_id[:8]}"
 

@@ -37,8 +37,8 @@ from api.addon.models import (
 from api.addon.routes import format_directory_suggestion, parse_name_email
 from api.main import app
 from api.scheduling.cards import (
-    _directory_search_url,
     build_create_loop_form,
+    directory_search_url,
     set_action_url,
 )
 from api.scheduling.models import Contact
@@ -513,11 +513,11 @@ class TestCreateLoopFormAutocomplete:
 
     def test_directory_search_url_is_derived_from_action_url(self):
         set_action_url("https://prod.example.com/addon/action")
-        assert _directory_search_url() == "https://prod.example.com/addon/directory/search"
+        assert directory_search_url() == "https://prod.example.com/addon/directory/search"
 
     def test_directory_search_url_empty_when_no_action_url(self):
         set_action_url("")
-        assert _directory_search_url() == ""
+        assert directory_search_url() == ""
         # Restore for other tests
         set_action_url("https://test.example.com/addon/action")
 
