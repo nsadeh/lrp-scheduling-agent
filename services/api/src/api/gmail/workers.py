@@ -325,6 +325,12 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
             )
             await hook.on_email(event)
 
+        except GmailNotFoundError:
+            logger.info(
+                "message %s not fetchable for %s (likely spam/filter/delete)",
+                msg_id,
+                coordinator_email,
+            )
         except Exception:
             logger.exception("failed to process message %s for %s", msg_id, coordinator_email)
 
