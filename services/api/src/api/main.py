@@ -84,7 +84,6 @@ async def lifespan(app: FastAPI):
         loop_service=app.state.scheduling,
         draft_service=draft_service,
         sender_blacklist=sender_blacklist,
-        arq_pool=getattr(app.state, "redis", None),
     )
     logger.info("ClassifierHook active")
 

@@ -12,7 +12,7 @@ import os
 from datetime import UTC, datetime
 
 import sentry_sdk
-from arq import create_pool, cron
+from arq import cron
 from arq.connections import RedisSettings
 from psycopg_pool import AsyncConnectionPool
 
@@ -71,12 +71,10 @@ async def startup(ctx: dict) -> None:
         langfuse=langfuse,
     )
 
-    # Dedicated arq pool for the hook to enqueue follow-up reclassification
-    # jobs (after CREATE_LOOP / LINK_THREAD auto-resolve). Separate from arq's
-    # internal `ctx["redis"]` so it's lifecycle-managed by us.
-    arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
-    ctx["arq_pool"] = arq_pool
-
+    # The hook needs an arq pool to enqueue follow-up reclassification
+    # jobs (after CREATE_LOOP / LINK_THREAD auto-resolve), but we don't
+    # create one here — arq exposes its own pool to job functions via
+    # ``ctx["redis"]``, and each job passes that into ``hook.on_email``.
     ctx["hook"] = ClassifierHook(
         llm=llm,
         langfuse=langfuse,
@@ -84,7 +82,6 @@ async def startup(ctx: dict) -> None:
         loop_service=loop_service,
         draft_service=draft_service,
         sender_blacklist=load_blacklist(),
-        arq_pool=arq_pool,
     )
     logger.info("worker startup complete — ClassifierHook active")
 
@@ -94,9 +91,6 @@ async def shutdown(ctx: dict) -> None:
     pool = ctx.get("db")
     if pool:
         await pool.close()
-    arq_pool = ctx.get("arq_pool")
-    if arq_pool is not None:
-        await arq_pool.close()
     logger.info("worker shutdown complete")
 
 
@@ -324,7 +318,9 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
             ]
             message_type, new_participants = classify_message_type(message, prior_messages)
 
-            # Build and fire event
+            # Build and fire event. Pass arq's own pool through so
+            # auto-resolvers can enqueue follow-up reclassify jobs without
+            # us needing a second Redis connection.
             event = EmailEvent(
                 message=message,
                 coordinator_email=coordinator_email,
@@ -333,7 +329,7 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
                 new_participants=new_participants,
                 thread_messages=thread_messages,
             )
-            await hook.on_email(event)
+            await hook.on_email(event, arq_pool=ctx.get("redis"))
 
         except Exception:
             logger.exception("failed to process message %s for %s", msg_id, coordinator_email)
@@ -389,7 +385,7 @@ async def reclassify_after_loop_creation(
             new_participants=new_participants,
             thread_messages=thread_messages,
         )
-        await hook.on_email(event)
+        await hook.on_email(event, arq_pool=ctx.get("redis"))
         logger.info(
             "reclassified message %s after loop creation (thread %s)",
             message.id,

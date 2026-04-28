@@ -112,7 +112,6 @@ class ClassifierHook:
         loop_service: LoopService,
         draft_service: DraftService | None = None,
         sender_blacklist: SenderBlacklist | None = None,
-        arq_pool: ArqRedis | None = None,
     ):
         self._llm = llm
         self._langfuse = langfuse
@@ -122,13 +121,22 @@ class ClassifierHook:
         # Default to empty when not injected — preserves test compatibility
         # and makes the blacklist a strict opt-in for production wiring.
         self._sender_blacklist = sender_blacklist or SenderBlacklist.empty()
-        # Used by auto-resolvers to enqueue follow-up reclassification jobs
-        # after CREATE_LOOP / LINK_THREAD. None in tests / API context.
-        self._arq_pool = arq_pool
         self._resolver_registry = build_registry()
 
-    async def on_email(self, event: EmailEvent) -> None:
-        """Process an email event — classify and persist suggestions."""
+    async def on_email(
+        self,
+        event: EmailEvent,
+        *,
+        arq_pool: ArqRedis | None = None,
+    ) -> None:
+        """Process an email event — classify and persist suggestions.
+
+        ``arq_pool`` is forwarded to auto-resolvers so they can enqueue
+        follow-up reclassification jobs (after CREATE_LOOP / LINK_THREAD).
+        Inside a worker job, the caller passes ``ctx["redis"]`` — arq's
+        own pool — so we don't need a second connection. None is fine
+        for tests and synchronous callers.
+        """
         msg = event.message
 
         # Outgoing emails on unlinked threads: skip entirely
@@ -140,7 +148,7 @@ class ClassifierHook:
                     msg.thread_id,
                 )
                 return
-            await self._classify_and_persist(event, linked_loops)
+            await self._classify_and_persist(event, linked_loops, arq_pool=arq_pool)
             return
 
         # Incoming email — check for linked loops, classify either way
@@ -160,12 +168,14 @@ class ClassifierHook:
             )
             return
 
-        await self._classify_and_persist(event, linked_loops)
+        await self._classify_and_persist(event, linked_loops, arq_pool=arq_pool)
 
     async def _classify_and_persist(
         self,
         event: EmailEvent,
         linked_loops: list[Loop],
+        *,
+        arq_pool: ArqRedis | None = None,
     ) -> None:
         """Run the classification pipeline: context → LLM → guardrails → persist → auto-resolve."""
         msg = event.message
@@ -254,7 +264,7 @@ class ClassifierHook:
                 gmail_subject=msg.subject,
                 loop_service=self._loops,
                 suggestion_service=self._suggestions,
-                arq_pool=self._arq_pool,
+                arq_pool=arq_pool,
             )
             applied = await try_auto_resolve(suggestion, ctx, self._resolver_registry)
             if applied:

@@ -116,12 +116,12 @@ def format_loop_state(loop: Loop | None) -> str:
 
 
 def format_linked_loops(loops: list[Loop]) -> str:
-    """Format ALL loops linked to the current thread.
+    """Format every loop linked to the current thread.
 
-    Multi-loop threads (one Gmail thread linked to two or more loops, e.g.
-    two candidates discussed in the same chain) require the LLM to pick
-    which loop a suggestion targets via `target_loop_id`. This function
-    renders every linked loop so the LLM can disambiguate.
+    Multi-loop threads (one Gmail thread linked to two or more loops)
+    render as multiple blocks separated by a blank line. The LangFuse
+    classifier prompt — not this formatter — owns the instructions about
+    how the LLM should disambiguate via `target_loop_id`.
     """
     if not loops:
         return "No matching loop found for this thread."
@@ -129,12 +129,7 @@ def format_linked_loops(loops: list[Loop]) -> str:
     if len(loops) == 1:
         return format_loop_state(loops[0])
 
-    blocks = [
-        f"This thread is linked to {len(loops)} loops. "
-        "When emitting a loop-scoped suggestion (DRAFT_EMAIL, ADVANCE_STAGE, "
-        "MARK_COLD), set `target_loop_id` to the specific loop you mean.",
-        "",
-    ]
+    blocks: list[str] = []
     for loop in loops:
         blocks.append(format_loop_state(loop))
         blocks.append("")
