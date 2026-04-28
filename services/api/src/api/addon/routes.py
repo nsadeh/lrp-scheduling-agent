@@ -188,31 +188,56 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
     return body.common_event_object.parameters.get(key)
 
 
-# Substrings that mark a form input as a recruiter autocomplete field.
-# Matches both the manual create-loop form (``recruiter_name``,
-# ``recruiter_email``) and the JIT widget on draft cards
-# (``jit_recruiter_name_<sug_id>``, ``jit_recruiter_email_<sug_id>``).
-_AUTOCOMPLETE_RECRUITER_MARKERS = ("recruiter_name", "recruiter_email")
+# Substrings that mark a form input as a directory-autocomplete field.
+# Matches the manual create-loop form (``recruiter_name``,
+# ``recruiter_email``) and both JIT roles on draft cards
+# (``jit_recruiter_*_<sug_id>``, ``jit_cm_*_<sug_id>``). CM and recruiter
+# share the directory endpoint because both are LRP Workspace members.
+_AUTOCOMPLETE_DIRECTORY_MARKERS = (
+    "recruiter_name",
+    "recruiter_email",
+    "jit_cm_name",
+    "jit_cm_email",
+)
 
 
 def _extract_autocomplete_query(body: AddonRequest) -> str:
     """Pull the currently-typed text out of an autoCompleteAction request.
 
-    HTTP-based add-ons put the triggering field's partial value in
-    ``commonEventObject.formInputs[<name>]``, same path as any other
-    field value. We scan every form input the request carries because
-    the field name is dynamic on the JIT path — it's suffixed with the
-    suggestion id (``jit_recruiter_name_sug_xxx``). ``parameters["query"]``
-    is also probed as a belt-and-suspenders fallback.
+    HTTP-based add-ons put every form input's value in
+    ``commonEventObject.formInputs[<name>]``, with no built-in indicator
+    of which field triggered the autocomplete. We resolve the triggering
+    field via the ``autocomplete_field`` action parameter that
+    ``build_recruiter_inputs`` bakes into the per-field autocomplete
+    action; that's the only reliable signal when multiple directory
+    inputs are on screen.
+
+    Falls back to a marker-substring scan for the create-loop form
+    (which doesn't pass ``autocomplete_field``) and finally to
+    ``parameters["query"]`` for older tests.
     """
     inputs = (
         body.common_event_object.form_inputs
         if body.common_event_object and body.common_event_object.form_inputs
         else {}
     )
+
+    # Preferred: the per-field action passes its own field name.
+    target_field = _get_param(body, "autocomplete_field")
+    if target_field:
+        val = _get_form_value(body, target_field) or ""
+        val = val.strip()
+        logger.info(
+            "directory/search: query from autocomplete_field=%r (len=%d)",
+            target_field,
+            len(val),
+        )
+        return val
+
+    # Fallback: marker scan for the create-loop form's shared action.
     candidate_fields: list[str] = []
     for field_name in inputs:
-        if any(marker in field_name for marker in _AUTOCOMPLETE_RECRUITER_MARKERS):
+        if any(marker in field_name for marker in _AUTOCOMPLETE_DIRECTORY_MARKERS):
             candidate_fields.append(field_name)
 
     for field_name in candidate_fields:
@@ -225,14 +250,11 @@ def _extract_autocomplete_query(body: AddonRequest) -> str:
             )
             return val.strip()
 
-    # Fallback: static parameter form (used by older tests).
+    # Final fallback: static parameter form (used by older tests).
     param_q = _get_param(body, "query") or ""
     if param_q.strip():
         return param_q.strip()
 
-    # Diagnostics for the empty-query case — most "autocomplete returns
-    # nothing" reports have been form-name mismatches between widget and
-    # extractor (the same bug that caused this comment to exist).
     logger.info(
         "directory/search: empty query — inspected fields=%s, all_form_keys=%s",
         candidate_fields,

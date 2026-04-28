@@ -42,8 +42,21 @@ def build_recruiter_inputs(
         ActionParameter(key="action_name", value="recruiter_selected"),
         *[ActionParameter(key=k, value=v) for k, v in extra.items()],
     ]
-    autocomplete = OnClickAction(function=directory_search_url) if directory_search_url else None
     on_change = OnClickAction(function=action_url, parameters=on_change_params)
+
+    def _autocomplete_for(field_name: str) -> OnClickAction | None:
+        """Per-field autocomplete action carrying the field name as a parameter.
+
+        Lets the server identify which field fired the autocomplete in
+        scenarios where multiple directory inputs are on screen (e.g. one
+        draft has a recruiter input mid-type while another has a CM input).
+        """
+        if not directory_search_url:
+            return None
+        return OnClickAction(
+            function=directory_search_url,
+            parameters=[ActionParameter(key="autocomplete_field", value=field_name)],
+        )
 
     return [
         TextInputWidget(
@@ -53,7 +66,7 @@ def build_recruiter_inputs(
                 type="SINGLE_LINE",
                 value=prefill_name,
                 hint_text="Type to search your Workspace directory",
-                auto_complete_action=autocomplete,
+                auto_complete_action=_autocomplete_for(name_field),
                 on_change_action=on_change,
             )
         ),
@@ -63,7 +76,7 @@ def build_recruiter_inputs(
                 label="Email",
                 type="SINGLE_LINE",
                 value=prefill_email,
-                auto_complete_action=autocomplete,
+                auto_complete_action=_autocomplete_for(email_field),
                 on_change_action=on_change,
             )
         ),
