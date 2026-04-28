@@ -98,23 +98,20 @@ def _dismiss_button(suggestion_id: str) -> Button:
 def _format_known_actors(view: SuggestionView, *, exclude: str) -> str:
     """Render a small-print line of actor emails the loop already has.
 
-    Used as a context hint under the JIT input — when we ask for the
-    recruiter, show client/CM emails we know; when we ask for the client,
-    show recruiter/CM. ``exclude`` skips the role we're asking for.
+    Used as a context hint under the JIT input. Shows the client contact
+    and the client manager (when present) — never the recruiter, since
+    showing the recruiter when we're asking for them is redundant, and
+    showing them when asking for the client clutters the card.
+    ``exclude`` skips the role we're currently asking for.
     """
     parts: list[str] = []
-    if exclude != "recruiter" and view.recruiter_email:
-        label = view.recruiter_name or "Recruiter"
-        parts.append(f"Recruiter: {label} &lt;{view.recruiter_email}&gt;")
     if exclude != "client_contact" and view.client_contact_email:
         label = view.client_contact_name or "Client"
         parts.append(f"Client: {label} &lt;{view.client_contact_email}&gt;")
     if view.client_manager_email:
         label = view.client_manager_name or "CM"
         parts.append(f"CM: {label} &lt;{view.client_manager_email}&gt;")
-    if not parts:
-        return ""
-    return "Known on this loop — " + "; ".join(parts)
+    return " · ".join(parts)
 
 
 def _missing_recipient_role(view: SuggestionView) -> tuple[bool, bool]:

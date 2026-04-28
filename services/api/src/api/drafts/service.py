@@ -75,11 +75,18 @@ def _row_to_draft(row: dict) -> EmailDraft:
 def resolve_recipients(
     loop: Loop,
     stage: Stage | None,
+    *,
+    sender_email: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Determine to/cc emails from stage state.
 
     This is the single source of truth for recipient routing. Both the
     DraftService and the addon compose_email handler should call this.
+
+    ``sender_email`` (the coordinator sending the message) is filtered
+    out of CC — coordinators are sometimes their own client manager
+    (e.g. Adam's loops where he is both coordinator and CM), and CC'ing
+    yourself on your own send is noise.
     """
     to_emails: list[str] = []
     cc_emails: list[str] = []
@@ -103,9 +110,11 @@ def resolve_recipients(
         if loop.client_contact and loop.client_contact.email:
             to_emails = [loop.client_contact.email]
 
-    # Client manager is always CC'd when present
+    # Client manager is CC'd when present, but never CC the sender.
     if loop.client_manager and loop.client_manager.email:
-        cc_emails = [loop.client_manager.email]
+        cm_email = loop.client_manager.email
+        if not sender_email or cm_email.lower() != sender_email.lower():
+            cc_emails = [cm_email]
 
     return to_emails, cc_emails
 
@@ -143,7 +152,9 @@ class DraftService:
         can compose manually from the sidebar.
         """
         stage = self._resolve_stage(loop, suggestion.stage_id)
-        to_emails, cc_emails = resolve_recipients(loop, stage)
+        to_emails, cc_emails = resolve_recipients(
+            loop, stage, sender_email=suggestion.coordinator_email
+        )
         subject = self._resolve_subject(loop)
 
         # Generate body via LLM (fallback to empty on failure)
