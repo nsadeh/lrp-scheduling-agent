@@ -100,7 +100,8 @@ def format_loop_state(loop: Loop | None) -> str:
     if loop.candidate:
         lines.append(f"Candidate: {loop.candidate.name}")
     if loop.client_contact:
-        lines.append(f"Client: {loop.client_contact.name} ({loop.client_contact.company})")
+        company = loop.client_contact.company or "Unknown"
+        lines.append(f"Client: {loop.client_contact.name} ({company})")
     if loop.recruiter:
         lines.append(f"Recruiter: {loop.recruiter.name} <{loop.recruiter.email}>")
 
@@ -114,6 +115,32 @@ def format_loop_state(loop: Loop | None) -> str:
     return "\n".join(lines)
 
 
+def format_linked_loops(loops: list[Loop]) -> str:
+    """Format ALL loops linked to the current thread.
+
+    Multi-loop threads (one Gmail thread linked to two or more loops, e.g.
+    two candidates discussed in the same chain) require the LLM to pick
+    which loop a suggestion targets via `target_loop_id`. This function
+    renders every linked loop so the LLM can disambiguate.
+    """
+    if not loops:
+        return "No matching loop found for this thread."
+
+    if len(loops) == 1:
+        return format_loop_state(loops[0])
+
+    blocks = [
+        f"This thread is linked to {len(loops)} loops. "
+        "When emitting a loop-scoped suggestion (DRAFT_EMAIL, ADVANCE_STAGE, "
+        "MARK_COLD), set `target_loop_id` to the specific loop you mean.",
+        "",
+    ]
+    for loop in loops:
+        blocks.append(format_loop_state(loop))
+        blocks.append("")
+    return "\n".join(blocks).rstrip()
+
+
 def format_active_loops(loops: list[Loop]) -> str:
     """Format coordinator's active loops summary for thread-to-loop matching."""
     if not loops:
@@ -122,7 +149,11 @@ def format_active_loops(loops: list[Loop]) -> str:
     lines = ["Active scheduling loops:"]
     for loop in loops:
         candidate_name = loop.candidate.name if loop.candidate else "Unknown"
-        client_company = loop.client_contact.company if loop.client_contact else "Unknown"
+        client_company = (
+            loop.client_contact.company
+            if loop.client_contact and loop.client_contact.company
+            else "Unknown"
+        )
         stage_summary = ", ".join(f"{s.name}={s.state.value}" for s in loop.stages if s.is_active)
         lines.append(
             f"  - {loop.title} (ID: {loop.id}): "

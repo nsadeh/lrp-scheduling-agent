@@ -12,7 +12,7 @@ import os
 from datetime import UTC, datetime
 
 import sentry_sdk
-from arq import cron
+from arq import create_pool, cron
 from arq.connections import RedisSettings
 from psycopg_pool import AsyncConnectionPool
 
@@ -71,6 +71,12 @@ async def startup(ctx: dict) -> None:
         langfuse=langfuse,
     )
 
+    # Dedicated arq pool for the hook to enqueue follow-up reclassification
+    # jobs (after CREATE_LOOP / LINK_THREAD auto-resolve). Separate from arq's
+    # internal `ctx["redis"]` so it's lifecycle-managed by us.
+    arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+    ctx["arq_pool"] = arq_pool
+
     ctx["hook"] = ClassifierHook(
         llm=llm,
         langfuse=langfuse,
@@ -78,6 +84,7 @@ async def startup(ctx: dict) -> None:
         loop_service=loop_service,
         draft_service=draft_service,
         sender_blacklist=load_blacklist(),
+        arq_pool=arq_pool,
     )
     logger.info("worker startup complete — ClassifierHook active")
 
@@ -87,6 +94,9 @@ async def shutdown(ctx: dict) -> None:
     pool = ctx.get("db")
     if pool:
         await pool.close()
+    arq_pool = ctx.get("arq_pool")
+    if arq_pool is not None:
+        await arq_pool.close()
     logger.info("worker shutdown complete")
 
 

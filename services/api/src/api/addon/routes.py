@@ -806,11 +806,11 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
                 return val
         return _get_form_value(body, name)
 
-    candidate_name = _field("candidate_name") or "Unknown"
-    client_name = _field("client_name") or "Unknown"
+    candidate_name = _field("candidate_name") or "Unknown Candidate"
+    client_name = _field("client_name") or ""
     client_email = (_field("client_email") or "").strip()
     client_company = _field("client_company") or ""
-    recruiter_name = _field("recruiter_name") or "Unknown"
+    recruiter_name = _field("recruiter_name") or ""
     recruiter_email = (_field("recruiter_email") or "").strip()
 
     # If the coordinator selected a directory suggestion but clicked Create
@@ -826,64 +826,55 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     cm_email = _field("cm_email")
     first_stage = _field("first_stage_name") or "Round 1"
 
-    if not client_email or not recruiter_email:
-        missing = []
-        if not client_email:
-            missing.append("Client Email")
-        if not recruiter_email:
-            missing.append("Recruiter Email")
-        return build_create_loop_form(
-            gmail_thread_id=_get_param(body, "gmail_thread_id"),
-            gmail_subject=_get_param(body, "gmail_subject"),
-            gmail_message_id=_get_param(body, "gmail_message_id"),
-            prefill_candidate_name=candidate_name if candidate_name != "Unknown" else None,
-            prefill_client_name=client_name if client_name != "Unknown" else None,
-            prefill_client_email=client_email or None,
-            prefill_client_company=client_company or None,
-            prefill_recruiter_name=recruiter_name if recruiter_name != "Unknown" else None,
-            prefill_recruiter_email=recruiter_email or None,
-            prefill_cm_name=cm_name,
-            prefill_cm_email=cm_email,
-            prefill_first_stage=first_stage,
-            error_message=f"Required: {', '.join(missing)}",
-            suggestion_id=suggestion_id,
-        )
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     gmail_subject = _get_param(body, "gmail_subject")
 
-    # Create or find contacts
-    client_contact = await svc.find_or_create_client_contact(
-        name=client_name, email=client_email, company=client_company
-    )
+    # Create or find contacts only when the coordinator supplied an email
+    # for them. Loops with missing recruiter/client are valid — the JIT
+    # widget on the draft card collects them at send time.
+    client_contact_id = None
+    if client_email:
+        client_contact = await svc.find_or_create_client_contact(
+            name=client_name or client_email,
+            email=client_email,
+            company=client_company or None,
+        )
+        client_contact_id = client_contact.id
 
-    # Look up the recruiter's Workspace photo URL only when we're about to
-    # create a new contact row. Existing rows keep whatever photo_url they
-    # already have (matches the stored-name dedup semantics).
-    recruiter_photo_url = await _fetch_recruiter_photo_url(
-        request=request,
-        svc=svc,
-        coordinator_email=email,
-        recruiter_email=recruiter_email,
-    )
-    recruiter = await svc.find_or_create_contact(
-        name=recruiter_name,
-        email=recruiter_email,
-        role="recruiter",
-        photo_url=recruiter_photo_url,
-    )
+    recruiter_id = None
+    if recruiter_email:
+        # Look up the recruiter's Workspace photo URL only when we're about to
+        # create a new contact row. Existing rows keep whatever photo_url they
+        # already have (matches the stored-name dedup semantics).
+        recruiter_photo_url = await _fetch_recruiter_photo_url(
+            request=request,
+            svc=svc,
+            coordinator_email=email,
+            recruiter_email=recruiter_email,
+        )
+        recruiter = await svc.find_or_create_contact(
+            name=recruiter_name or recruiter_email,
+            email=recruiter_email,
+            role="recruiter",
+            photo_url=recruiter_photo_url,
+        )
+        recruiter_id = recruiter.id
+
     cm_id = None
-    if cm_name and cm_email:
-        cm = await svc.find_or_create_contact(name=cm_name, email=cm_email, role="client_manager")
+    if cm_email:
+        cm = await svc.find_or_create_contact(
+            name=cm_name or cm_email, email=cm_email, role="client_manager"
+        )
         cm_id = cm.id
 
-    title = f"{candidate_name}, {client_company}"
+    title = f"{candidate_name}, {client_company}" if client_company else candidate_name
 
     await svc.create_loop(
         coordinator_email=email,
         coordinator_name=email.split("@")[0],
         candidate_name=candidate_name,
-        client_contact_id=client_contact.id,
-        recruiter_id=recruiter.id,
+        client_contact_id=client_contact_id,
+        recruiter_id=recruiter_id,
         title=title,
         first_stage_name=first_stage,
         client_manager_id=cm_id,
@@ -962,6 +953,72 @@ async def _handle_view_draft(body: AddonRequest, svc: LoopService, email: str, *
     return build_draft_preview(draft)
 
 
+async def _apply_jit_contacts(
+    *,
+    body: AddonRequest,
+    request: Request | None,
+    svc: LoopService,
+    draft_svc,
+    draft,
+    suggestion_id: str,
+    coordinator_email: str,
+):
+    """Read JIT contact inputs off the form, attach them to the loop, patch
+    the draft's recipients. Returns the (possibly updated) draft.
+
+    Mirrors the create-loop-form contact creation: ``find_or_create_contact``
+    for recruiter (with directory photo lookup), ``find_or_create_client_contact``
+    for clients. No-op when the inputs are blank.
+    """
+    raw_recruiter_name = _get_form_value(body, f"jit_recruiter_name_{suggestion_id}") or ""
+    raw_recruiter_email = _get_form_value(body, f"jit_recruiter_email_{suggestion_id}") or ""
+    parsed = parse_name_email(raw_recruiter_name) or parse_name_email(raw_recruiter_email)
+    if parsed is not None:
+        recruiter_name, recruiter_email = parsed
+    else:
+        recruiter_name, recruiter_email = raw_recruiter_name, raw_recruiter_email
+    recruiter_email = recruiter_email.strip()
+
+    if recruiter_email and draft.loop_id:
+        photo_url = await _fetch_recruiter_photo_url(
+            request=request,
+            svc=svc,
+            coordinator_email=coordinator_email,
+            recruiter_email=recruiter_email,
+        )
+        recruiter = await svc.find_or_create_contact(
+            name=recruiter_name or recruiter_email,
+            email=recruiter_email,
+            role="recruiter",
+            photo_url=photo_url,
+        )
+        await svc.set_recruiter(draft.loop_id, recruiter.id, coordinator_email)
+
+    client_name = (_get_form_value(body, f"jit_client_name_{suggestion_id}") or "").strip()
+    client_email = (_get_form_value(body, f"jit_client_email_{suggestion_id}") or "").strip()
+    client_company = (_get_form_value(body, f"jit_client_company_{suggestion_id}") or "").strip()
+
+    if client_email and draft.loop_id:
+        client_contact = await svc.find_or_create_client_contact(
+            name=client_name or client_email,
+            email=client_email,
+            company=client_company or None,
+        )
+        await svc.set_client_contact(draft.loop_id, client_contact.id, coordinator_email)
+
+    if not recruiter_email and not client_email:
+        return draft
+
+    # Re-resolve recipients now that the loop has the contacts attached.
+    from api.drafts.service import resolve_recipients
+
+    loop = await svc.get_loop(draft.loop_id)
+    stage = next((s for s in loop.stages if s.id == draft.stage_id), None)
+    to_emails, cc_emails = resolve_recipients(loop, stage)
+    await draft_svc.update_draft_recipients(draft.id, to_emails, cc_emails)
+    return await draft_svc.get_draft(draft.id)
+
+
 async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     """Send an AI-generated draft: update body if edited, send via LoopService, mark sent."""
     from api.classifier.service import SuggestionService
@@ -990,6 +1047,29 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     send_body = edited_body if edited_body is not None else draft.body
     if edited_body is not None and edited_body != draft.body:
         await draft_svc.update_draft_body(draft.id, send_body)
+
+    # JIT contact collection: when the loop was auto-created with a missing
+    # recruiter or client_contact, the draft card renders inline inputs
+    # (jit_recruiter_*, jit_client_*). If they're populated, attach the
+    # contact to the loop and patch the draft's recipients before sending.
+    if suggestion_id and not draft.to_emails:
+        draft = await _apply_jit_contacts(
+            body=body,
+            request=request,
+            svc=svc,
+            draft_svc=draft_svc,
+            draft=draft,
+            suggestion_id=suggestion_id,
+            coordinator_email=email,
+        )
+        if not draft.to_emails:
+            # Required JIT inputs weren't supplied — bail out. The disabled
+            # Send button on the card means we shouldn't normally hit this.
+            logger.warning(
+                "send_draft: draft %s has no recipients and no JIT inputs supplied",
+                draft.id,
+            )
+            return await _build_refreshed_overview(request, email)
 
     # Fetch the thread once, up-front. Two downstream blocks consume it:
     #   (1) the RFC 2822 threading headers immediately below, and
@@ -1114,9 +1194,13 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     if not suggestion:
         return await _build_refreshed_overview(request, email)
 
-    # Dispatch by action type — only handle actions that can be one-click accepted.
-    # CREATE_LOOP and DRAFT_EMAIL have their own dedicated flows (show_create_form, send_draft).
-    # ASK_COORDINATOR has no backend action yet.
+    # New ADVANCE_STAGE / LINK_THREAD suggestions are auto-resolved by the
+    # classifier and never render an Accept button. These branches still
+    # fire for: (1) pre-deploy PENDING rows that were created before the
+    # auto-resolver shipped — coordinators clear the backlog manually; and
+    # (2) post-deploy rows whose resolver Sentry-and-dropped. CREATE_LOOP
+    # has its own dedicated submit path (create_loop). DRAFT_EMAIL uses
+    # send_draft. ASK_COORDINATOR has no backend yet.
     if suggestion.action == SuggestedAction.ADVANCE_STAGE:
         if suggestion.stage_id and suggestion.target_state:
             await svc.advance_stage(suggestion.stage_id, StageState(suggestion.target_state), email)
@@ -1136,8 +1220,6 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
         else:
             logger.warning("LINK_THREAD suggestion %s missing loop_id or thread_id", suggestion_id)
     else:
-        # CREATE_LOOP, DRAFT_EMAIL, ASK_COORDINATOR, NO_ACTION — should not reach here
-        # via normal UI. Don't silently mark as accepted.
         logger.warning(
             "accept_suggestion called for unsupported action %s (suggestion %s) — ignoring",
             suggestion.action,
@@ -1188,8 +1270,34 @@ async def _handle_unknown(body: AddonRequest, svc: LoopService, email: str, **kw
     return await _build_refreshed_overview(kwargs.get("request"), email)
 
 
+async def _handle_update_candidate_name(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Rename a loop's candidate from the inline overview affordance.
+
+    Surfaced when CREATE_LOOP auto-resolved without a candidate name and
+    the loop card shows the placeholder ("Unknown Candidate"). The form
+    field is suffixed with the loop_id so it's stable across re-renders.
+    """
+    request = kwargs.get("request")
+    loop_id = _get_param(body, "loop_id")
+    if not loop_id:
+        return await _build_refreshed_overview(request, email)
+    new_name = (_get_form_value(body, f"candidate_name_{loop_id}") or "").strip()
+    if not new_name:
+        return await _build_refreshed_overview(request, email)
+
+    loop = await svc.get_loop(loop_id)
+    if loop and loop.candidate:
+        await svc.update_candidate_name(
+            candidate_id=loop.candidate.id,
+            name=new_name,
+            coordinator_email=email,
+            loop_id=loop_id,
+        )
+    return await _build_refreshed_overview(request, email)
+
+
 _ACTION_HANDLERS = {
-    # Loop creation (used by CREATE_LOOP suggestion)
+    # Loop creation (manual path)
     "show_create_form": _handle_show_create_form,
     "create_loop": _handle_create_loop,
     "recruiter_selected": _handle_recruiter_selected,
@@ -1197,10 +1305,12 @@ _ACTION_HANDLERS = {
     "view_draft": _handle_view_draft,
     "send_draft": _handle_send_draft,
     "discard_draft": _handle_discard_draft,
-    # Suggestion actions (new suggestion-centric UI)
+    # Suggestion actions (MARK_COLD / ASK_COORDINATOR / dismiss)
     "accept_suggestion": _handle_accept_suggestion,
     "reject_suggestion": _handle_reject_suggestion,
     "show_suggestions_tab": _handle_show_suggestions_tab,
+    # JIT candidate rename (when classifier auto-created with placeholder)
+    "update_candidate_name": _handle_update_candidate_name,
 }
 
 

@@ -137,7 +137,7 @@ class LoopService:
             return _row_to_contact(row)
 
     async def find_or_create_client_contact(
-        self, name: str, email: str, company: str
+        self, name: str, email: str, company: str | None = None
     ) -> ClientContact:
         async with self._pool.connection() as conn, conn.transaction():
             existing = await queries.get_client_contact_by_email(conn, email=email)
@@ -190,8 +190,8 @@ class LoopService:
         coordinator_email: str,
         coordinator_name: str,
         candidate_name: str,
-        client_contact_id: str,
-        recruiter_id: str,
+        client_contact_id: str | None,
+        recruiter_id: str | None,
         title: str,
         first_stage_name: str = "Round 1",
         client_manager_id: str | None = None,
@@ -290,10 +290,13 @@ class LoopService:
 
             loop = _row_to_loop(loop_row)
 
-            # Populate actors
+            # Populate actors (recruiter/client_contact may be null on loops
+            # auto-created with incomplete info; collected JIT at send time).
             loop.coordinator = await self._get_coordinator(conn, loop.coordinator_id)
-            loop.client_contact = await self._get_client_contact(conn, loop.client_contact_id)
-            loop.recruiter = await self._get_contact(conn, loop.recruiter_id)
+            if loop.client_contact_id:
+                loop.client_contact = await self._get_client_contact(conn, loop.client_contact_id)
+            if loop.recruiter_id:
+                loop.recruiter = await self._get_contact(conn, loop.recruiter_id)
             if loop.client_manager_id:
                 loop.client_manager = await self._get_contact(conn, loop.client_manager_id)
             loop.candidate = await self._get_candidate(conn, loop.candidate_id)
@@ -499,6 +502,78 @@ class LoopService:
             if row is None:
                 return None
             return await self.get_loop(row[0])
+
+    async def find_loops_by_thread(self, gmail_thread_id: str) -> list[Loop]:
+        """All loops linked to a Gmail thread (multi-loop threads supported)."""
+        async with self._pool.connection() as conn:
+            rows = await _collect(
+                queries.find_loops_by_gmail_thread_id(conn, gmail_thread_id=gmail_thread_id)
+            )
+        return [await self.get_loop(row[0]) for row in rows]
+
+    # ------------------------------------------------------------------
+    # JIT actor patching (used when missing contact info is supplied at
+    # send time on a loop that was created with nulls)
+    # ------------------------------------------------------------------
+
+    async def set_recruiter(self, loop_id: str, recruiter_id: str, coordinator_email: str) -> None:
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.set_loop_recruiter(conn, id=loop_id, recruiter_id=recruiter_id)
+            await self._record_event(
+                conn,
+                loop_id=loop_id,
+                stage_id=None,
+                event_type=EventType.ACTOR_UPDATED,
+                data={"actor": "recruiter", "recruiter_id": recruiter_id},
+                actor_email=coordinator_email,
+            )
+
+    async def set_client_contact(
+        self, loop_id: str, client_contact_id: str, coordinator_email: str
+    ) -> None:
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.set_loop_client_contact(
+                conn, id=loop_id, client_contact_id=client_contact_id
+            )
+            await self._record_event(
+                conn,
+                loop_id=loop_id,
+                stage_id=None,
+                event_type=EventType.ACTOR_UPDATED,
+                data={"actor": "client_contact", "client_contact_id": client_contact_id},
+                actor_email=coordinator_email,
+            )
+
+    async def set_client_manager(
+        self, loop_id: str, client_manager_id: str, coordinator_email: str
+    ) -> None:
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.set_loop_client_manager(
+                conn, id=loop_id, client_manager_id=client_manager_id
+            )
+            await self._record_event(
+                conn,
+                loop_id=loop_id,
+                stage_id=None,
+                event_type=EventType.ACTOR_UPDATED,
+                data={"actor": "client_manager", "client_manager_id": client_manager_id},
+                actor_email=coordinator_email,
+            )
+
+    async def update_candidate_name(
+        self, candidate_id: str, name: str, coordinator_email: str, loop_id: str
+    ) -> None:
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_candidate_name(conn, id=candidate_id, name=name)
+            await self._record_event(
+                conn,
+                loop_id=loop_id,
+                stage_id=None,
+                event_type=EventType.ACTOR_UPDATED,
+                data={"actor": "candidate", "name": name},
+                actor_email=coordinator_email,
+            )
+            await queries.update_loop_timestamp(conn, id=loop_id)
 
     # ------------------------------------------------------------------
     # Email sending
@@ -765,11 +840,14 @@ def _loop_to_summary(loop: Loop) -> LoopSummary:
     if urgent and urgent.time_slots:
         next_ts = urgent.time_slots[0]
 
+    client_company = "Unknown"
+    if loop.client_contact and loop.client_contact.company:
+        client_company = loop.client_contact.company
     return LoopSummary(
         loop_id=loop.id,
         title=loop.title,
         candidate_name=loop.candidate.name if loop.candidate else "Unknown",
-        client_company=loop.client_contact.company if loop.client_contact else "Unknown",
+        client_company=client_company,
         most_urgent_stage_id=urgent.id if urgent else None,
         most_urgent_stage_name=urgent.name if urgent else None,
         most_urgent_next_action=urgent.next_action if urgent else None,

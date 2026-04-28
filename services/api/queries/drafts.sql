@@ -43,6 +43,12 @@ UPDATE email_drafts
 SET body = :body, status = 'edited', updated_at = now()
 WHERE id = :id;
 
+-- name: update_draft_recipients!
+-- Patch to_emails / cc_emails after JIT contact info is supplied at send time.
+UPDATE email_drafts
+SET to_emails = :to_emails, cc_emails = :cc_emails, updated_at = now()
+WHERE id = :id;
+
 -- name: mark_draft_sent!
 UPDATE email_drafts
 SET status = 'sent', sent_at = now(), updated_at = now()

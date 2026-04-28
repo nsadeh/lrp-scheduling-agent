@@ -127,6 +127,7 @@ def _make_hook(sender_blacklist: SenderBlacklist | None = None):
 
     loop_service = MagicMock()
     loop_service.find_loop_by_thread = AsyncMock(return_value=None)
+    loop_service.find_loops_by_thread = AsyncMock(return_value=[])
     loop_service.get_coordinator_by_email = AsyncMock(return_value=None)
     loop_service.get_events = AsyncMock(return_value=[])
     loop_service.advance_stage = AsyncMock()
@@ -190,6 +191,7 @@ class TestOutgoingSkip:
     async def test_outgoing_on_unlinked_thread_skips(self):
         hook, _, _, suggestion_service, loop_service = _make_hook()
         loop_service.find_loop_by_thread.return_value = None
+        loop_service.find_loops_by_thread.return_value = []
 
         event = _event(direction=MessageDirection.OUTGOING)
         await hook.on_email(event)
@@ -200,6 +202,7 @@ class TestOutgoingSkip:
     async def test_outgoing_on_linked_thread_classifies(self):
         hook, _, _, suggestion_service, loop_service = _make_hook()
         loop_service.find_loop_by_thread.return_value = _loop()
+        loop_service.find_loops_by_thread.return_value = [_loop()]
 
         with patch(
             "api.classifier.hook.classify_email",
@@ -221,6 +224,7 @@ class TestErrorHandling:
     async def test_llm_failure_creates_needs_attention(self):
         hook, _, _, suggestion_service, loop_service = _make_hook()
         loop_service.find_loop_by_thread.return_value = None
+        loop_service.find_loops_by_thread.return_value = []
 
         with patch(
             "api.classifier.hook.classify_email",
@@ -244,6 +248,7 @@ class TestSenderBlacklist:
         blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
         hook, _, _, suggestion_service, loop_service = _make_hook(sender_blacklist=blacklist)
         loop_service.find_loop_by_thread.return_value = None
+        loop_service.find_loops_by_thread.return_value = []
 
         # classify_email patched only to assert it isn't called
         with patch(
@@ -263,6 +268,7 @@ class TestSenderBlacklist:
         blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
         hook, _, _, suggestion_service, loop_service = _make_hook(sender_blacklist=blacklist)
         loop_service.find_loop_by_thread.return_value = _loop()
+        loop_service.find_loops_by_thread.return_value = [_loop()]
 
         with patch(
             "api.classifier.hook.classify_email",
@@ -283,6 +289,7 @@ class TestSenderBlacklist:
         blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
         hook, _, _, _, loop_service = _make_hook(sender_blacklist=blacklist)
         loop_service.find_loop_by_thread.return_value = None
+        loop_service.find_loops_by_thread.return_value = []
 
         with patch(
             "api.classifier.hook.classify_email",
@@ -299,6 +306,7 @@ class TestSenderBlacklist:
         """When no blacklist is injected, default is empty — nothing is blocked."""
         hook, _, _, _, loop_service = _make_hook(sender_blacklist=None)
         loop_service.find_loop_by_thread.return_value = None
+        loop_service.find_loops_by_thread.return_value = []
 
         with patch(
             "api.classifier.hook.classify_email",

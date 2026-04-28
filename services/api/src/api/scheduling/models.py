@@ -96,7 +96,7 @@ class ClientContact(BaseModel):
     id: str
     name: str
     email: str
-    company: str
+    company: str | None = None
     created_at: datetime
 
 
@@ -163,8 +163,8 @@ class EmailThread(BaseModel):
 class Loop(BaseModel):
     id: str
     coordinator_id: str
-    client_contact_id: str
-    recruiter_id: str
+    client_contact_id: str | None = None
+    recruiter_id: str | None = None
     client_manager_id: str | None = None
     candidate_id: str
     title: str

@@ -249,6 +249,20 @@ class DraftService:
         async with self._pool.connection() as conn, conn.transaction():
             await queries.update_draft_body(conn, id=draft_id, body=body)
 
+    async def update_draft_recipients(
+        self, draft_id: str, to_emails: list[str], cc_emails: list[str]
+    ) -> None:
+        """Patch a draft's recipients after JIT contact info was supplied.
+
+        Used by the send_draft handler when the loop was auto-created with
+        a missing recruiter/client and the coordinator filled them in inline
+        on the draft card.
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_draft_recipients(
+                conn, id=draft_id, to_emails=to_emails, cc_emails=cc_emails
+            )
+
     async def mark_sent(self, draft_id: str) -> None:
         async with self._pool.connection() as conn, conn.transaction():
             await queries.mark_draft_sent(conn, id=draft_id)
