@@ -133,94 +133,20 @@ def _missing_recipient_role(view: SuggestionView) -> tuple[bool, bool]:
 def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
     """DRAFT_EMAIL - inline editable draft with Send/Forward + Dismiss.
 
-    When the draft has no recipient (the loop's recruiter or client_contact
-    is null because the loop was auto-created with incomplete info), this
-    card collects the missing contact inline using the shared autocomplete
-    helpers and disables the Send button until an email is supplied.
+    When the loop is missing a contact this card needs (recruiter for
+    NEW-stage drafts, client for later stages, CM whenever it's null),
+    the card collects it inline. Picks are staged on
+    ``draft.pending_jit_data`` rather than committed to the loop, so
+    misclicks can be undone with the small "x" button before Send.
+    Contacts are only created and attached to the loop at Send time.
     """
     widgets: list[Widget] = []
     sug = view.suggestion
     draft = view.draft
 
-    # Summary header
     widgets.append(_text(f"<b>✉ {sug.summary}</b>"))
 
-    if draft:
-        is_fwd = draft.is_forward
-        needs_recruiter, needs_client = _missing_recipient_role(view)
-
-        # Recipients: either show the resolved To/CC, OR collect inline.
-        if draft.to_emails:
-            widgets.append(_decorated(", ".join(draft.to_emails), "To"))
-            if draft.cc_emails:
-                widgets.append(_decorated(", ".join(draft.cc_emails), "CC"))
-        elif needs_recruiter:
-            widgets.append(_text("<i>Add the recruiter so this draft can be sent.</i>"))
-            widgets.extend(
-                build_recruiter_inputs(
-                    action_url=get_action_url(),
-                    directory_search_url=directory_search_url(),
-                    name_field=f"jit_recruiter_name_{sug.id}",
-                    email_field=f"jit_recruiter_email_{sug.id}",
-                    on_change_extra_params={
-                        "suggestion_id": sug.id,
-                        "draft_id": draft.id,
-                    },
-                )
-            )
-            known = _format_known_actors(view, exclude="recruiter")
-            if known:
-                widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
-        elif needs_client:
-            widgets.append(_text("<i>Add the client contact so this draft can be sent.</i>"))
-            widgets.extend(
-                build_client_inputs(
-                    name_field=f"jit_client_name_{sug.id}",
-                    email_field=f"jit_client_email_{sug.id}",
-                    company_field=f"jit_client_company_{sug.id}",
-                )
-            )
-            known = _format_known_actors(view, exclude="client_contact")
-            if known:
-                widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
-
-        widgets.append(_decorated(draft.subject, "Subject"))
-        widgets.append(_divider())
-
-        # Editable body - unique name per suggestion to avoid collisions.
-        # For forwards the note is optional (coordinator may just forward
-        # without commentary); for replies the message is always required.
-        input_name = f"draft_body_{sug.id}"
-        widgets.append(
-            TextInputWidget(
-                text_input=TextInput(
-                    name=input_name,
-                    label="Forward note" if is_fwd else "Message",
-                    type="MULTIPLE_LINE",
-                    value=draft.body,
-                )
-            )
-        )
-
-        # Send/Forward button - disabled when there's no recipient yet.
-        # The recruiter onChangeAction triggers a card refresh, so once
-        # the coordinator picks an email the button re-renders enabled.
-        send_label = "Forward" if is_fwd else "Send"
-        send_required = [] if is_fwd else [input_name]
-        send_disabled = not draft.to_emails and (needs_recruiter or needs_client)
-        send_button = Button(
-            text=send_label,
-            on_click=_action(
-                "send_draft",
-                required_widgets=send_required,
-                draft_id=draft.id,
-                suggestion_id=sug.id,
-            ),
-            disabled=send_disabled,
-        )
-        widgets.append(_buttons(_dismiss_button(sug.id), send_button))
-    else:
-        # Draft not yet generated - show refresh button so user can re-check
+    if not draft:
         widgets.append(_text("<i>Draft is being generated… tap Refresh to check.</i>"))
         widgets.append(
             _buttons(
@@ -228,8 +154,193 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
                 _dismiss_button(sug.id),
             )
         )
+        return widgets
 
+    is_fwd = draft.is_forward
+    pending = draft.pending_jit_data or {}
+    needs_recruiter, needs_client = _missing_recipient_role(view)
+    needs_cm = view.client_manager_email is None
+
+    # ---- Recipients --------------------------------------------------
+    if draft.to_emails:
+        widgets.append(_decorated(", ".join(draft.to_emails), "To"))
+        if draft.cc_emails:
+            widgets.append(_decorated(", ".join(draft.cc_emails), "CC"))
+    elif needs_recruiter:
+        widgets.extend(_render_recruiter_jit(sug.id, draft.id, pending))
+        known = _format_known_actors(view, exclude="recruiter")
+        if known:
+            widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
+    elif needs_client:
+        widgets.extend(_render_client_jit(sug.id, draft.id, pending))
+        known = _format_known_actors(view, exclude="client_contact")
+        if known:
+            widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
+
+    # ---- CM JIT (independent of TO/recipient role) ------------------
+    # Always offered when the loop has no CM, so the coordinator can
+    # supply someone to CC. Optional — does not gate Send.
+    if needs_cm:
+        widgets.extend(_render_cm_jit(sug.id, draft.id, pending))
+
+    widgets.append(_decorated(draft.subject, "Subject"))
+    widgets.append(_divider())
+
+    # Editable body
+    input_name = f"draft_body_{sug.id}"
+    widgets.append(
+        TextInputWidget(
+            text_input=TextInput(
+                name=input_name,
+                label="Forward note" if is_fwd else "Message",
+                type="MULTIPLE_LINE",
+                value=draft.body,
+            )
+        )
+    )
+
+    # Send is enabled when the required role (recruiter for NEW, client
+    # otherwise) is either already on the loop OR staged in pending_jit_data.
+    # CM is optional; it doesn't gate Send.
+    send_disabled = False
+    if not draft.to_emails:
+        if needs_recruiter and not pending.get("recruiter", {}).get("email"):
+            send_disabled = True
+        if needs_client and not pending.get("client_contact", {}).get("email"):
+            send_disabled = True
+
+    send_label = "Forward" if is_fwd else "Send"
+    send_required = [] if is_fwd else [input_name]
+    send_button = Button(
+        text=send_label,
+        on_click=_action(
+            "send_draft",
+            required_widgets=send_required,
+            draft_id=draft.id,
+            suggestion_id=sug.id,
+        ),
+        disabled=send_disabled,
+    )
+    widgets.append(_buttons(_dismiss_button(sug.id), send_button))
     return widgets
+
+
+def _render_recruiter_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
+    """JIT inputs (or "selected" badge) for recruiter."""
+    selected = pending.get("recruiter") or {}
+    if selected.get("email"):
+        return _render_jit_selected(
+            label="Recruiter",
+            name=selected.get("name") or selected["email"],
+            email=selected["email"],
+            sug_id=sug_id,
+            draft_id=draft_id,
+            role="recruiter",
+        )
+    widgets: list[Widget] = [
+        _text("<i>Add the recruiter so this draft can be sent.</i>"),
+    ]
+    widgets.extend(
+        build_recruiter_inputs(
+            action_url=get_action_url(),
+            directory_search_url=directory_search_url(),
+            name_field=f"jit_recruiter_name_{sug_id}",
+            email_field=f"jit_recruiter_email_{sug_id}",
+            on_change_extra_params={
+                "suggestion_id": sug_id,
+                "draft_id": draft_id,
+                "jit_role": "recruiter",
+            },
+        )
+    )
+    return widgets
+
+
+def _render_client_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
+    """JIT inputs (or "selected" badge) for client contact."""
+    selected = pending.get("client_contact") or {}
+    if selected.get("email"):
+        return _render_jit_selected(
+            label="Client contact",
+            name=selected.get("name") or selected["email"],
+            email=selected["email"],
+            sug_id=sug_id,
+            draft_id=draft_id,
+            role="client_contact",
+        )
+    widgets: list[Widget] = [
+        _text("<i>Add the client contact so this draft can be sent.</i>"),
+    ]
+    widgets.extend(
+        build_client_inputs(
+            name_field=f"jit_client_name_{sug_id}",
+            email_field=f"jit_client_email_{sug_id}",
+            company_field=f"jit_client_company_{sug_id}",
+        )
+    )
+    return widgets
+
+
+def _render_cm_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
+    """JIT inputs (or "selected" badge) for client manager. Optional."""
+    selected = pending.get("client_manager") or {}
+    if selected.get("email"):
+        return _render_jit_selected(
+            label="CM (CC)",
+            name=selected.get("name") or selected["email"],
+            email=selected["email"],
+            sug_id=sug_id,
+            draft_id=draft_id,
+            role="client_manager",
+        )
+    widgets: list[Widget] = [
+        _text("<i>No client manager on this loop — add one to CC, or send without.</i>"),
+    ]
+    # Reuse the same Workspace-directory autocomplete (CMs are LRP folks).
+    widgets.extend(
+        build_recruiter_inputs(
+            action_url=get_action_url(),
+            directory_search_url=directory_search_url(),
+            name_field=f"jit_cm_name_{sug_id}",
+            email_field=f"jit_cm_email_{sug_id}",
+            on_change_extra_params={
+                "suggestion_id": sug_id,
+                "draft_id": draft_id,
+                "jit_role": "client_manager",
+            },
+        )
+    )
+    return widgets
+
+
+def _render_jit_selected(
+    *,
+    label: str,
+    name: str,
+    email: str,
+    sug_id: str,
+    draft_id: str,
+    role: str,
+) -> list[Widget]:
+    """Show a staged JIT pick with a small "x" button to clear it.
+
+    The pick lives on ``draft.pending_jit_data[role]`` and isn't committed
+    to the loop until Send. The "x" button hits ``clear_jit`` which wipes
+    that role and re-renders the empty inputs.
+    """
+    clear_button = Button(
+        text="✕ Clear",
+        on_click=_action(
+            "clear_jit",
+            draft_id=draft_id,
+            suggestion_id=sug_id,
+            jit_role=role,
+        ),
+    )
+    return [
+        _decorated(f"{name} <{email}>", label),
+        _buttons(clear_button),
+    ]
 
 
 def _build_mark_cold_suggestion(view: SuggestionView) -> list[Widget]:

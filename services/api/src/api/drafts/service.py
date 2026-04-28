@@ -64,6 +64,14 @@ async def _collect(async_gen) -> list:
 
 def _row_to_draft(row: dict) -> EmailDraft:
     """Convert a dict row (from psycopg dict_row factory) to an EmailDraft model."""
+    # JSONB columns may arrive as either dict (when the psycopg JSON
+    # adapter is registered) or string (raw). Normalize so Pydantic
+    # validation succeeds in both cases.
+    raw_jit = row.get("pending_jit_data")
+    if isinstance(raw_jit, str):
+        row = {**row, "pending_jit_data": json.loads(raw_jit)}
+    elif raw_jit is None:
+        row = {**row, "pending_jit_data": {}}
     return EmailDraft(**row)
 
 
@@ -272,6 +280,18 @@ class DraftService:
         async with self._pool.connection() as conn, conn.transaction():
             await queries.update_draft_recipients(
                 conn, id=draft_id, to_emails=to_emails, cc_emails=cc_emails
+            )
+
+    async def update_pending_jit_data(self, draft_id: str, data: dict) -> None:
+        """Replace pending_jit_data on the draft.
+
+        Stores the coordinator's in-flight contact picks (recruiter / client
+        / CM) until they click Send. Misclicks can be undone with the "x"
+        clear button before commit.
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_pending_jit_data(
+                conn, id=draft_id, pending_jit_data=json.dumps(data)
             )
 
     async def mark_sent(self, draft_id: str) -> None:

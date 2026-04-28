@@ -99,6 +99,7 @@ SELECT
     d.body AS draft_body, d.status AS draft_status,
     d.gmail_thread_id AS draft_gmail_thread_id,
     d.is_forward AS draft_is_forward,
+    d.pending_jit_data AS draft_pending_jit_data,
     -- Known actor emails — used as small-print hints under JIT inputs so
     -- coordinators can see what we already have when we ask for the missing one.
     cc.name AS client_contact_name,
@@ -139,6 +140,7 @@ SELECT
     d.body AS draft_body, d.status AS draft_status,
     d.gmail_thread_id AS draft_gmail_thread_id,
     d.is_forward AS draft_is_forward,
+    d.pending_jit_data AS draft_pending_jit_data,
     cc.name AS client_contact_name,
     cc.email AS client_contact_email,
     rec.name AS recruiter_name,

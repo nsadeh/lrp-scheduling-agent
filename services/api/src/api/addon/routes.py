@@ -798,50 +798,39 @@ async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email
         return _get_form_value(body, name)
 
     if draft_id and suggestion_id:
-        # JIT path — read the suffixed input names the JIT widget uses.
-        raw_name = _field(f"jit_recruiter_name_{suggestion_id}") or ""
-        raw_email = _field(f"jit_recruiter_email_{suggestion_id}") or ""
+        # JIT path — stash the pick on draft.pending_jit_data instead of
+        # committing to the loop. The actual contact creation + loop attach
+        # happens at Send time. This makes misclicks recoverable via the
+        # "x" Clear button and matches the user's mental model: nothing is
+        # final until you press Send.
+        jit_role = _get_param(body, "jit_role") or "recruiter"
+        if jit_role == "client_manager":
+            name_field = f"jit_cm_name_{suggestion_id}"
+            email_field = f"jit_cm_email_{suggestion_id}"
+        else:
+            name_field = f"jit_recruiter_name_{suggestion_id}"
+            email_field = f"jit_recruiter_email_{suggestion_id}"
+        raw_name = _field(name_field) or ""
+        raw_email = _field(email_field) or ""
         parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
         if parsed is None:
-            # Coordinator is mid-type, not a directory pick — refresh
-            # without committing so the inputs keep what they typed.
+            # Mid-type — no parseable "Name <email>" yet. Just refresh.
             return await _build_refreshed_overview(request, email)
         new_name, new_email = parsed
         new_email = new_email.strip()
         if not new_email:
             return await _build_refreshed_overview(request, email)
 
-        # Commit immediately: create/find the recruiter contact and attach
-        # it to the loop. After refresh, the loop has a recruiter so the
-        # JIT widget collapses and the Send button enables.
         draft_svc = _get_draft_service(request)
         if not draft_svc:
             return await _build_refreshed_overview(request, email)
         draft = await draft_svc.get_draft(draft_id)
-        if not draft or not draft.loop_id:
+        if not draft:
             return await _build_refreshed_overview(request, email)
 
-        photo_url = await _fetch_recruiter_photo_url(
-            request=request,
-            svc=svc,
-            coordinator_email=email,
-            recruiter_email=new_email,
-        )
-        recruiter = await svc.find_or_create_contact(
-            name=new_name or new_email,
-            email=new_email,
-            role="recruiter",
-            photo_url=photo_url,
-        )
-        await svc.set_recruiter(draft.loop_id, recruiter.id, email)
-
-        # Re-resolve recipients now that the loop has the recruiter.
-        from api.drafts.service import resolve_recipients
-
-        loop = await svc.get_loop(draft.loop_id)
-        stage = next((s for s in loop.stages if s.id == draft.stage_id), None)
-        to_emails, cc_emails = resolve_recipients(loop, stage, sender_email=email)
-        await draft_svc.update_draft_recipients(draft.id, to_emails, cc_emails)
+        new_pending = dict(draft.pending_jit_data or {})
+        new_pending[jit_role] = {"name": new_name, "email": new_email}
+        await draft_svc.update_pending_jit_data(draft.id, new_pending)
         return await _build_refreshed_overview(request, email)
 
     # Create-loop form path — preserve the existing behavior.
@@ -1040,21 +1029,53 @@ async def _apply_jit_contacts(
     suggestion_id: str,
     coordinator_email: str,
 ):
-    """Read JIT contact inputs off the form, attach them to the loop, patch
-    the draft's recipients. Returns the (possibly updated) draft.
+    """Commit pending JIT picks on the draft to the loop, then re-resolve
+    recipients. Returns the (possibly updated) draft.
 
-    Mirrors the create-loop-form contact creation: ``find_or_create_contact``
-    for recruiter (with directory photo lookup), ``find_or_create_client_contact``
-    for clients. No-op when the inputs are blank.
+    Reads from ``draft.pending_jit_data`` first (the staged picks from the
+    autocomplete dropdown), falling back to form inputs (typed values that
+    weren't picked from the dropdown). Clears pending_jit_data after a
+    successful commit so the draft is clean if Send is retried.
     """
-    raw_recruiter_name = _get_form_value(body, f"jit_recruiter_name_{suggestion_id}") or ""
-    raw_recruiter_email = _get_form_value(body, f"jit_recruiter_email_{suggestion_id}") or ""
-    parsed = parse_name_email(raw_recruiter_name) or parse_name_email(raw_recruiter_email)
-    if parsed is not None:
-        recruiter_name, recruiter_email = parsed
-    else:
-        recruiter_name, recruiter_email = raw_recruiter_name, raw_recruiter_email
-    recruiter_email = recruiter_email.strip()
+    pending = dict(draft.pending_jit_data or {})
+
+    def _from_pending_or_form(role: str, name_field: str, email_field: str) -> tuple[str, str]:
+        staged = pending.get(role) or {}
+        name = staged.get("name") or ""
+        email = staged.get("email") or ""
+        if not email:
+            raw_name = _get_form_value(body, name_field) or ""
+            raw_email = _get_form_value(body, email_field) or ""
+            parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
+            if parsed is not None:
+                name, email = parsed
+            else:
+                name, email = raw_name, raw_email
+        return (name.strip(), email.strip())
+
+    recruiter_name, recruiter_email = _from_pending_or_form(
+        "recruiter",
+        f"jit_recruiter_name_{suggestion_id}",
+        f"jit_recruiter_email_{suggestion_id}",
+    )
+    client_staged = pending.get("client_contact") or {}
+    client_name = (
+        client_staged.get("name")
+        or (_get_form_value(body, f"jit_client_name_{suggestion_id}") or "")
+    ).strip()
+    client_email = (
+        client_staged.get("email")
+        or (_get_form_value(body, f"jit_client_email_{suggestion_id}") or "")
+    ).strip()
+    client_company = (
+        client_staged.get("company")
+        or (_get_form_value(body, f"jit_client_company_{suggestion_id}") or "")
+    ).strip()
+    cm_name, cm_email = _from_pending_or_form(
+        "client_manager",
+        f"jit_cm_name_{suggestion_id}",
+        f"jit_cm_email_{suggestion_id}",
+    )
 
     if recruiter_email and draft.loop_id:
         photo_url = await _fetch_recruiter_photo_url(
@@ -1071,10 +1092,6 @@ async def _apply_jit_contacts(
         )
         await svc.set_recruiter(draft.loop_id, recruiter.id, coordinator_email)
 
-    client_name = (_get_form_value(body, f"jit_client_name_{suggestion_id}") or "").strip()
-    client_email = (_get_form_value(body, f"jit_client_email_{suggestion_id}") or "").strip()
-    client_company = (_get_form_value(body, f"jit_client_company_{suggestion_id}") or "").strip()
-
     if client_email and draft.loop_id:
         client_contact = await svc.find_or_create_client_contact(
             name=client_name or client_email,
@@ -1083,17 +1100,52 @@ async def _apply_jit_contacts(
         )
         await svc.set_client_contact(draft.loop_id, client_contact.id, coordinator_email)
 
-    if not recruiter_email and not client_email:
+    if cm_email and draft.loop_id:
+        cm = await svc.find_or_create_contact(
+            name=cm_name or cm_email,
+            email=cm_email,
+            role="client_manager",
+        )
+        await svc.set_client_manager(draft.loop_id, cm.id, coordinator_email)
+
+    if not recruiter_email and not client_email and not cm_email:
         return draft
 
-    # Re-resolve recipients now that the loop has the contacts attached.
+    # Re-resolve recipients now that the loop has the contacts attached,
+    # and clear the staging area so the draft is clean if Send is retried.
     from api.drafts.service import resolve_recipients
 
     loop = await svc.get_loop(draft.loop_id)
     stage = next((s for s in loop.stages if s.id == draft.stage_id), None)
     to_emails, cc_emails = resolve_recipients(loop, stage, sender_email=coordinator_email)
     await draft_svc.update_draft_recipients(draft.id, to_emails, cc_emails)
+    if pending:
+        await draft_svc.update_pending_jit_data(draft.id, {})
     return await draft_svc.get_draft(draft.id)
+
+
+async def _handle_clear_jit(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Clear one role from the draft's pending JIT picks.
+
+    Wired to the small "✕ Clear" button next to a staged pick. Only the
+    targeted role is removed; other staged picks are preserved.
+    """
+    request = kwargs.get("request")
+    draft_id = _get_param(body, "draft_id")
+    role = _get_param(body, "jit_role")
+    if not draft_id or not role:
+        return await _build_refreshed_overview(request, email)
+    draft_svc = _get_draft_service(request)
+    if not draft_svc:
+        return await _build_refreshed_overview(request, email)
+    draft = await draft_svc.get_draft(draft_id)
+    if not draft:
+        return await _build_refreshed_overview(request, email)
+
+    new_pending = dict(draft.pending_jit_data or {})
+    new_pending.pop(role, None)
+    await draft_svc.update_pending_jit_data(draft.id, new_pending)
+    return await _build_refreshed_overview(request, email)
 
 
 async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1388,6 +1440,8 @@ _ACTION_HANDLERS = {
     "show_suggestions_tab": _handle_show_suggestions_tab,
     # JIT candidate rename (when classifier auto-created with placeholder)
     "update_candidate_name": _handle_update_candidate_name,
+    # JIT pending-pick management (recruiter / client / CM staged on draft)
+    "clear_jit": _handle_clear_jit,
 }
 
 
