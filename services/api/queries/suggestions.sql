@@ -98,11 +98,21 @@ SELECT
     d.cc_emails AS draft_cc_emails, d.subject AS draft_subject,
     d.body AS draft_body, d.status AS draft_status,
     d.gmail_thread_id AS draft_gmail_thread_id,
-    d.is_forward AS draft_is_forward
+    d.is_forward AS draft_is_forward,
+    -- Known actor emails — used as small-print hints under JIT inputs so
+    -- coordinators can see what we already have when we ask for the missing one.
+    cc.name AS client_contact_name,
+    cc.email AS client_contact_email,
+    rec.name AS recruiter_name,
+    rec.email AS recruiter_email,
+    cm.name AS client_manager_name,
+    cm.email AS client_manager_email
 FROM agent_suggestions s
 LEFT JOIN loops l ON s.loop_id = l.id
 LEFT JOIN candidates cand ON l.candidate_id = cand.id
 LEFT JOIN client_contacts cc ON l.client_contact_id = cc.id
+LEFT JOIN contacts rec ON l.recruiter_id = rec.id
+LEFT JOIN contacts cm ON l.client_manager_id = cm.id
 LEFT JOIN stages stg ON s.stage_id = stg.id
 LEFT JOIN email_drafts d ON d.suggestion_id = s.id
     AND d.status IN ('generated', 'edited')
@@ -128,11 +138,19 @@ SELECT
     d.cc_emails AS draft_cc_emails, d.subject AS draft_subject,
     d.body AS draft_body, d.status AS draft_status,
     d.gmail_thread_id AS draft_gmail_thread_id,
-    d.is_forward AS draft_is_forward
+    d.is_forward AS draft_is_forward,
+    cc.name AS client_contact_name,
+    cc.email AS client_contact_email,
+    rec.name AS recruiter_name,
+    rec.email AS recruiter_email,
+    cm.name AS client_manager_name,
+    cm.email AS client_manager_email
 FROM agent_suggestions s
 LEFT JOIN loops l ON s.loop_id = l.id
 LEFT JOIN candidates cand ON l.candidate_id = cand.id
 LEFT JOIN client_contacts cc ON l.client_contact_id = cc.id
+LEFT JOIN contacts rec ON l.recruiter_id = rec.id
+LEFT JOIN contacts cm ON l.client_manager_id = cm.id
 LEFT JOIN stages stg ON s.stage_id = stg.id
 LEFT JOIN email_drafts d ON d.suggestion_id = s.id
     AND d.status IN ('generated', 'edited')

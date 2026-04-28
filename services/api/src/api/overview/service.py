@@ -70,7 +70,7 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
     stage_name = row[23]
     stage_state = row[24]
 
-    # Columns 25-32: draft context
+    # Columns 25-33: draft context
     draft = None
     draft_id = row[25]
     if draft_id is not None:
@@ -97,6 +97,14 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
             is_forward=bool(row[32]) if row[32] is not None else False,
         )
 
+    # Columns 33-38: known actor emails (always present in row, may be NULL)
+    client_contact_name = row[33]
+    client_contact_email = row[34]
+    recruiter_name = row[35]
+    recruiter_email = row[36]
+    client_manager_name = row[37]
+    client_manager_email = row[38]
+
     return SuggestionView(
         suggestion=suggestion,
         loop_title=loop_title,
@@ -105,6 +113,12 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
         stage_name=stage_name,
         stage_state=stage_state,
         draft=draft,
+        client_contact_name=client_contact_name,
+        client_contact_email=client_contact_email,
+        recruiter_name=recruiter_name,
+        recruiter_email=recruiter_email,
+        client_manager_name=client_manager_name,
+        client_manager_email=client_manager_email,
     )
 
 

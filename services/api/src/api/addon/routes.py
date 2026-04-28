@@ -188,9 +188,11 @@ def _get_param(body: AddonRequest, key: str) -> str | None:
     return body.common_event_object.parameters.get(key)
 
 
-# Fields that can fire the recruiter autocomplete — either side of the
-# Name / Email pair, whichever the coordinator is typing into.
-_AUTOCOMPLETE_RECRUITER_FIELDS = ("recruiter_name", "recruiter_email")
+# Substrings that mark a form input as a recruiter autocomplete field.
+# Matches both the manual create-loop form (``recruiter_name``,
+# ``recruiter_email``) and the JIT widget on draft cards
+# (``jit_recruiter_name_<sug_id>``, ``jit_recruiter_email_<sug_id>``).
+_AUTOCOMPLETE_RECRUITER_MARKERS = ("recruiter_name", "recruiter_email")
 
 
 def _extract_autocomplete_query(body: AddonRequest) -> str:
@@ -198,19 +200,45 @@ def _extract_autocomplete_query(body: AddonRequest) -> str:
 
     HTTP-based add-ons put the triggering field's partial value in
     ``commonEventObject.formInputs[<name>]``, same path as any other
-    field value. ``parameters["query"]`` is also probed as a belt-and-
-    suspenders fallback in case Google's behavior shifts — the cost is
-    zero and it's free insurance for the "we never verified this
-    empirically" risk flagged in the RFC's Open Questions.
+    field value. We scan every form input the request carries because
+    the field name is dynamic on the JIT path — it's suffixed with the
+    suggestion id (``jit_recruiter_name_sug_xxx``). ``parameters["query"]``
+    is also probed as a belt-and-suspenders fallback.
     """
-    # Primary: whichever recruiter field has non-empty text.
-    for field in _AUTOCOMPLETE_RECRUITER_FIELDS:
-        val = _get_form_value(body, field)
+    inputs = (
+        body.common_event_object.form_inputs
+        if body.common_event_object and body.common_event_object.form_inputs
+        else {}
+    )
+    candidate_fields: list[str] = []
+    for field_name in inputs:
+        if any(marker in field_name for marker in _AUTOCOMPLETE_RECRUITER_MARKERS):
+            candidate_fields.append(field_name)
+
+    for field_name in candidate_fields:
+        val = _get_form_value(body, field_name)
         if val and val.strip():
+            logger.info(
+                "directory/search: extracted query from field %r (len=%d)",
+                field_name,
+                len(val.strip()),
+            )
             return val.strip()
-    # Fallback: static parameter form (what our tests historically used).
+
+    # Fallback: static parameter form (used by older tests).
     param_q = _get_param(body, "query") or ""
-    return param_q.strip()
+    if param_q.strip():
+        return param_q.strip()
+
+    # Diagnostics for the empty-query case — most "autocomplete returns
+    # nothing" reports have been form-name mismatches between widget and
+    # extractor (the same bug that caused this comment to exist).
+    logger.info(
+        "directory/search: empty query — inspected fields=%s, all_form_keys=%s",
+        candidate_fields,
+        list(inputs.keys()),
+    )
+    return ""
 
 
 _GMAIL_CONTEXTUAL_ID_RE = re.compile(r"^(?:thread-f|msg-f):(\d+)$")

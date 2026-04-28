@@ -95,6 +95,28 @@ def _dismiss_button(suggestion_id: str) -> Button:
     )
 
 
+def _format_known_actors(view: SuggestionView, *, exclude: str) -> str:
+    """Render a small-print line of actor emails the loop already has.
+
+    Used as a context hint under the JIT input — when we ask for the
+    recruiter, show client/CM emails we know; when we ask for the client,
+    show recruiter/CM. ``exclude`` skips the role we're asking for.
+    """
+    parts: list[str] = []
+    if exclude != "recruiter" and view.recruiter_email:
+        label = view.recruiter_name or "Recruiter"
+        parts.append(f"Recruiter: {label} &lt;{view.recruiter_email}&gt;")
+    if exclude != "client_contact" and view.client_contact_email:
+        label = view.client_contact_name or "Client"
+        parts.append(f"Client: {label} &lt;{view.client_contact_email}&gt;")
+    if view.client_manager_email:
+        label = view.client_manager_name or "CM"
+        parts.append(f"CM: {label} &lt;{view.client_manager_email}&gt;")
+    if not parts:
+        return ""
+    return "Known on this loop — " + "; ".join(parts)
+
+
 def _missing_recipient_role(view: SuggestionView) -> tuple[bool, bool]:
     """Return (needs_recruiter, needs_client) for a draft view.
 
@@ -149,6 +171,9 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
                     },
                 )
             )
+            known = _format_known_actors(view, exclude="recruiter")
+            if known:
+                widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
         elif needs_client:
             widgets.append(_text("<i>Add the client contact so this draft can be sent.</i>"))
             widgets.extend(
@@ -158,6 +183,9 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
                     company_field=f"jit_client_company_{sug.id}",
                 )
             )
+            known = _format_known_actors(view, exclude="client_contact")
+            if known:
+                widgets.append(_text(f'<font color="#888888"><small>{known}</small></font>'))
 
         widgets.append(_decorated(draft.subject, "Subject"))
         widgets.append(_divider())
