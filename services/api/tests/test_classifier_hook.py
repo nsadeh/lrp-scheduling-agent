@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.classifier.hook import ClassifierHook
+from api.classifier.hook import ClassifierHook, _resolve_coordinator_name
 from api.classifier.models import (
     ClassificationResult,
     EmailClassification,
@@ -19,6 +19,7 @@ from api.scheduling.models import (
     Candidate,
     ClientContact,
     Contact,
+    Coordinator,
     Loop,
     Stage,
     StageState,
@@ -238,6 +239,68 @@ class TestErrorHandling:
         call_kwargs = suggestion_service.create_suggestion.call_args.kwargs
         assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
         assert call_kwargs["item"].confidence == 0.0
+
+
+class TestResolveCoordinatorName:
+    """Layered fallback: DB row → Gmail header display name → email local-part."""
+
+    def _coord(self, name: str) -> Coordinator:
+        return Coordinator(
+            id="crd_1",
+            name=name,
+            email="coord@lrp.com",
+            created_at=datetime(2026, 4, 10, tzinfo=UTC),
+        )
+
+    def test_uses_db_coordinator_name_when_present(self):
+        event = _event()
+        name = _resolve_coordinator_name(event, self._coord("Nim Sadeh"))
+        assert name == "Nim Sadeh"
+
+    def test_falls_back_to_incoming_to_header_display_name(self):
+        # Incoming email: coordinator is in `to`. DB row absent.
+        msg = Message(
+            id="msg1",
+            thread_id="thread1",
+            subject="Interview",
+            **{"from": EmailAddress(name="Alice", email="alice@example.com")},
+            to=[EmailAddress(name="Nim (from Gmail)", email="coord@lrp.com")],
+            date=datetime(2026, 4, 15, 10, 0, tzinfo=UTC),
+            body_text="Hello",
+        )
+        event = EmailEvent(
+            message=msg,
+            coordinator_email="coord@lrp.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.REPLY,
+            new_participants=[],
+        )
+        assert _resolve_coordinator_name(event, None) == "Nim (from Gmail)"
+
+    def test_falls_back_to_outgoing_from_header_display_name(self):
+        # Outgoing email: coordinator is `from_`. DB row absent.
+        msg = Message(
+            id="msg1",
+            thread_id="thread1",
+            subject="Interview",
+            **{"from": EmailAddress(name="Nim Sadeh", email="coord@lrp.com")},
+            to=[EmailAddress(email="alice@example.com")],
+            date=datetime(2026, 4, 15, 10, 0, tzinfo=UTC),
+            body_text="Hello",
+        )
+        event = EmailEvent(
+            message=msg,
+            coordinator_email="coord@lrp.com",
+            direction=MessageDirection.OUTGOING,
+            message_type=MessageType.REPLY,
+            new_participants=[],
+        )
+        assert _resolve_coordinator_name(event, None) == "Nim Sadeh"
+
+    def test_falls_back_to_local_part_when_no_display_name_anywhere(self):
+        # No DB row, no display name on headers.
+        event = _event()  # to: [EmailAddress(email="coord@lrp.com")] — no name
+        assert _resolve_coordinator_name(event, None) == "coord"
 
 
 class TestSenderBlacklist:

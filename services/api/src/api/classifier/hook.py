@@ -14,6 +14,7 @@ pipeline, the classifier:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from api.classifier.endpoint import ClassifyEmailInput, classify_email
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from api.ai.llm_service import LLMService
     from api.drafts.service import DraftService
     from api.gmail.models import Message
-    from api.scheduling.models import Loop, Stage
+    from api.scheduling.models import Coordinator, Loop, Stage
     from api.scheduling.service import LoopService
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,32 @@ _CREATE_LOOP_FIELDS = (
     "recruiter_name",
     "recruiter_email",
 )
+
+
+def _resolve_coordinator_name(event: EmailEvent, coord: Coordinator | None) -> str:
+    """Pick a display name for the coordinator, tolerating a missing DB row.
+
+    The `coordinators` table is populated lazily — a coordinator only gets
+    a row once their first loop is created. So on day-one classifications
+    we fall back to (a) the display name on the Gmail headers, then
+    (b) the email local-part. Always returns a non-empty string.
+    """
+    if coord and coord.name:
+        return coord.name
+
+    msg = event.message
+    addr_email = event.coordinator_email
+    candidates: list[str | None] = []
+    if msg.from_.email == addr_email:
+        candidates.append(msg.from_.name)
+    for addr in [*msg.to, *msg.cc]:
+        if addr.email == addr_email:
+            candidates.append(addr.name)
+    for name in candidates:
+        if name:
+            return name
+
+    return addr_email.split("@", 1)[0]
 
 
 def _coerce_create_loop_action_data(item: SuggestionItem) -> SuggestionItem:
@@ -327,12 +354,16 @@ class ClassifierHook:
         else:
             thread_history_text = "No prior messages in this thread."
 
-        # Load active loops for the coordinator (for thread-to-loop matching)
+        # Resolve the coordinator: one DB lookup feeds both the
+        # coordinator display string and the active-loops branch.
+        coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
         active_loops: list[Loop] = []
-        if not linked_loops:
-            coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
-            if coord:
-                active_loops = await self._get_active_loops(coord.id)
+        if not linked_loops and coord:
+            active_loops = await self._get_active_loops(coord.id)
+
+        coordinator_name = _resolve_coordinator_name(event, coord)
+        coordinator_str = f"{coordinator_name}<{event.coordinator_email}>"
+        date_str = datetime.now(UTC).date().isoformat()
 
         # Load events for the first linked loop (events are loop-scoped; we
         # don't try to merge across multi-loop threads for now)
@@ -349,6 +380,8 @@ class ClassifierHook:
             active_loops_summary=format_active_loops(active_loops),
             events=format_events(events),
             direction=event.direction.value,
+            coordinator=coordinator_str,
+            date=date_str,
         )
 
     async def _get_active_loops(self, coordinator_id: str) -> list[Loop]:
