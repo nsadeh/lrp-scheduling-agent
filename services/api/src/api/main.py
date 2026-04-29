@@ -9,7 +9,6 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
 
-import sentry_sdk  # noqa: E402
 from arq import create_pool  # noqa: E402
 from arq.connections import RedisSettings  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -19,6 +18,7 @@ from psycopg_pool import AsyncConnectionPool  # noqa: E402
 from api.addon.routes import addon_router, oauth_router, refresh_router  # noqa: E402
 from api.ai import init_langfuse, init_llm_service  # noqa: E402
 from api.classifier.hook import ClassifierHook  # noqa: E402
+from api.classifier.sender_blacklist import load_blacklist  # noqa: E402
 from api.classifier.service import SuggestionService  # noqa: E402
 from api.drafts.service import DraftService  # noqa: E402
 from api.gmail.auth import TokenStore  # noqa: E402
@@ -76,12 +76,14 @@ async def lifespan(app: FastAPI):
     app.state.draft_service = draft_service
     logger.info("DraftService initialized")
 
+    sender_blacklist = load_blacklist()
     app.state.email_hook = ClassifierHook(
         llm=llm_service,
         langfuse=langfuse,
         suggestion_service=SuggestionService(db_pool=pool),
         loop_service=app.state.scheduling,
         draft_service=draft_service,
+        sender_blacklist=sender_blacklist,
     )
     logger.info("ClassifierHook active")
 

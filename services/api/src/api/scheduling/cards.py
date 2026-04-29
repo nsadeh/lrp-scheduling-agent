@@ -42,7 +42,12 @@ def set_action_url(url: str) -> None:
     _action_url = url
 
 
-def _directory_search_url() -> str:
+def get_action_url() -> str:
+    """Public accessor for the action URL (used by other card modules)."""
+    return _action_url
+
+
+def directory_search_url() -> str:
     """Derive the /addon/directory/search URL from the current action URL.
 
     Both live under /addon/ on the same host, so swap the last segment.
@@ -56,7 +61,7 @@ def _directory_search_url() -> str:
 
 def _directory_autocomplete_action() -> OnClickAction:
     """Build the autoCompleteAction that fires per-keystroke on recruiter fields."""
-    return OnClickAction(function=_directory_search_url())
+    return OnClickAction(function=directory_search_url())
 
 
 def _recruiter_selected_action() -> OnClickAction:

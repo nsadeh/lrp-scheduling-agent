@@ -64,6 +64,14 @@ async def _collect(async_gen) -> list:
 
 def _row_to_draft(row: dict) -> EmailDraft:
     """Convert a dict row (from psycopg dict_row factory) to an EmailDraft model."""
+    # JSONB columns may arrive as either dict (when the psycopg JSON
+    # adapter is registered) or string (raw). Normalize so Pydantic
+    # validation succeeds in both cases.
+    raw_jit = row.get("pending_jit_data")
+    if isinstance(raw_jit, str):
+        row = {**row, "pending_jit_data": json.loads(raw_jit)}
+    elif raw_jit is None:
+        row = {**row, "pending_jit_data": {}}
     return EmailDraft(**row)
 
 
@@ -75,11 +83,18 @@ def _row_to_draft(row: dict) -> EmailDraft:
 def resolve_recipients(
     loop: Loop,
     stage: Stage | None,
+    *,
+    sender_email: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Determine to/cc emails from stage state.
 
     This is the single source of truth for recipient routing. Both the
     DraftService and the addon compose_email handler should call this.
+
+    ``sender_email`` (the coordinator sending the message) is filtered
+    out of CC — coordinators are sometimes their own client manager
+    (e.g. Adam's loops where he is both coordinator and CM), and CC'ing
+    yourself on your own send is noise.
     """
     to_emails: list[str] = []
     cc_emails: list[str] = []
@@ -103,9 +118,11 @@ def resolve_recipients(
         if loop.client_contact and loop.client_contact.email:
             to_emails = [loop.client_contact.email]
 
-    # Client manager is always CC'd when present
+    # Client manager is CC'd when present, but never CC the sender.
     if loop.client_manager and loop.client_manager.email:
-        cc_emails = [loop.client_manager.email]
+        cm_email = loop.client_manager.email
+        if not sender_email or cm_email.lower() != sender_email.lower():
+            cc_emails = [cm_email]
 
     return to_emails, cc_emails
 
@@ -143,7 +160,9 @@ class DraftService:
         can compose manually from the sidebar.
         """
         stage = self._resolve_stage(loop, suggestion.stage_id)
-        to_emails, cc_emails = resolve_recipients(loop, stage)
+        to_emails, cc_emails = resolve_recipients(
+            loop, stage, sender_email=suggestion.coordinator_email
+        )
         subject = self._resolve_subject(loop)
 
         # Generate body via LLM (fallback to empty on failure)
@@ -248,6 +267,32 @@ class DraftService:
     async def update_draft_body(self, draft_id: str, body: str) -> None:
         async with self._pool.connection() as conn, conn.transaction():
             await queries.update_draft_body(conn, id=draft_id, body=body)
+
+    async def update_draft_recipients(
+        self, draft_id: str, to_emails: list[str], cc_emails: list[str]
+    ) -> None:
+        """Patch a draft's recipients after JIT contact info was supplied.
+
+        Used by the send_draft handler when the loop was auto-created with
+        a missing recruiter/client and the coordinator filled them in inline
+        on the draft card.
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_draft_recipients(
+                conn, id=draft_id, to_emails=to_emails, cc_emails=cc_emails
+            )
+
+    async def update_pending_jit_data(self, draft_id: str, data: dict) -> None:
+        """Replace pending_jit_data on the draft.
+
+        Stores the coordinator's in-flight contact picks (recruiter / client
+        / CM) until they click Send. Misclicks can be undone with the "x"
+        clear button before commit.
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_pending_jit_data(
+                conn, id=draft_id, pending_jit_data=json.dumps(data)
+            )
 
     async def mark_sent(self, draft_id: str) -> None:
         async with self._pool.connection() as conn, conn.transaction():

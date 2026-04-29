@@ -100,7 +100,8 @@ def format_loop_state(loop: Loop | None) -> str:
     if loop.candidate:
         lines.append(f"Candidate: {loop.candidate.name}")
     if loop.client_contact:
-        lines.append(f"Client: {loop.client_contact.name} ({loop.client_contact.company})")
+        company = loop.client_contact.company or "Unknown"
+        lines.append(f"Client: {loop.client_contact.name} ({company})")
     if loop.recruiter:
         lines.append(f"Recruiter: {loop.recruiter.name} <{loop.recruiter.email}>")
 
@@ -114,6 +115,27 @@ def format_loop_state(loop: Loop | None) -> str:
     return "\n".join(lines)
 
 
+def format_linked_loops(loops: list[Loop]) -> str:
+    """Format every loop linked to the current thread.
+
+    Multi-loop threads (one Gmail thread linked to two or more loops)
+    render as multiple blocks separated by a blank line. The LangFuse
+    classifier prompt — not this formatter — owns the instructions about
+    how the LLM should disambiguate via `target_loop_id`.
+    """
+    if not loops:
+        return "No matching loop found for this thread."
+
+    if len(loops) == 1:
+        return format_loop_state(loops[0])
+
+    blocks: list[str] = []
+    for loop in loops:
+        blocks.append(format_loop_state(loop))
+        blocks.append("")
+    return "\n".join(blocks).rstrip()
+
+
 def format_active_loops(loops: list[Loop]) -> str:
     """Format coordinator's active loops summary for thread-to-loop matching."""
     if not loops:
@@ -122,7 +144,11 @@ def format_active_loops(loops: list[Loop]) -> str:
     lines = ["Active scheduling loops:"]
     for loop in loops:
         candidate_name = loop.candidate.name if loop.candidate else "Unknown"
-        client_company = loop.client_contact.company if loop.client_contact else "Unknown"
+        client_company = (
+            loop.client_contact.company
+            if loop.client_contact and loop.client_contact.company
+            else "Unknown"
+        )
         stage_summary = ", ".join(f"{s.name}={s.state.value}" for s in loop.stages if s.is_active)
         lines.append(
             f"  - {loop.title} (ID: {loop.id}): "

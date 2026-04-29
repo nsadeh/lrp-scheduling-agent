@@ -55,6 +55,7 @@ async def startup(ctx: dict) -> None:
     # AI infrastructure — required, crashes if not configured
     from api.ai import init_langfuse, init_llm_service
     from api.classifier.hook import ClassifierHook
+    from api.classifier.sender_blacklist import load_blacklist
     from api.classifier.service import SuggestionService
     from api.drafts.service import DraftService
     from api.scheduling.service import LoopService
@@ -70,12 +71,17 @@ async def startup(ctx: dict) -> None:
         langfuse=langfuse,
     )
 
+    # The hook needs an arq pool to enqueue follow-up reclassification
+    # jobs (after CREATE_LOOP / LINK_THREAD auto-resolve), but we don't
+    # create one here — arq exposes its own pool to job functions via
+    # ``ctx["redis"]``, and each job passes that into ``hook.on_email``.
     ctx["hook"] = ClassifierHook(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=SuggestionService(db_pool=pool),
         loop_service=loop_service,
         draft_service=draft_service,
+        sender_blacklist=load_blacklist(),
     )
     logger.info("worker startup complete — ClassifierHook active")
 
@@ -312,7 +318,9 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
             ]
             message_type, new_participants = classify_message_type(message, prior_messages)
 
-            # Build and fire event
+            # Build and fire event. Pass arq's own pool through so
+            # auto-resolvers can enqueue follow-up reclassify jobs without
+            # us needing a second Redis connection.
             event = EmailEvent(
                 message=message,
                 coordinator_email=coordinator_email,
@@ -321,8 +329,14 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
                 new_participants=new_participants,
                 thread_messages=thread_messages,
             )
-            await hook.on_email(event)
+            await hook.on_email(event, arq_pool=ctx.get("redis"))
 
+        except GmailNotFoundError:
+            logger.info(
+                "message %s not fetchable for %s (likely spam/filter/delete)",
+                msg_id,
+                coordinator_email,
+            )
         except Exception:
             logger.exception("failed to process message %s for %s", msg_id, coordinator_email)
 
@@ -377,7 +391,7 @@ async def reclassify_after_loop_creation(
             new_participants=new_participants,
             thread_messages=thread_messages,
         )
-        await hook.on_email(event)
+        await hook.on_email(event, arq_pool=ctx.get("redis"))
         logger.info(
             "reclassified message %s after loop creation (thread %s)",
             message.id,

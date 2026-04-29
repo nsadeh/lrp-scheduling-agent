@@ -70,7 +70,7 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
     stage_name = row[23]
     stage_state = row[24]
 
-    # Columns 25-32: draft context
+    # Columns 25-33: draft context (33 = pending_jit_data JSONB)
     draft = None
     draft_id = row[25]
     if draft_id is not None:
@@ -82,6 +82,11 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
             draft_cc = [draft_cc]
         if draft_cc is None:
             draft_cc = []
+        pending_jit = row[33]
+        if isinstance(pending_jit, str):
+            pending_jit = json.loads(pending_jit)
+        if pending_jit is None:
+            pending_jit = {}
         draft = EmailDraft(
             id=draft_id,
             suggestion_id=suggestion.id,
@@ -95,7 +100,16 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
             status=DraftStatus(row[30]) if row[30] else DraftStatus.GENERATED,
             gmail_thread_id=row[31],
             is_forward=bool(row[32]) if row[32] is not None else False,
+            pending_jit_data=pending_jit,
         )
+
+    # Columns 34-39: known actor emails (always present in row, may be NULL)
+    client_contact_name = row[34]
+    client_contact_email = row[35]
+    recruiter_name = row[36]
+    recruiter_email = row[37]
+    client_manager_name = row[38]
+    client_manager_email = row[39]
 
     return SuggestionView(
         suggestion=suggestion,
@@ -105,6 +119,12 @@ def _row_to_suggestion_view(row: tuple) -> SuggestionView:
         stage_name=stage_name,
         stage_state=stage_state,
         draft=draft,
+        client_contact_name=client_contact_name,
+        client_contact_email=client_contact_email,
+        recruiter_name=recruiter_name,
+        recruiter_email=recruiter_email,
+        client_manager_name=client_manager_name,
+        client_manager_email=client_manager_email,
     )
 
 
