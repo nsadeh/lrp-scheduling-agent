@@ -23,6 +23,7 @@ In a call, I showed them the Cursor "tab" button that is a gag gift for develope
 - **Candidate**: Person being interviewed. Identified by email address.
 - **Encore**: LRP's ATS/CRM system (accessed via Cluein Data Connector). Source of truth for candidate/recruiter records.
 - **Scheduling thread**: One Gmail thread per interview request, tracked through states: new request → awaiting availability → awaiting confirmation → confirmed → systems updated.
+- **Loop = one candidate**: A scheduling loop tracks ONE candidate's journey with a client, regardless of how many interview rounds there are. Multiple rounds for the same candidate belong to the SAME loop. Multiple loops are only created when an email involves multiple CANDIDATES (one loop per candidate). Never create N loops for N rounds of the same candidate.
 
 ## Critical Constraints
 
