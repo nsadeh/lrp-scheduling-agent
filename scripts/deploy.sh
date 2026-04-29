@@ -49,6 +49,30 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+
+# --- Pre-flight: ensure we're deploying exactly origin/main ---
+# Deploys must always come from a clean, up-to-date main. Running from a
+# feature branch (or stale main) is the most common cause of "why did the
+# wrong code ship" incidents.
+echo "==> Pre-flight: syncing to origin/main..."
+cd "$REPO_ROOT"
+
+# Refuse to switch branches over uncommitted work — `git checkout` would
+# silently carry tracked-file modifications across the switch.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "ERROR: working tree has uncommitted changes."
+  echo "  Commit or stash them before deploying:"
+  echo "    git status"
+  echo "    git stash push -u -m 'pre-deploy'"
+  exit 1
+fi
+
+git checkout main
+# --ff-only: never create a surprise merge commit during a deploy. If
+# local main has diverged from origin/main, fail loudly so the user can
+# inspect before shipping.
+git pull --ff-only origin main
+
 # Query the latest deployment status for a named service via `railway status --json`.
 # Returns one of: SUCCESS | BUILDING | DEPLOYING | FAILED | CRASHED | UNKNOWN | NOT_FOUND.
 get_deploy_status() {

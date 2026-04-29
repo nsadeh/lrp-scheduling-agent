@@ -45,6 +45,7 @@ In a call, I showed them the Cursor "tab" button that is a gag gift for develope
 - Database IDs use prefixed NanoIDs (e.g., `thr_` for threads, `cli_` for clients, `crd_` for coordinators)
 - **Railway changes must update the deployment guide.** Whenever a PR introduces a new Railway service, a new required env var, a provisioning step, or any other action that a human has to take in the Railway dashboard or CLI to ship the change, update [references/railway-deployment.md](references/railway-deployment.md) in the same PR. The guide is the single source of truth for what prod/staging need to look like — if it's not in there, it's not going to get done.
 - **Env var additions must update the env var reference.** When adding or removing an `os.environ.get(...)` call, update [references/env-vars.md](references/env-vars.md) to match. Keep entries grounded in `file:line` citations so the doc ages gracefully.
+- **Never hardcode model names in eval scripts.** Eval scripts must read the model from the LangFuse prompt config (`prompt.config.get("model")`). Only override the model when explicitly asked — do not silently flip a Gemini prompt to Anthropic or vice versa.
 
 ## Environment Variables
 
