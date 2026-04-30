@@ -401,20 +401,7 @@ class ClassifierHook:
 
     async def _get_active_loops(self, coordinator_id: str) -> list[Loop]:
         """Load coordinator's active loops for thread matching context."""
-        from api.scheduling.queries import queries as sched_queries
-
-        async with self._loops._pool.connection() as conn:
-            rows = []
-            async for row in sched_queries.get_loops_for_coordinator(
-                conn, coordinator_id=coordinator_id
-            ):
-                rows.append(row)
-
-        loops = []
-        for row in rows:
-            loop = await self._loops.get_loop(row[0])
-            loops.append(loop)
-        return loops
+        return await self._loops.get_loops_for_coordinator(coordinator_id)
 
     def _apply_guardrails(
         self,

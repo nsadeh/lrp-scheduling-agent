@@ -41,7 +41,7 @@ async def startup(ctx: dict) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
     init_sentry(service="worker")
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
-    pool = AsyncConnectionPool(conninfo=database_url, min_size=10, max_size=25)
+    pool = AsyncConnectionPool(conninfo=database_url, min_size=5, max_size=20, timeout=30.0)
     await pool.open()
 
     encryption_key = os.environ.get("GMAIL_TOKEN_ENCRYPTION_KEY", "")
@@ -419,5 +419,5 @@ class WorkerSettings:
     on_job_start = on_job_start
     on_job_end = on_job_end
     redis_settings = RedisSettings.from_dsn(REDIS_URL)
-    max_jobs = 20
+    max_jobs = 10
     job_timeout = 180

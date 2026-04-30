@@ -284,36 +284,36 @@ class LoopService:
     async def get_loop(self, loop_id: str) -> Loop:
         """Get a fully populated loop with all nested relations."""
         async with self._pool.connection() as conn:
-            loop_row = await queries.get_loop(conn, id=loop_id)
-            if loop_row is None:
-                raise ValueError(f"Loop not found: {loop_id}")
+            return await self._populate_loop(conn, loop_id)
 
-            loop = _row_to_loop(loop_row)
+    async def _populate_loop(self, conn: AsyncConnection, loop_id: str) -> Loop:
+        """Populate a loop using an existing connection (no pool acquisition)."""
+        loop_row = await queries.get_loop(conn, id=loop_id)
+        if loop_row is None:
+            raise ValueError(f"Loop not found: {loop_id}")
 
-            # Populate actors (recruiter/client_contact may be null on loops
-            # auto-created with incomplete info; collected JIT at send time).
-            loop.coordinator = await self._get_coordinator(conn, loop.coordinator_id)
-            if loop.client_contact_id:
-                loop.client_contact = await self._get_client_contact(conn, loop.client_contact_id)
-            if loop.recruiter_id:
-                loop.recruiter = await self._get_contact(conn, loop.recruiter_id)
-            if loop.client_manager_id:
-                loop.client_manager = await self._get_contact(conn, loop.client_manager_id)
-            loop.candidate = await self._get_candidate(conn, loop.candidate_id)
+        loop = _row_to_loop(loop_row)
 
-            # Populate stages with time slots
-            stage_rows = await _collect(queries.get_stages_for_loop(conn, loop_id=loop_id))
-            stages = [_row_to_stage(r) for r in stage_rows]
-            for stage in stages:
-                ts_rows = await _collect(queries.get_time_slots_for_stage(conn, stage_id=stage.id))
-                stage.time_slots = [_row_to_time_slot(r) for r in ts_rows]
-            loop.stages = stages
+        loop.coordinator = await self._get_coordinator(conn, loop.coordinator_id)
+        if loop.client_contact_id:
+            loop.client_contact = await self._get_client_contact(conn, loop.client_contact_id)
+        if loop.recruiter_id:
+            loop.recruiter = await self._get_contact(conn, loop.recruiter_id)
+        if loop.client_manager_id:
+            loop.client_manager = await self._get_contact(conn, loop.client_manager_id)
+        loop.candidate = await self._get_candidate(conn, loop.candidate_id)
 
-            # Populate email threads
-            thread_rows = await _collect(queries.get_threads_for_loop(conn, loop_id=loop_id))
-            loop.email_threads = [_row_to_email_thread(r) for r in thread_rows]
+        stage_rows = await _collect(queries.get_stages_for_loop(conn, loop_id=loop_id))
+        stages = [_row_to_stage(r) for r in stage_rows]
+        for stage in stages:
+            ts_rows = await _collect(queries.get_time_slots_for_stage(conn, stage_id=stage.id))
+            stage.time_slots = [_row_to_time_slot(r) for r in ts_rows]
+        loop.stages = stages
 
-            return loop
+        thread_rows = await _collect(queries.get_threads_for_loop(conn, loop_id=loop_id))
+        loop.email_threads = [_row_to_email_thread(r) for r in thread_rows]
+
+        return loop
 
     async def get_status_board(self, coordinator_email: str) -> StatusBoard:
         """Build the status board for a coordinator."""
@@ -325,10 +325,10 @@ class LoopService:
             loop_rows = await _collect(
                 queries.get_all_loops_for_coordinator(conn, coordinator_id=coord.id)
             )
+            loops = [await self._populate_loop(conn, row[0]) for row in loop_rows]
 
         board = StatusBoard()
-        for loop_row in loop_rows:
-            loop = await self.get_loop(loop_row[0])
+        for loop in loops:
             summary = _loop_to_summary(loop)
 
             status = loop.computed_status
@@ -501,7 +501,7 @@ class LoopService:
             row = await queries.find_loop_by_gmail_thread_id(conn, gmail_thread_id=gmail_thread_id)
             if row is None:
                 return None
-            return await self.get_loop(row[0])
+            return await self._populate_loop(conn, row[0])
 
     async def find_loops_by_thread(self, gmail_thread_id: str) -> list[Loop]:
         """All loops linked to a Gmail thread (multi-loop threads supported)."""
@@ -509,7 +509,15 @@ class LoopService:
             rows = await _collect(
                 queries.find_loops_by_gmail_thread_id(conn, gmail_thread_id=gmail_thread_id)
             )
-        return [await self.get_loop(row[0]) for row in rows]
+            return [await self._populate_loop(conn, row[0]) for row in rows]
+
+    async def get_loops_for_coordinator(self, coordinator_id: str) -> list[Loop]:
+        """All loops for a coordinator, fully populated with a single connection."""
+        async with self._pool.connection() as conn:
+            rows = await _collect(
+                queries.get_loops_for_coordinator(conn, coordinator_id=coordinator_id)
+            )
+            return [await self._populate_loop(conn, row[0]) for row in rows]
 
     # ------------------------------------------------------------------
     # JIT actor patching (used when missing contact info is supplied at

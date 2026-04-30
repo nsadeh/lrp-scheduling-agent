@@ -35,7 +35,7 @@ init_sentry(service="api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL", "postgresql://dev:dev@localhost:5432/lrp_dev")
-    pool = AsyncConnectionPool(conninfo=database_url)
+    pool = AsyncConnectionPool(conninfo=database_url, timeout=30.0)
     await pool.open()
     app.state.db = pool
 
