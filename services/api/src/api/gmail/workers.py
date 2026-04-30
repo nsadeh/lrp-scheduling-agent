@@ -420,4 +420,8 @@ class WorkerSettings:
     on_job_end = on_job_end
     redis_settings = RedisSettings.from_dsn(REDIS_URL)
     max_jobs = 20
-    job_timeout = 180
+    # Outer ceiling. We rely on litellm's own per-call timeouts (25s/20s) for
+    # LLM ops; this only fires for genuinely stuck jobs. Higher than 180s so
+    # the cancellation path — which leaks aiohttp sessions from litellm — is
+    # hit less often.
+    job_timeout = 600

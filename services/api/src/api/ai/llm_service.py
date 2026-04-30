@@ -3,18 +3,20 @@
 Uses litellm.acompletion() with a simple primary → secondary → tertiary
 failover chain configured via environment variables.
 
-Latency budget:
-- Primary attempt: 25s timeout, 1 retry (~60s max with hard-timeout buffer)
-- Secondary attempt: 20s timeout, 0 retries (~25s with hard-timeout buffer)
-- Tertiary attempt: 20s timeout, 0 retries (~25s with hard-timeout buffer)
-- Total budget: ~110s max wall-clock time
+Latency budget (enforced by litellm itself, not wrapped externally):
+- Primary attempt: 25s timeout, 1 retry
+- Secondary attempt: 20s timeout, 0 retries
+- Tertiary attempt: 20s timeout, 0 retries
 
-Each attempt is wrapped in asyncio.wait_for with a +5s buffer over the
-LiteLLM timeout, to guard against the LiteLLM aiohttp transport not
-honoring stream-read timeouts.
+We deliberately do NOT wrap the call in asyncio.wait_for. External
+cancellation interrupts litellm's aiohttp transport mid-call without
+giving it a chance to close its ClientSession, leaking the session and
+its open connections (visible as ``Unclosed client session`` /
+``Unclosed connector connections`` in Sentry). Over hours those leaked
+file descriptors saturate the worker. We trust litellm's internal
+timeout to fail cleanly; arq's ``job_timeout`` is the ultimate ceiling.
 """
 
-import asyncio
 import logging
 import os
 import time
@@ -221,16 +223,11 @@ class LLMService:
                 span.set_data("ai.attempt", i)
                 span.set_data("ai.is_failover", i > 0)
                 try:
-                    # Belt-and-suspenders timeout: LiteLLM's `timeout` param is
-                    # not always honored by its aiohttp transport on stream
-                    # reads, so we enforce a hard ceiling at the asyncio layer.
-                    # The +5s buffer lets LiteLLM's own timeout fire first with
-                    # a clean error in the normal case; this only kicks in if
-                    # the underlying socket is actually stuck.
-                    response = await asyncio.wait_for(
-                        litellm.acompletion(**kwargs),
-                        timeout=timeout + 5.0,
-                    )
+                    # Trust litellm's own timeout. Wrapping this in
+                    # asyncio.wait_for cancels the inner task on timeout, which
+                    # leaks litellm's aiohttp ClientSession because cleanup
+                    # doesn't get to run. arq's job_timeout is the outer ceiling.
+                    response = await litellm.acompletion(**kwargs)
                 except Exception as exc:
                     elapsed_ms = (time.monotonic() - start) * 1000
                     span.set_data("ai.latency_ms", elapsed_ms)
