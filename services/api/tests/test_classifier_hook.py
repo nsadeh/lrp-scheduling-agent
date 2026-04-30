@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.classifier.hook import ClassifierHook, _resolve_coordinator_name
+from api.classifier.hook import ClassifierHook, _is_internal_only, _resolve_coordinator_name
 from api.classifier.models import (
     ClassificationResult,
     EmailClassification,
@@ -380,3 +380,103 @@ class TestSenderBlacklist:
             await hook.on_email(event)
 
         mock_classify.assert_called_once()
+
+
+def _internal_msg(
+    from_email="alice@longridgepartners.com",
+    to_emails=("bob@longridgepartners.com",),
+    cc_emails=(),
+) -> Message:
+    return Message(
+        id="msg1",
+        thread_id="thread1",
+        subject="Internal",
+        **{"from": EmailAddress(email=from_email)},
+        to=[EmailAddress(email=e) for e in to_emails],
+        cc=[EmailAddress(email=e) for e in cc_emails],
+        date=datetime(2026, 4, 15, 10, 0, tzinfo=UTC),
+        body_text="Hey",
+    )
+
+
+class TestIsInternalOnly:
+    def test_all_internal(self):
+        msg = _internal_msg(cc_emails=("carol@longridgepartners.com",))
+        assert _is_internal_only(msg) is True
+
+    def test_external_in_to(self):
+        msg = _internal_msg(to_emails=("ext@gmail.com",))
+        assert _is_internal_only(msg) is False
+
+    def test_external_in_cc(self):
+        msg = _internal_msg(cc_emails=("ext@other.com",))
+        assert _is_internal_only(msg) is False
+
+    def test_external_from(self):
+        msg = _internal_msg(from_email="ext@candidate.com")
+        assert _is_internal_only(msg) is False
+
+    def test_case_insensitive(self):
+        msg = _internal_msg(
+            from_email="Alice@LongRidgePartners.COM",
+            to_emails=("BOB@LONGRIDGEPARTNERS.COM",),
+        )
+        assert _is_internal_only(msg) is True
+
+    def test_empty_to_and_cc(self):
+        msg = _internal_msg(to_emails=(), cc_emails=())
+        assert _is_internal_only(msg) is True
+
+
+class TestInternalOnlyFilter:
+    @pytest.mark.asyncio
+    async def test_all_internal_skips_classification(self):
+        hook, _, _, suggestion_service, loop_service = _make_hook()
+        event = EmailEvent(
+            message=_internal_msg(cc_emails=("carol@longridgepartners.com",)),
+            coordinator_email="alice@longridgepartners.com",
+            direction=MessageDirection.OUTGOING,
+            message_type=MessageType.REPLY,
+            new_participants=[],
+        )
+        with patch("api.classifier.hook.classify_email", new_callable=AsyncMock) as mock_classify:
+            await hook.on_email(event)
+        mock_classify.assert_not_called()
+        suggestion_service.create_suggestion.assert_not_called()
+        loop_service.find_loops_by_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_participants_classifies(self):
+        hook, _, _, _, loop_service = _make_hook()
+        loop_service.find_loops_by_thread.return_value = []
+        msg = _internal_msg(to_emails=("candidate@gmail.com",))
+        event = EmailEvent(
+            message=msg,
+            coordinator_email="alice@longridgepartners.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.REPLY,
+            new_participants=[],
+        )
+        with patch(
+            "api.classifier.hook.classify_email",
+            new_callable=AsyncMock,
+            return_value=_classification_result(),
+        ) as mock_classify:
+            await hook.on_email(event)
+        mock_classify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_internal_only_skips_even_on_linked_thread(self):
+        hook, _, _, suggestion_service, loop_service = _make_hook()
+        event = EmailEvent(
+            message=_internal_msg(),
+            coordinator_email="alice@longridgepartners.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.REPLY,
+            new_participants=[],
+        )
+        with patch("api.classifier.hook.classify_email", new_callable=AsyncMock) as mock_classify:
+            await hook.on_email(event)
+        mock_classify.assert_not_called()
+        suggestion_service.create_suggestion.assert_not_called()
+        loop_service.find_loops_by_thread.assert_not_called()

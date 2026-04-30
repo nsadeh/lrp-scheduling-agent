@@ -58,6 +58,8 @@ logger = logging.getLogger(__name__)
 # Guardrail: LINK_THREAD requires >= this confidence
 LINK_THREAD_MIN_CONFIDENCE = 0.9
 
+INTERNAL_DOMAIN = "longridgepartners.com"
+
 # Rate limit: max classifications per coordinator per hour
 MAX_CLASSIFICATIONS_PER_HOUR = 100
 
@@ -127,6 +129,11 @@ def _coerce_create_loop_action_data(item: SuggestionItem) -> SuggestionItem:
     return item.model_copy(update={"action_data": extraction.model_dump()})
 
 
+def _is_internal_only(msg: Message) -> bool:
+    all_addresses = [msg.from_.email, *(a.email for a in msg.to), *(a.email for a in msg.cc)]
+    return all(addr.lower().endswith(f"@{INTERNAL_DOMAIN}") for addr in all_addresses)
+
+
 class ClassifierHook:
     """Email classification agent — implements the EmailHook protocol."""
 
@@ -165,6 +172,14 @@ class ClassifierHook:
         for tests and synchronous callers.
         """
         msg = event.message
+
+        if _is_internal_only(msg):
+            logger.debug(
+                "skipping internal-only email on thread %s (all participants @%s)",
+                msg.thread_id,
+                INTERNAL_DOMAIN,
+            )
+            return
 
         # Outgoing emails on unlinked threads: skip entirely
         if event.direction == MessageDirection.OUTGOING:
