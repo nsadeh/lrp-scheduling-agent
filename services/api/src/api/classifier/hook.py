@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+async def _collect(async_gen) -> list:
+    """Collect all rows from an aiosql async generator into a list."""
+    return [row async for row in async_gen]
+
+
 # Guardrail: LINK_THREAD requires >= this confidence
 LINK_THREAD_MIN_CONFIDENCE = 0.9
 
@@ -400,21 +406,17 @@ class ClassifierHook:
         )
 
     async def _get_active_loops(self, coordinator_id: str) -> list[Loop]:
-        """Load coordinator's active loops for thread matching context."""
+        """Load coordinator's active loops for thread matching context (4 queries)."""
         from api.scheduling.queries import queries as sched_queries
 
         async with self._loops._pool.connection() as conn:
-            rows = []
-            async for row in sched_queries.get_loops_for_coordinator(
-                conn, coordinator_id=coordinator_id
-            ):
-                rows.append(row)
+            rows = await _collect(
+                sched_queries.get_active_loops_full_for_coordinator(
+                    conn, coordinator_id=coordinator_id
+                )
+            )
 
-        loops = []
-        for row in rows:
-            loop = await self._loops.get_loop(row[0])
-            loops.append(loop)
-        return loops
+        return await self._loops._get_loops_batch(rows)
 
     def _apply_guardrails(
         self,

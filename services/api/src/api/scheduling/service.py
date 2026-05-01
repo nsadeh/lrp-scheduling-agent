@@ -282,53 +282,88 @@ class LoopService:
         return await self.get_loop(loop_id)
 
     async def get_loop(self, loop_id: str) -> Loop:
-        """Get a fully populated loop with all nested relations."""
+        """Get a fully populated loop with all nested relations (4 queries)."""
         async with self._pool.connection() as conn:
-            loop_row = await queries.get_loop(conn, id=loop_id)
+            loop_row = await queries.get_loop_full(conn, id=loop_id)
             if loop_row is None:
                 raise ValueError(f"Loop not found: {loop_id}")
 
-            loop = _row_to_loop(loop_row)
+            loop = _row_to_loop_full(loop_row)
 
-            # Populate actors (recruiter/client_contact may be null on loops
-            # auto-created with incomplete info; collected JIT at send time).
-            loop.coordinator = await self._get_coordinator(conn, loop.coordinator_id)
-            if loop.client_contact_id:
-                loop.client_contact = await self._get_client_contact(conn, loop.client_contact_id)
-            if loop.recruiter_id:
-                loop.recruiter = await self._get_contact(conn, loop.recruiter_id)
-            if loop.client_manager_id:
-                loop.client_manager = await self._get_contact(conn, loop.client_manager_id)
-            loop.candidate = await self._get_candidate(conn, loop.candidate_id)
-
-            # Populate stages with time slots
+            # Stages + time slots (2 queries)
             stage_rows = await _collect(queries.get_stages_for_loop(conn, loop_id=loop_id))
             stages = [_row_to_stage(r) for r in stage_rows]
+            all_ts_rows = await _collect(queries.get_time_slots_for_loop(conn, loop_id=loop_id))
+            ts_by_stage: dict[str, list[TimeSlot]] = {}
+            for r in all_ts_rows:
+                ts = _row_to_time_slot(r)
+                ts_by_stage.setdefault(ts.stage_id, []).append(ts)
             for stage in stages:
-                ts_rows = await _collect(queries.get_time_slots_for_stage(conn, stage_id=stage.id))
-                stage.time_slots = [_row_to_time_slot(r) for r in ts_rows]
+                stage.time_slots = ts_by_stage.get(stage.id, [])
             loop.stages = stages
 
-            # Populate email threads
+            # Threads (1 query)
             thread_rows = await _collect(queries.get_threads_for_loop(conn, loop_id=loop_id))
             loop.email_threads = [_row_to_email_thread(r) for r in thread_rows]
 
             return loop
 
+    async def _get_loops_batch(self, loop_rows: list[tuple]) -> list[Loop]:
+        """Assemble fully-populated Loop objects from pre-fetched loop+actor rows.
+
+        Issues exactly 3 queries total (stages, time_slots, threads)
+        regardless of batch size.
+        """
+        if not loop_rows:
+            return []
+
+        loops = [_row_to_loop_full(r) for r in loop_rows]
+        loop_ids = [loop.id for loop in loops]
+
+        async with self._pool.connection() as conn:
+            stage_rows = await _collect(queries.get_stages_for_loops(conn, loop_ids=loop_ids))
+            ts_rows = await _collect(queries.get_time_slots_for_loops(conn, loop_ids=loop_ids))
+            thread_rows = await _collect(queries.get_threads_for_loops(conn, loop_ids=loop_ids))
+
+        stages_by_loop: dict[str, list[Stage]] = {}
+        for r in stage_rows:
+            stage = _row_to_stage(r)
+            stages_by_loop.setdefault(stage.loop_id, []).append(stage)
+
+        ts_by_stage: dict[str, list[TimeSlot]] = {}
+        for r in ts_rows:
+            ts = _row_to_time_slot(r)
+            ts_by_stage.setdefault(ts.stage_id, []).append(ts)
+
+        threads_by_loop: dict[str, list[EmailThread]] = {}
+        for r in thread_rows:
+            et = _row_to_email_thread(r)
+            threads_by_loop.setdefault(et.loop_id, []).append(et)
+
+        for loop in loops:
+            loop_stages = stages_by_loop.get(loop.id, [])
+            for stage in loop_stages:
+                stage.time_slots = ts_by_stage.get(stage.id, [])
+            loop.stages = loop_stages
+            loop.email_threads = threads_by_loop.get(loop.id, [])
+
+        return loops
+
     async def get_status_board(self, coordinator_email: str) -> StatusBoard:
-        """Build the status board for a coordinator."""
+        """Build the status board for a coordinator (5 queries total)."""
         coord = await self.get_coordinator_by_email(coordinator_email)
         if coord is None:
             return StatusBoard()
 
         async with self._pool.connection() as conn:
             loop_rows = await _collect(
-                queries.get_all_loops_for_coordinator(conn, coordinator_id=coord.id)
+                queries.get_loops_full_for_coordinator(conn, coordinator_id=coord.id)
             )
 
+        loops = await self._get_loops_batch(loop_rows)
+
         board = StatusBoard()
-        for loop_row in loop_rows:
-            loop = await self.get_loop(loop_row[0])
+        for loop in loops:
             summary = _loop_to_summary(loop)
 
             status = loop.computed_status
@@ -794,6 +829,58 @@ def _row_to_loop(row: tuple) -> Loop:
         created_at=row[8],
         updated_at=row[9],
     )
+
+
+def _row_to_loop_full(row: tuple) -> Loop:
+    """Convert a get_loop_full / get_loops_full_* row into a Loop with actors.
+
+    Column layout (29 cols):
+      0-9:   loop fields
+      10-12: coordinator (name, email, created_at)
+      13-16: client_contact (name, email, company, created_at) — nullable
+      17-22: recruiter (name, email, role, company, photo_url, created_at) — nullable
+      23-28: client_manager (name, email, role, company, photo_url, created_at) — nullable
+      29-31: candidate (name, notes, created_at)
+    """
+    loop = Loop(
+        id=row[0],
+        coordinator_id=row[1],
+        client_contact_id=row[2],
+        recruiter_id=row[3],
+        client_manager_id=row[4],
+        candidate_id=row[5],
+        title=row[6],
+        notes=row[7],
+        created_at=row[8],
+        updated_at=row[9],
+    )
+    loop.coordinator = Coordinator(id=row[1], name=row[10], email=row[11], created_at=row[12])
+    if row[13] is not None:
+        loop.client_contact = ClientContact(
+            id=row[2], name=row[13], email=row[14], company=row[15], created_at=row[16]
+        )
+    if row[17] is not None:
+        loop.recruiter = Contact(
+            id=row[3],
+            name=row[17],
+            email=row[18],
+            role=row[19],
+            company=row[20],
+            photo_url=row[21],
+            created_at=row[22],
+        )
+    if row[23] is not None:
+        loop.client_manager = Contact(
+            id=row[4],
+            name=row[23],
+            email=row[24],
+            role=row[25],
+            company=row[26],
+            photo_url=row[27],
+            created_at=row[28],
+        )
+    loop.candidate = Candidate(id=row[5], name=row[29], notes=row[30], created_at=row[31])
+    return loop
 
 
 def _row_to_event(row: tuple) -> LoopEvent:
