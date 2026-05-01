@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 # Guardrail: LINK_THREAD requires >= this confidence
 LINK_THREAD_MIN_CONFIDENCE = 0.9
 
@@ -400,21 +401,19 @@ class ClassifierHook:
         )
 
     async def _get_active_loops(self, coordinator_id: str) -> list[Loop]:
-        """Load coordinator's active loops for thread matching context."""
+        """Load coordinator's active loops for thread matching context (4 queries)."""
         from api.scheduling.queries import queries as sched_queries
+        from api.scheduling.service import _fetch_dicts, _row_to_loop_full
 
         async with self._loops._pool.connection() as conn:
-            rows = []
-            async for row in sched_queries.get_loops_for_coordinator(
-                conn, coordinator_id=coordinator_id
-            ):
-                rows.append(row)
+            rows = await _fetch_dicts(
+                conn,
+                sched_queries.get_active_loops_full_for_coordinator,
+                coordinator_id=coordinator_id,
+            )
 
-        loops = []
-        for row in rows:
-            loop = await self._loops.get_loop(row[0])
-            loops.append(loop)
-        return loops
+        loops = [_row_to_loop_full(r) for r in rows]
+        return await self._loops._hydrate_loop_relations(loops)
 
     def _apply_guardrails(
         self,

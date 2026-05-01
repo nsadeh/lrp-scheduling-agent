@@ -24,6 +24,7 @@ from api.gmail.hooks import (
     classify_direction,
     classify_message_type,
 )
+from api.gmail.queries import queries as gmail_queries
 from api.observability import init_sentry
 
 logger = logging.getLogger(__name__)
@@ -273,34 +274,34 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
             await token_store.update_history_id(coordinator_email, str(new_history_id))
         return
 
+    # Batch dedup: filter out already-processed messages in one query
+    async with pool.connection() as conn:
+        already_processed = {
+            row[0]
+            async for row in gmail_queries.get_processed_message_ids(
+                conn, message_ids=new_message_ids
+            )
+        }
+
+    unprocessed_ids = [mid for mid in new_message_ids if mid not in already_processed]
+
+    if not unprocessed_ids:
+        new_history_id = history_response.get("historyId")
+        if new_history_id:
+            await token_store.update_history_id(coordinator_email, str(new_history_id))
+        return
+
+    # Batch mark as processed BEFORE firing hooks (at-most-once)
+    async with pool.connection() as conn:
+        await gmail_queries.mark_messages_processed_batch(
+            conn, message_ids=unprocessed_ids, coordinator_email=coordinator_email
+        )
+
     # Process each new message
     threads_cache: dict[str, list] = {}
 
-    for msg_id in new_message_ids:
+    for msg_id in unprocessed_ids:
         try:
-            # Dedup check
-            async with pool.connection() as conn:
-                cur = await conn.execute(
-                    "SELECT EXISTS("
-                    "SELECT 1 FROM processed_messages "
-                    "WHERE gmail_message_id = %(id)s)",
-                    {"id": msg_id},
-                )
-                row = await cur.fetchone()
-                if row and row[0]:
-                    continue
-
-            # Mark as processed BEFORE firing hook (at-most-once)
-            async with pool.connection() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO processed_messages (gmail_message_id, coordinator_email)
-                    VALUES (%(id)s, %(email)s)
-                    ON CONFLICT (gmail_message_id) DO NOTHING
-                    """,
-                    {"id": msg_id, "email": coordinator_email},
-                )
-
             # Fetch full message
             message = await gmail.get_message(coordinator_email, msg_id)
 
