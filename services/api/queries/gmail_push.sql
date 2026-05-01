@@ -21,16 +21,20 @@ WHERE user_email = :user_email;
 SELECT user_email FROM gmail_tokens
 WHERE watch_expiry IS NOT NULL AND watch_expiry > now();
 
--- name: is_message_processed(gmail_message_id)$
--- Check if a message has already been processed (dedup).
-SELECT EXISTS(
-    SELECT 1 FROM processed_messages WHERE gmail_message_id = :gmail_message_id
-) AS is_processed;
+-- name: get_processed_message_ids
+-- Of the given message IDs, return the ones already in processed_messages.
+-- Used by the push worker to filter a batch of incoming messages down to the
+-- ones we haven't classified yet — replaces a per-message EXISTS check.
+SELECT gmail_message_id
+FROM processed_messages
+WHERE gmail_message_id = ANY(:message_ids);
 
--- name: mark_message_processed(gmail_message_id, coordinator_email)!
--- Record a message as processed. ON CONFLICT handles race between push and poll.
+-- name: mark_messages_processed_batch!
+-- Bulk-record the given message IDs as processed for one coordinator.
+-- ON CONFLICT handles races between push and poll workers seeing the same
+-- message; SELECT ... unnest lets us insert N rows in one round-trip.
 INSERT INTO processed_messages (gmail_message_id, coordinator_email)
-VALUES (:gmail_message_id, :coordinator_email)
+SELECT unnest(:message_ids::TEXT[]), :coordinator_email
 ON CONFLICT (gmail_message_id) DO NOTHING;
 
 -- name: cleanup_old_processed_messages!

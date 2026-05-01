@@ -24,6 +24,7 @@ from api.gmail.hooks import (
     classify_direction,
     classify_message_type,
 )
+from api.gmail.queries import queries as gmail_queries
 from api.observability import init_sentry
 
 logger = logging.getLogger(__name__)
@@ -275,14 +276,12 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
 
     # Batch dedup: filter out already-processed messages in one query
     async with pool.connection() as conn:
-        cur = await conn.execute(
-            """
-            SELECT gmail_message_id FROM processed_messages
-            WHERE gmail_message_id = ANY(%(ids)s)
-            """,
-            {"ids": new_message_ids},
-        )
-        already_processed = {row[0] for row in await cur.fetchall()}
+        already_processed = {
+            row[0]
+            async for row in gmail_queries.get_processed_message_ids(
+                conn, message_ids=new_message_ids
+            )
+        }
 
     unprocessed_ids = [mid for mid in new_message_ids if mid not in already_processed]
 
@@ -294,13 +293,8 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
 
     # Batch mark as processed BEFORE firing hooks (at-most-once)
     async with pool.connection() as conn:
-        await conn.execute(
-            """
-            INSERT INTO processed_messages (gmail_message_id, coordinator_email)
-            SELECT unnest(%(ids)s::TEXT[]), %(email)s
-            ON CONFLICT (gmail_message_id) DO NOTHING
-            """,
-            {"ids": unprocessed_ids, "email": coordinator_email},
+        await gmail_queries.mark_messages_processed_batch(
+            conn, message_ids=unprocessed_ids, coordinator_email=coordinator_email
         )
 
     # Process each new message

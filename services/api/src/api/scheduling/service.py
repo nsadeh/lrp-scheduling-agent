@@ -12,6 +12,7 @@ from datetime import datetime  # noqa: TC003
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
+from psycopg.rows import dict_row
 
 from api.ids import make_id
 from api.scheduling.models import (
@@ -42,6 +43,26 @@ if TYPE_CHECKING:
 async def _collect(async_gen) -> list:
     """Collect all rows from an aiosql async generator into a list."""
     return [row async for row in async_gen]
+
+
+async def _fetch_dicts(conn, query, **params) -> list[dict]:
+    """Execute an aiosql query and return rows as dicts (named-column access).
+
+    aiosql's apsycopg adapter returns plain tuples; we sometimes want dicts
+    so the row-to-model converter can use named keys instead of indexing
+    into a 30-column JOIN. We bypass aiosql here and execute the parsed SQL
+    on a cursor with row_factory=dict_row.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query.sql, params)
+        return await cur.fetchall()
+
+
+async def _fetch_dict_one(conn, query, **params) -> dict | None:
+    """Single-row variant of `_fetch_dicts`."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query.sql, params)
+        return await cur.fetchone()
 
 
 def _email_domain(address: str) -> str:
@@ -284,7 +305,7 @@ class LoopService:
     async def get_loop(self, loop_id: str) -> Loop:
         """Get a fully populated loop with all nested relations (4 queries)."""
         async with self._pool.connection() as conn:
-            loop_row = await queries.get_loop_full(conn, id=loop_id)
+            loop_row = await _fetch_dict_one(conn, queries.get_loop_full, id=loop_id)
             if loop_row is None:
                 raise ValueError(f"Loop not found: {loop_id}")
 
@@ -308,16 +329,18 @@ class LoopService:
 
             return loop
 
-    async def _get_loops_batch(self, loop_rows: list[tuple]) -> list[Loop]:
-        """Assemble fully-populated Loop objects from pre-fetched loop+actor rows.
+    async def _hydrate_loop_relations(self, loops: list[Loop]) -> list[Loop]:
+        """Populate stages, time slots, and email threads on actor-populated Loops.
 
-        Issues exactly 3 queries total (stages, time_slots, threads)
-        regardless of batch size.
+        Caller is responsible for converting the loop+actor rows into ``Loop``
+        objects (typically via ``_row_to_loop_full``). This method then issues
+        exactly 3 batch queries (stages, time_slots, threads via
+        ``ANY(:loop_ids)``) regardless of batch size, and mutates the input
+        loops in place. Returns the same list for convenience.
         """
-        if not loop_rows:
-            return []
+        if not loops:
+            return loops
 
-        loops = [_row_to_loop_full(r) for r in loop_rows]
         loop_ids = [loop.id for loop in loops]
 
         async with self._pool.connection() as conn:
@@ -356,11 +379,11 @@ class LoopService:
             return StatusBoard()
 
         async with self._pool.connection() as conn:
-            loop_rows = await _collect(
-                queries.get_loops_full_for_coordinator(conn, coordinator_id=coord.id)
+            loop_rows = await _fetch_dicts(
+                conn, queries.get_loops_full_for_coordinator, coordinator_id=coord.id
             )
 
-        loops = await self._get_loops_batch(loop_rows)
+        loops = await self._hydrate_loop_relations([_row_to_loop_full(r) for r in loop_rows])
 
         board = StatusBoard()
         for loop in loops:
@@ -831,55 +854,71 @@ def _row_to_loop(row: tuple) -> Loop:
     )
 
 
-def _row_to_loop_full(row: tuple) -> Loop:
-    """Convert a get_loop_full / get_loops_full_* row into a Loop with actors.
+def _row_to_loop_full(row: dict) -> Loop:
+    """Convert a get_loop_full / get_loops_full_* dict row into a populated Loop.
 
-    Column layout (29 cols):
-      0-9:   loop fields
-      10-12: coordinator (name, email, created_at)
-      13-16: client_contact (name, email, company, created_at) — nullable
-      17-22: recruiter (name, email, role, company, photo_url, created_at) — nullable
-      23-28: client_manager (name, email, role, company, photo_url, created_at) — nullable
-      29-31: candidate (name, notes, created_at)
+    Expects rows fetched with psycopg's ``dict_row`` factory (see
+    ``_fetch_dicts`` / ``_fetch_dict_one``). Field naming matches the
+    ``AS …`` aliases in scheduling.sql:
+      - ``loop_*``   loop columns
+      - ``coord_*``  coordinator
+      - ``cc_*``     client_contact (nullable)
+      - ``rec_*``    recruiter (nullable)
+      - ``cm_*``     client_manager (nullable)
+      - ``cand_*``   candidate
     """
     loop = Loop(
-        id=row[0],
-        coordinator_id=row[1],
-        client_contact_id=row[2],
-        recruiter_id=row[3],
-        client_manager_id=row[4],
-        candidate_id=row[5],
-        title=row[6],
-        notes=row[7],
-        created_at=row[8],
-        updated_at=row[9],
+        id=row["loop_id"],
+        coordinator_id=row["loop_coordinator_id"],
+        client_contact_id=row["loop_client_contact_id"],
+        recruiter_id=row["loop_recruiter_id"],
+        client_manager_id=row["loop_client_manager_id"],
+        candidate_id=row["loop_candidate_id"],
+        title=row["loop_title"],
+        notes=row["loop_notes"],
+        created_at=row["loop_created_at"],
+        updated_at=row["loop_updated_at"],
     )
-    loop.coordinator = Coordinator(id=row[1], name=row[10], email=row[11], created_at=row[12])
-    if row[13] is not None:
+    loop.coordinator = Coordinator(
+        id=row["loop_coordinator_id"],
+        name=row["coord_name"],
+        email=row["coord_email"],
+        created_at=row["coord_created_at"],
+    )
+    if row["cc_name"] is not None:
         loop.client_contact = ClientContact(
-            id=row[2], name=row[13], email=row[14], company=row[15], created_at=row[16]
+            id=row["loop_client_contact_id"],
+            name=row["cc_name"],
+            email=row["cc_email"],
+            company=row["cc_company"],
+            created_at=row["cc_created_at"],
         )
-    if row[17] is not None:
+    if row["rec_name"] is not None:
         loop.recruiter = Contact(
-            id=row[3],
-            name=row[17],
-            email=row[18],
-            role=row[19],
-            company=row[20],
-            photo_url=row[21],
-            created_at=row[22],
+            id=row["loop_recruiter_id"],
+            name=row["rec_name"],
+            email=row["rec_email"],
+            role=row["rec_role"],
+            company=row["rec_company"],
+            photo_url=row["rec_photo_url"],
+            created_at=row["rec_created_at"],
         )
-    if row[23] is not None:
+    if row["cm_name"] is not None:
         loop.client_manager = Contact(
-            id=row[4],
-            name=row[23],
-            email=row[24],
-            role=row[25],
-            company=row[26],
-            photo_url=row[27],
-            created_at=row[28],
+            id=row["loop_client_manager_id"],
+            name=row["cm_name"],
+            email=row["cm_email"],
+            role=row["cm_role"],
+            company=row["cm_company"],
+            photo_url=row["cm_photo_url"],
+            created_at=row["cm_created_at"],
         )
-    loop.candidate = Candidate(id=row[5], name=row[29], notes=row[30], created_at=row[31])
+    loop.candidate = Candidate(
+        id=row["loop_candidate_id"],
+        name=row["cand_name"],
+        notes=row["cand_notes"],
+        created_at=row["cand_created_at"],
+    )
     return loop
 
 

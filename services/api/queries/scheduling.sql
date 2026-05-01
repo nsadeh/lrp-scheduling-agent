@@ -112,20 +112,46 @@ FROM loops WHERE id = :id;
 
 -- name: get_loop_full^
 -- Fetch a loop with all actor details in a single query.
+-- Coordinator and candidate are INNER JOIN — both FKs are NOT NULL on loops
+-- (see migration 0002), so a missing actor row would mean DB corruption.
+-- Client contact, recruiter, and client manager are LEFT JOIN — those FKs
+-- became nullable in migration 0009 (loops can be auto-created with
+-- incomplete contact info; missing pieces are collected JIT at send time).
+-- Column aliases are explicit so the Python row-converter can use named
+-- access (psycopg dict_row) and survive future SELECT-list churn.
 SELECT
-    l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-    l.client_manager_id, l.candidate_id, l.title, l.notes,
-    l.created_at, l.updated_at,
-    -- coordinator (always present)
-    co.name, co.email, co.created_at,
-    -- client_contact (nullable)
-    cc.name, cc.email, cc.company, cc.created_at,
-    -- recruiter (nullable)
-    rec.name, rec.email, rec.role, rec.company, rec.photo_url, rec.created_at,
-    -- client_manager (nullable)
-    cm.name, cm.email, cm.role, cm.company, cm.photo_url, cm.created_at,
-    -- candidate (always present)
-    cand.name, cand.notes, cand.created_at
+    l.id                AS loop_id,
+    l.coordinator_id    AS loop_coordinator_id,
+    l.client_contact_id AS loop_client_contact_id,
+    l.recruiter_id      AS loop_recruiter_id,
+    l.client_manager_id AS loop_client_manager_id,
+    l.candidate_id      AS loop_candidate_id,
+    l.title             AS loop_title,
+    l.notes             AS loop_notes,
+    l.created_at        AS loop_created_at,
+    l.updated_at        AS loop_updated_at,
+    co.name             AS coord_name,
+    co.email            AS coord_email,
+    co.created_at       AS coord_created_at,
+    cc.name             AS cc_name,
+    cc.email            AS cc_email,
+    cc.company          AS cc_company,
+    cc.created_at       AS cc_created_at,
+    rec.name            AS rec_name,
+    rec.email           AS rec_email,
+    rec.role            AS rec_role,
+    rec.company         AS rec_company,
+    rec.photo_url       AS rec_photo_url,
+    rec.created_at      AS rec_created_at,
+    cm.name             AS cm_name,
+    cm.email            AS cm_email,
+    cm.role             AS cm_role,
+    cm.company          AS cm_company,
+    cm.photo_url        AS cm_photo_url,
+    cm.created_at       AS cm_created_at,
+    cand.name           AS cand_name,
+    cand.notes          AS cand_notes,
+    cand.created_at     AS cand_created_at
 FROM loops l
 JOIN coordinators co ON co.id = l.coordinator_id
 LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
@@ -136,15 +162,40 @@ WHERE l.id = :id;
 
 -- name: get_loops_full_for_coordinator
 -- All loops for a coordinator with actor details populated (for status board).
+-- See get_loop_full above for JOIN reasoning and aliasing convention.
 SELECT
-    l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-    l.client_manager_id, l.candidate_id, l.title, l.notes,
-    l.created_at, l.updated_at,
-    co.name, co.email, co.created_at,
-    cc.name, cc.email, cc.company, cc.created_at,
-    rec.name, rec.email, rec.role, rec.company, rec.photo_url, rec.created_at,
-    cm.name, cm.email, cm.role, cm.company, cm.photo_url, cm.created_at,
-    cand.name, cand.notes, cand.created_at
+    l.id                AS loop_id,
+    l.coordinator_id    AS loop_coordinator_id,
+    l.client_contact_id AS loop_client_contact_id,
+    l.recruiter_id      AS loop_recruiter_id,
+    l.client_manager_id AS loop_client_manager_id,
+    l.candidate_id      AS loop_candidate_id,
+    l.title             AS loop_title,
+    l.notes             AS loop_notes,
+    l.created_at        AS loop_created_at,
+    l.updated_at        AS loop_updated_at,
+    co.name             AS coord_name,
+    co.email            AS coord_email,
+    co.created_at       AS coord_created_at,
+    cc.name             AS cc_name,
+    cc.email            AS cc_email,
+    cc.company          AS cc_company,
+    cc.created_at       AS cc_created_at,
+    rec.name            AS rec_name,
+    rec.email           AS rec_email,
+    rec.role            AS rec_role,
+    rec.company         AS rec_company,
+    rec.photo_url       AS rec_photo_url,
+    rec.created_at      AS rec_created_at,
+    cm.name             AS cm_name,
+    cm.email            AS cm_email,
+    cm.role             AS cm_role,
+    cm.company          AS cm_company,
+    cm.photo_url        AS cm_photo_url,
+    cm.created_at       AS cm_created_at,
+    cand.name           AS cand_name,
+    cand.notes          AS cand_notes,
+    cand.created_at     AS cand_created_at
 FROM loops l
 JOIN coordinators co ON co.id = l.coordinator_id
 LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
@@ -156,15 +207,40 @@ ORDER BY l.updated_at DESC;
 
 -- name: get_active_loops_full_for_coordinator
 -- Active loops (with >=1 non-terminal stage) for a coordinator, with actors.
+-- See get_loop_full above for JOIN reasoning and aliasing convention.
 SELECT DISTINCT ON (l.id)
-    l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-    l.client_manager_id, l.candidate_id, l.title, l.notes,
-    l.created_at, l.updated_at,
-    co.name, co.email, co.created_at,
-    cc.name, cc.email, cc.company, cc.created_at,
-    rec.name, rec.email, rec.role, rec.company, rec.photo_url, rec.created_at,
-    cm.name, cm.email, cm.role, cm.company, cm.photo_url, cm.created_at,
-    cand.name, cand.notes, cand.created_at
+    l.id                AS loop_id,
+    l.coordinator_id    AS loop_coordinator_id,
+    l.client_contact_id AS loop_client_contact_id,
+    l.recruiter_id      AS loop_recruiter_id,
+    l.client_manager_id AS loop_client_manager_id,
+    l.candidate_id      AS loop_candidate_id,
+    l.title             AS loop_title,
+    l.notes             AS loop_notes,
+    l.created_at        AS loop_created_at,
+    l.updated_at        AS loop_updated_at,
+    co.name             AS coord_name,
+    co.email            AS coord_email,
+    co.created_at       AS coord_created_at,
+    cc.name             AS cc_name,
+    cc.email            AS cc_email,
+    cc.company          AS cc_company,
+    cc.created_at       AS cc_created_at,
+    rec.name            AS rec_name,
+    rec.email           AS rec_email,
+    rec.role            AS rec_role,
+    rec.company         AS rec_company,
+    rec.photo_url       AS rec_photo_url,
+    rec.created_at      AS rec_created_at,
+    cm.name             AS cm_name,
+    cm.email            AS cm_email,
+    cm.role             AS cm_role,
+    cm.company          AS cm_company,
+    cm.photo_url        AS cm_photo_url,
+    cm.created_at       AS cm_created_at,
+    cand.name           AS cand_name,
+    cand.notes          AS cand_notes,
+    cand.created_at     AS cand_created_at
 FROM loops l
 JOIN coordinators co ON co.id = l.coordinator_id
 LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
