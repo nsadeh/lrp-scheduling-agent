@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Default model when LangFuse prompt config doesn't specify one.
-DEFAULT_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
+DEFAULT_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "google/gemini-2.5-flash")
 
 
 @dataclass
