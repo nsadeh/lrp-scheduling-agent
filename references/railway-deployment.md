@@ -38,9 +38,7 @@ Required by current code on startup or first request:
 ```
 LANGFUSE_PUBLIC_KEY         ← api/ai/langfuse_client.py:42 raises at startup if unset
 LANGFUSE_SECRET_KEY         ← same
-ANTHROPIC_API_KEY           ← required for any LLM call
-OPENAI_API_KEY              ← secondary-model fallback
-GOOGLE_AI_API_KEY           ← tertiary-model fallback
+OPENROUTER_API_KEY          ← single key for all LLM calls (primary + failovers)
 PUBSUB_TOPIC                ← Gmail watch renewal skips without it
 PUBSUB_WEBHOOK_AUDIENCE     ← webhook OIDC verification fails without it
 PUBSUB_SERVICE_ACCOUNT      ← optional; has a working default
@@ -130,9 +128,7 @@ railway variables --set "LANGFUSE_PUBLIC_KEY=pk-lf-..." \
                   --set "LANGFUSE_SECRET_KEY=sk-lf-..." \
                   --set "LANGFUSE_HOST=https://us.cloud.langfuse.com" \
                   --set "LANGFUSE_ENVIRONMENT=staging" \
-                  --set "ANTHROPIC_API_KEY=sk-ant-..." \
-                  --set "OPENAI_API_KEY=sk-proj-..." \
-                  --set "GOOGLE_AI_API_KEY=AIza..." \
+                  --set "OPENROUTER_API_KEY=sk-or-..." \
                   --set "PUBSUB_TOPIC=projects/ai-agents-dev-492713/topics/gmail-push" \
                   --set "PUBSUB_WEBHOOK_AUDIENCE=https://api-staging-545f.up.railway.app/webhook/gmail" \
                   --set "PUBSUB_SERVICE_ACCOUNT=pubsub-push@ai-agents-dev-492713.iam.gserviceaccount.com" \
@@ -182,9 +178,7 @@ LANGFUSE_PUBLIC_KEY       (same value as api)
 LANGFUSE_SECRET_KEY       (same value as api)
 LANGFUSE_HOST             (same value as api)
 LANGFUSE_ENVIRONMENT      staging
-ANTHROPIC_API_KEY         (same value as api)
-OPENAI_API_KEY            (same value as api)
-GOOGLE_AI_API_KEY         (same value as api)
+OPENROUTER_API_KEY        (same value as api)
 SENTRY_DSN                (optional, same as api)
 INTERNAL_EMAIL_DOMAINS    (optional, same as api)
 ```
