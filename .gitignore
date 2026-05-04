@@ -40,3 +40,4 @@ htmlcov/
 build/
 
 .playwright-mcp/
+.claude/
