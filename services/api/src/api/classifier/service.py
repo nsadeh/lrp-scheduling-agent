@@ -39,7 +39,6 @@ class SuggestionService:
         item: SuggestionItem,
         reasoning: str | None = None,
         loop_id: str | None = None,
-        stage_id: str | None = None,
     ) -> Suggestion:
         """Persist a single SuggestionItem from the classifier output."""
         sug_id = make_id("sug")
@@ -54,17 +53,12 @@ class SuggestionService:
                 gmail_message_id=gmail_message_id,
                 gmail_thread_id=gmail_thread_id,
                 loop_id=item.target_loop_id or loop_id,
-                stage_id=item.target_stage_id or stage_id,
                 classification=item.classification,
                 action=item.action,
-                auto_advance=item.auto_advance,
                 confidence=item.confidence,
                 summary=item.summary,
-                target_state=item.target_state,
-                extracted_entities=json.dumps(item.extracted_entities),
-                questions=json.dumps(item.questions),
                 action_data=json.dumps(item.action_data),
-                reasoning=reasoning,
+                reasoning=reasoning if reasoning is not None else item.reasoning,
                 status=status,
             )
             return _row_to_suggestion(row)
@@ -115,13 +109,12 @@ class SuggestionService:
 
 
 def _row_to_suggestion(row: tuple) -> Suggestion:
-    entities = row[12]
-    if isinstance(entities, str):
-        entities = json.loads(entities)
-    questions = row[13]
-    if isinstance(questions, str):
-        questions = json.loads(questions)
-    action_data = row[14]
+    """Tuple shape (15 cols):
+    id, coordinator_email, gmail_message_id, gmail_thread_id, loop_id,
+    classification, action, confidence, summary, action_data, reasoning,
+    status, resolved_at, resolved_by, created_at.
+    """
+    action_data = row[9]
     if isinstance(action_data, str):
         action_data = json.loads(action_data)
 
@@ -131,19 +124,14 @@ def _row_to_suggestion(row: tuple) -> Suggestion:
         gmail_message_id=row[2],
         gmail_thread_id=row[3],
         loop_id=row[4],
-        stage_id=row[5],
-        classification=row[6],
-        action=row[7],
-        auto_advance=row[8],
-        confidence=row[9],
-        summary=row[10],
-        target_state=row[11],
-        extracted_entities=entities,
-        questions=questions,
+        classification=row[5],
+        action=row[6],
+        confidence=row[7],
+        summary=row[8],
         action_data=action_data,
-        reasoning=row[15],
-        status=row[16],
-        resolved_at=row[17],
-        resolved_by=row[18],
-        created_at=row[19],
+        reasoning=row[10],
+        status=row[11],
+        resolved_at=row[12],
+        resolved_by=row[13],
+        created_at=row[14],
     )

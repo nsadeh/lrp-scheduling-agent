@@ -17,7 +17,9 @@ from psycopg_pool import AsyncConnectionPool  # noqa: E402
 
 from api.addon.routes import addon_router, oauth_router, refresh_router  # noqa: E402
 from api.ai import init_langfuse, init_llm_service  # noqa: E402
-from api.classifier.hook import ClassifierHook  # noqa: E402
+from api.classifier.loop_classifier import LoopClassifier  # noqa: E402
+from api.classifier.next_action_agent import NextActionAgent  # noqa: E402
+from api.classifier.router import EmailRouter  # noqa: E402
 from api.classifier.sender_blacklist import load_blacklist  # noqa: E402
 from api.classifier.service import SuggestionService  # noqa: E402
 from api.drafts.service import DraftService  # noqa: E402
@@ -76,16 +78,27 @@ async def lifespan(app: FastAPI):
     app.state.draft_service = draft_service
     logger.info("DraftService initialized")
 
-    sender_blacklist = load_blacklist()
-    app.state.email_hook = ClassifierHook(
+    suggestion_service = SuggestionService(db_pool=pool)
+    classifier = LoopClassifier(
         llm=llm_service,
         langfuse=langfuse,
-        suggestion_service=SuggestionService(db_pool=pool),
+        suggestion_service=suggestion_service,
+        loop_service=app.state.scheduling,
+    )
+    agent = NextActionAgent(
+        llm=llm_service,
+        langfuse=langfuse,
+        suggestion_service=suggestion_service,
         loop_service=app.state.scheduling,
         draft_service=draft_service,
-        sender_blacklist=sender_blacklist,
     )
-    logger.info("ClassifierHook active")
+    app.state.email_router = EmailRouter(
+        loop_classifier=classifier,
+        next_action_agent=agent,
+        loop_service=app.state.scheduling,
+        sender_blacklist=load_blacklist(),
+    )
+    logger.info("EmailRouter active")
 
     yield
 

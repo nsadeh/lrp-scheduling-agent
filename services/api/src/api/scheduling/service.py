@@ -1,6 +1,6 @@
 """Scheduling loop management service.
 
-Orchestrates loop CRUD, stage state machine, event recording,
+Orchestrates loop CRUD, state transitions, event recording,
 contact management, and email sending.
 """
 
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime  # noqa: TC003
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
@@ -16,7 +15,6 @@ from psycopg.rows import dict_row
 
 from api.ids import make_id
 from api.scheduling.models import (
-    ALLOWED_TRANSITIONS,
     Candidate,
     ClientContact,
     Contact,
@@ -26,10 +24,8 @@ from api.scheduling.models import (
     Loop,
     LoopEvent,
     LoopSummary,
-    Stage,
     StageState,
     StatusBoard,
-    TimeSlot,
 )
 from api.scheduling.queries import queries
 
@@ -46,13 +42,7 @@ async def _collect(async_gen) -> list:
 
 
 async def _fetch_dicts(conn, query, **params) -> list[dict]:
-    """Execute an aiosql query and return rows as dicts (named-column access).
-
-    aiosql's apsycopg adapter returns plain tuples; we sometimes want dicts
-    so the row-to-model converter can use named keys instead of indexing
-    into a 30-column JOIN. We bypass aiosql here and execute the parsed SQL
-    on a cursor with row_factory=dict_row.
-    """
+    """Execute an aiosql query and return rows as dicts (named-column access)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query.sql, params)
         return await cur.fetchall()
@@ -66,7 +56,6 @@ async def _fetch_dict_one(conn, query, **params) -> dict | None:
 
 
 def _email_domain(address: str) -> str:
-    """Return the lowercase domain from an email address, or empty string."""
     _, _, domain = address.rpartition("@")
     return domain.strip().lower()
 
@@ -74,13 +63,6 @@ def _email_domain(address: str) -> str:
 def _classify_recipients(
     *, recipients: list[str], coordinator_email: str
 ) -> tuple[list[str], bool]:
-    """Return (unique recipient domains, is_internal).
-
-    A send is internal when every recipient's domain is in
-    ``INTERNAL_EMAIL_DOMAINS`` (comma-separated env var). When the env var is
-    unset we fall back to the coordinator's own domain — coordinators are
-    always LRP employees, so this is a safe default for reporting.
-    """
     configured = os.environ.get("INTERNAL_EMAIL_DOMAINS", "")
     internal = {d.strip().lower() for d in configured.split(",") if d.strip()}
     if not internal:
@@ -101,7 +83,7 @@ def _classify_recipients(
 
 
 class InvalidTransitionError(Exception):
-    """Raised when a stage state transition is not allowed."""
+    """Raised when revive() is called on a non-cold loop."""
 
 
 class LoopService:
@@ -142,9 +124,6 @@ class LoopService:
         async with self._pool.connection() as conn, conn.transaction():
             existing = await queries.get_contact_by_email_and_role(conn, email=email, role=role)
             if existing is not None:
-                # Keep the stored row untouched — different loops may have
-                # typed different names for the same person; we must not
-                # silently clobber another coordinator's name.
                 return _row_to_contact(existing)
             row = await queries.create_contact(
                 conn,
@@ -214,27 +193,23 @@ class LoopService:
         client_contact_id: str | None,
         recruiter_id: str | None,
         title: str,
-        first_stage_name: str = "Round 1",
         client_manager_id: str | None = None,
         gmail_thread_id: str | None = None,
         gmail_subject: str | None = None,
         notes: str | None = None,
     ) -> Loop:
-        """Create a loop with its first stage, recording all events in one transaction."""
+        """Create a loop in the NEW state, recording the create event."""
         async with self._pool.connection() as conn, conn.transaction():
-            # Ensure coordinator exists
             coord_row = await queries.get_or_create_coordinator(
                 conn, id=make_id("crd"), name=coordinator_name, email=coordinator_email
             )
             coordinator_id = coord_row[0]
 
-            # Create candidate
             cand_row = await queries.create_candidate(
                 conn, id=make_id("can"), name=candidate_name, notes=None
             )
             candidate_id = cand_row[0]
 
-            # Create loop
             loop_id = make_id("lop")
             await queries.create_loop(
                 conn,
@@ -245,41 +220,18 @@ class LoopService:
                 client_manager_id=client_manager_id,
                 candidate_id=candidate_id,
                 title=title,
+                state=StageState.NEW,
                 notes=notes,
             )
 
-            # Record loop_created event
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=None,
                 event_type=EventType.LOOP_CREATED,
                 data={"title": title, "candidate_name": candidate_name},
                 actor_email=coordinator_email,
             )
 
-            # Create first stage
-            stage_id = make_id("stg")
-            await queries.create_stage(
-                conn,
-                id=stage_id,
-                loop_id=loop_id,
-                name=first_stage_name,
-                state=StageState.NEW,
-                ordinal=0,
-            )
-
-            # Record stage_created event
-            await self._record_event(
-                conn,
-                loop_id=loop_id,
-                stage_id=stage_id,
-                event_type=EventType.STAGE_CREATED,
-                data={"name": first_stage_name, "ordinal": 0},
-                actor_email=coordinator_email,
-            )
-
-            # Link email thread if provided
             if gmail_thread_id:
                 await queries.link_thread(
                     conn,
@@ -291,7 +243,6 @@ class LoopService:
                 await self._record_event(
                     conn,
                     loop_id=loop_id,
-                    stage_id=None,
                     event_type=EventType.THREAD_LINKED,
                     data={
                         "gmail_thread_id": gmail_thread_id,
@@ -303,7 +254,7 @@ class LoopService:
         return await self.get_loop(loop_id)
 
     async def get_loop(self, loop_id: str) -> Loop:
-        """Get a fully populated loop with all nested relations (4 queries)."""
+        """Get a fully populated loop with actor relations and email threads (2 queries)."""
         async with self._pool.connection() as conn:
             loop_row = await _fetch_dict_one(conn, queries.get_loop_full, id=loop_id)
             if loop_row is None:
@@ -311,52 +262,20 @@ class LoopService:
 
             loop = _row_to_loop_full(loop_row)
 
-            # Stages + time slots (2 queries)
-            stage_rows = await _collect(queries.get_stages_for_loop(conn, loop_id=loop_id))
-            stages = [_row_to_stage(r) for r in stage_rows]
-            all_ts_rows = await _collect(queries.get_time_slots_for_loop(conn, loop_id=loop_id))
-            ts_by_stage: dict[str, list[TimeSlot]] = {}
-            for r in all_ts_rows:
-                ts = _row_to_time_slot(r)
-                ts_by_stage.setdefault(ts.stage_id, []).append(ts)
-            for stage in stages:
-                stage.time_slots = ts_by_stage.get(stage.id, [])
-            loop.stages = stages
-
-            # Threads (1 query)
             thread_rows = await _collect(queries.get_threads_for_loop(conn, loop_id=loop_id))
             loop.email_threads = [_row_to_email_thread(r) for r in thread_rows]
 
             return loop
 
     async def _hydrate_loop_relations(self, loops: list[Loop]) -> list[Loop]:
-        """Populate stages, time slots, and email threads on actor-populated Loops.
-
-        Caller is responsible for converting the loop+actor rows into ``Loop``
-        objects (typically via ``_row_to_loop_full``). This method then issues
-        exactly 3 batch queries (stages, time_slots, threads via
-        ``ANY(:loop_ids)``) regardless of batch size, and mutates the input
-        loops in place. Returns the same list for convenience.
-        """
+        """Populate email threads on actor-populated Loops via a single batch query."""
         if not loops:
             return loops
 
         loop_ids = [loop.id for loop in loops]
 
         async with self._pool.connection() as conn:
-            stage_rows = await _collect(queries.get_stages_for_loops(conn, loop_ids=loop_ids))
-            ts_rows = await _collect(queries.get_time_slots_for_loops(conn, loop_ids=loop_ids))
             thread_rows = await _collect(queries.get_threads_for_loops(conn, loop_ids=loop_ids))
-
-        stages_by_loop: dict[str, list[Stage]] = {}
-        for r in stage_rows:
-            stage = _row_to_stage(r)
-            stages_by_loop.setdefault(stage.loop_id, []).append(stage)
-
-        ts_by_stage: dict[str, list[TimeSlot]] = {}
-        for r in ts_rows:
-            ts = _row_to_time_slot(r)
-            ts_by_stage.setdefault(ts.stage_id, []).append(ts)
 
         threads_by_loop: dict[str, list[EmailThread]] = {}
         for r in thread_rows:
@@ -364,16 +283,11 @@ class LoopService:
             threads_by_loop.setdefault(et.loop_id, []).append(et)
 
         for loop in loops:
-            loop_stages = stages_by_loop.get(loop.id, [])
-            for stage in loop_stages:
-                stage.time_slots = ts_by_stage.get(stage.id, [])
-            loop.stages = loop_stages
             loop.email_threads = threads_by_loop.get(loop.id, [])
 
         return loops
 
     async def get_status_board(self, coordinator_email: str) -> StatusBoard:
-        """Build the status board for a coordinator (5 queries total)."""
         coord = await self.get_coordinator_by_email(coordinator_email)
         if coord is None:
             return StatusBoard()
@@ -389,78 +303,43 @@ class LoopService:
         for loop in loops:
             summary = _loop_to_summary(loop)
 
-            status = loop.computed_status
-            if status == "complete":
+            if loop.state == StageState.COMPLETE:
                 board.complete.append(summary)
-            elif status == "cold":
+            elif loop.state == StageState.COLD:
                 board.cold.append(summary)
-            elif status == "all_scheduled":
+            elif loop.state == StageState.SCHEDULED:
                 board.scheduled.append(summary)
-            elif summary.most_urgent_state in (StageState.NEW,):
+            elif loop.state == StageState.NEW:
                 board.action_needed.append(summary)
-            elif summary.most_urgent_state in (
-                StageState.AWAITING_CANDIDATE,
-                StageState.AWAITING_CLIENT,
-            ):
+            elif loop.state in (StageState.AWAITING_CANDIDATE, StageState.AWAITING_CLIENT):
                 board.waiting.append(summary)
-            elif summary.most_urgent_state == StageState.SCHEDULED:
-                board.scheduled.append(summary)
             else:
                 board.action_needed.append(summary)
 
         return board
 
     # ------------------------------------------------------------------
-    # Stages
+    # State transitions (operate on loops directly)
     # ------------------------------------------------------------------
 
-    async def add_stage(self, loop_id: str, name: str, coordinator_email: str) -> Stage:
-        async with self._pool.connection() as conn, conn.transaction():
-            max_ord = await queries.get_max_ordinal_for_loop(conn, loop_id=loop_id)
-            ordinal = (max_ord or 0) + 1
-
-            stage_id = make_id("stg")
-            row = await queries.create_stage(
-                conn,
-                id=stage_id,
-                loop_id=loop_id,
-                name=name,
-                state=StageState.NEW,
-                ordinal=ordinal,
-            )
-            await self._record_event(
-                conn,
-                loop_id=loop_id,
-                stage_id=stage_id,
-                event_type=EventType.STAGE_CREATED,
-                data={"name": name, "ordinal": ordinal},
-                actor_email=coordinator_email,
-            )
-            await queries.update_loop_timestamp(conn, id=loop_id)
-            return _row_to_stage(row)
-
-    async def advance_stage(
+    async def advance_state(
         self,
-        stage_id: str,
+        loop_id: str,
         to_state: StageState,
         coordinator_email: str,
         triggered_by: str | None = None,
-    ) -> Stage:
+    ) -> Loop:
         async with self._pool.connection() as conn, conn.transaction():
-            row = await queries.get_stage(conn, id=stage_id)
+            row = await queries.get_loop(conn, id=loop_id)
             if row is None:
-                raise ValueError(f"Stage not found: {stage_id}")
+                raise ValueError(f"Loop not found: {loop_id}")
+            from_state = row[8]  # see _row_to_loop column ordering
 
-            stage = _row_to_stage(row)
-            from_state = stage.state
-            _validate_transition(from_state, to_state)
-
-            await queries.update_stage_state(conn, id=stage_id, state=to_state)
+            await queries.update_loop_state(conn, id=loop_id, state=to_state)
             await self._record_event(
                 conn,
-                loop_id=stage.loop_id,
-                stage_id=stage_id,
-                event_type=EventType.STAGE_ADVANCED,
+                loop_id=loop_id,
+                event_type=EventType.STATE_ADVANCED,
                 data={
                     "from_state": from_state,
                     "to_state": to_state,
@@ -468,60 +347,51 @@ class LoopService:
                 },
                 actor_email=coordinator_email,
             )
-            await queries.update_loop_timestamp(conn, id=stage.loop_id)
+            await queries.update_loop_timestamp(conn, id=loop_id)
 
-            return stage.model_copy(update={"state": to_state})
+        return await self.get_loop(loop_id)
 
     async def mark_cold(
-        self, stage_id: str, coordinator_email: str, reason: str | None = None
-    ) -> Stage:
+        self, loop_id: str, coordinator_email: str, reason: str | None = None
+    ) -> Loop:
         async with self._pool.connection() as conn, conn.transaction():
-            row = await queries.get_stage(conn, id=stage_id)
+            row = await queries.get_loop(conn, id=loop_id)
             if row is None:
-                raise ValueError(f"Stage not found: {stage_id}")
+                raise ValueError(f"Loop not found: {loop_id}")
+            from_state = row[8]
 
-            stage = _row_to_stage(row)
-            from_state = stage.state
-            _validate_transition(from_state, StageState.COLD)
-
-            await queries.update_stage_state(conn, id=stage_id, state=StageState.COLD)
+            await queries.update_loop_state(conn, id=loop_id, state=StageState.COLD)
             await self._record_event(
                 conn,
-                loop_id=stage.loop_id,
-                stage_id=stage_id,
-                event_type=EventType.STAGE_MARKED_COLD,
+                loop_id=loop_id,
+                event_type=EventType.LOOP_MARKED_COLD,
                 data={"from_state": from_state, "reason": reason},
                 actor_email=coordinator_email,
             )
-            await queries.update_loop_timestamp(conn, id=stage.loop_id)
+            await queries.update_loop_timestamp(conn, id=loop_id)
 
-            return stage.model_copy(update={"state": StageState.COLD})
+        return await self.get_loop(loop_id)
 
-    async def revive_stage(
-        self, stage_id: str, to_state: StageState, coordinator_email: str
-    ) -> Stage:
+    async def revive(self, loop_id: str, to_state: StageState, coordinator_email: str) -> Loop:
         async with self._pool.connection() as conn, conn.transaction():
-            row = await queries.get_stage(conn, id=stage_id)
+            row = await queries.get_loop(conn, id=loop_id)
             if row is None:
-                raise ValueError(f"Stage not found: {stage_id}")
+                raise ValueError(f"Loop not found: {loop_id}")
+            from_state = row[8]
+            if from_state != StageState.COLD:
+                raise InvalidTransitionError(f"Can only revive from cold, loop is {from_state}")
 
-            stage = _row_to_stage(row)
-            if stage.state != StageState.COLD:
-                raise InvalidTransitionError(f"Can only revive from cold, stage is {stage.state}")
-            _validate_transition(StageState.COLD, to_state)
-
-            await queries.update_stage_state(conn, id=stage_id, state=to_state)
+            await queries.update_loop_state(conn, id=loop_id, state=to_state)
             await self._record_event(
                 conn,
-                loop_id=stage.loop_id,
-                stage_id=stage_id,
-                event_type=EventType.STAGE_REVIVED,
+                loop_id=loop_id,
+                event_type=EventType.LOOP_REVIVED,
                 data={"to_state": to_state},
                 actor_email=coordinator_email,
             )
-            await queries.update_loop_timestamp(conn, id=stage.loop_id)
+            await queries.update_loop_timestamp(conn, id=loop_id)
 
-            return stage.model_copy(update={"state": to_state})
+        return await self.get_loop(loop_id)
 
     # ------------------------------------------------------------------
     # Email threads
@@ -547,7 +417,6 @@ class LoopService:
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=None,
                 event_type=EventType.THREAD_LINKED,
                 data={"gmail_thread_id": gmail_thread_id, "subject": subject},
                 actor_email=coordinator_email,
@@ -570,8 +439,7 @@ class LoopService:
         return [await self.get_loop(row[0]) for row in rows]
 
     # ------------------------------------------------------------------
-    # JIT actor patching (used when missing contact info is supplied at
-    # send time on a loop that was created with nulls)
+    # JIT actor patching
     # ------------------------------------------------------------------
 
     async def set_recruiter(self, loop_id: str, recruiter_id: str, coordinator_email: str) -> None:
@@ -580,7 +448,6 @@ class LoopService:
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=None,
                 event_type=EventType.ACTOR_UPDATED,
                 data={"actor": "recruiter", "recruiter_id": recruiter_id},
                 actor_email=coordinator_email,
@@ -596,7 +463,6 @@ class LoopService:
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=None,
                 event_type=EventType.ACTOR_UPDATED,
                 data={"actor": "client_contact", "client_contact_id": client_contact_id},
                 actor_email=coordinator_email,
@@ -612,7 +478,6 @@ class LoopService:
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=None,
                 event_type=EventType.ACTOR_UPDATED,
                 data={"actor": "client_manager", "client_manager_id": client_manager_id},
                 actor_email=coordinator_email,
@@ -626,7 +491,6 @@ class LoopService:
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=None,
                 event_type=EventType.ACTOR_UPDATED,
                 data={"actor": "candidate", "name": name},
                 actor_email=coordinator_email,
@@ -640,7 +504,6 @@ class LoopService:
     async def send_email(
         self,
         loop_id: str,
-        stage_id: str,
         coordinator_email: str,
         to: list[str],
         subject: str,
@@ -650,12 +513,7 @@ class LoopService:
         in_reply_to: str | None = None,
         references: str | None = None,
     ) -> None:
-        """Send an email via Gmail and record the event.
-
-        State changes are handled separately via suggestion acceptance —
-        this method is purely send + record.
-        """
-        """Send an email via Gmail and record the event. Optionally advance the stage."""
+        """Send an email via Gmail and record the event."""
         recipient_domains, is_internal = _classify_recipients(
             recipients=to, coordinator_email=coordinator_email
         )
@@ -681,7 +539,6 @@ class LoopService:
             await self._record_event(
                 conn,
                 loop_id=loop_id,
-                stage_id=stage_id,
                 event_type=EventType.EMAIL_SENT,
                 data={
                     "to": to,
@@ -699,63 +556,12 @@ class LoopService:
             await queries.update_loop_timestamp(conn, id=loop_id)
 
     # ------------------------------------------------------------------
-    # Time slots
-    # ------------------------------------------------------------------
-
-    async def add_time_slot(
-        self,
-        stage_id: str,
-        start_time: datetime,
-        duration_minutes: int,
-        timezone: str,
-        coordinator_email: str,
-        zoom_link: str | None = None,
-        notes: str | None = None,
-    ) -> TimeSlot:
-        async with self._pool.connection() as conn, conn.transaction():
-            # Look up stage to get loop_id
-            stage_row = await queries.get_stage(conn, id=stage_id)
-            if stage_row is None:
-                raise ValueError(f"Stage not found: {stage_id}")
-            loop_id = stage_row[1]
-
-            ts_id = make_id("tms")
-            row = await queries.create_time_slot(
-                conn,
-                id=ts_id,
-                stage_id=stage_id,
-                start_time=start_time,
-                duration_minutes=duration_minutes,
-                timezone=timezone,
-                zoom_link=zoom_link,
-                notes=notes,
-            )
-            await self._record_event(
-                conn,
-                loop_id=loop_id,
-                stage_id=stage_id,
-                event_type=EventType.TIME_SLOT_ADDED,
-                data={
-                    "time_slot_id": ts_id,
-                    "start_time": start_time.isoformat(),
-                    "duration_minutes": duration_minutes,
-                    "timezone": timezone,
-                },
-                actor_email=coordinator_email,
-            )
-            await queries.update_loop_timestamp(conn, id=loop_id)
-            return _row_to_time_slot(row)
-
-    # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
 
-    async def get_events(self, loop_id: str, stage_id: str | None = None) -> list[LoopEvent]:
+    async def get_events(self, loop_id: str) -> list[LoopEvent]:
         async with self._pool.connection() as conn:
-            if stage_id:
-                rows = await _collect(queries.get_events_for_stage(conn, stage_id=stage_id))
-            else:
-                rows = await _collect(queries.get_events_for_loop(conn, loop_id=loop_id))
+            rows = await _collect(queries.get_events_for_loop(conn, loop_id=loop_id))
             return [_row_to_event(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -766,7 +572,6 @@ class LoopService:
         self,
         conn: AsyncConnection,
         loop_id: str,
-        stage_id: str | None,
         event_type: EventType,
         data: dict[str, Any],
         actor_email: str,
@@ -775,7 +580,6 @@ class LoopService:
             conn,
             id=make_id("evt"),
             loop_id=loop_id,
-            stage_id=stage_id,
             event_type=event_type,
             data=json.dumps(data),
             actor_email=actor_email,
@@ -827,19 +631,9 @@ def _row_to_candidate(row: tuple) -> Candidate:
     return Candidate(id=row[0], name=row[1], notes=row[2], created_at=row[3])
 
 
-def _row_to_stage(row: tuple) -> Stage:
-    return Stage(
-        id=row[0],
-        loop_id=row[1],
-        name=row[2],
-        state=row[3],
-        ordinal=row[4],
-        created_at=row[5],
-        updated_at=row[6],
-    )
-
-
 def _row_to_loop(row: tuple) -> Loop:
+    """Tuple shape: id, coordinator_id, client_contact_id, recruiter_id,
+    client_manager_id, candidate_id, title, notes, state, created_at, updated_at."""
     return Loop(
         id=row[0],
         coordinator_id=row[1],
@@ -849,24 +643,14 @@ def _row_to_loop(row: tuple) -> Loop:
         candidate_id=row[5],
         title=row[6],
         notes=row[7],
-        created_at=row[8],
-        updated_at=row[9],
+        state=row[8],
+        created_at=row[9],
+        updated_at=row[10],
     )
 
 
 def _row_to_loop_full(row: dict) -> Loop:
-    """Convert a get_loop_full / get_loops_full_* dict row into a populated Loop.
-
-    Expects rows fetched with psycopg's ``dict_row`` factory (see
-    ``_fetch_dicts`` / ``_fetch_dict_one``). Field naming matches the
-    ``AS …`` aliases in scheduling.sql:
-      - ``loop_*``   loop columns
-      - ``coord_*``  coordinator
-      - ``cc_*``     client_contact (nullable)
-      - ``rec_*``    recruiter (nullable)
-      - ``cm_*``     client_manager (nullable)
-      - ``cand_*``   candidate
-    """
+    """Convert a get_loop_full / get_loops_full_* dict row into a populated Loop."""
     loop = Loop(
         id=row["loop_id"],
         coordinator_id=row["loop_coordinator_id"],
@@ -876,6 +660,7 @@ def _row_to_loop_full(row: dict) -> Loop:
         candidate_id=row["loop_candidate_id"],
         title=row["loop_title"],
         notes=row["loop_notes"],
+        state=row["loop_state"],
         created_at=row["loop_created_at"],
         updated_at=row["loop_updated_at"],
     )
@@ -923,17 +708,17 @@ def _row_to_loop_full(row: dict) -> Loop:
 
 
 def _row_to_event(row: tuple) -> LoopEvent:
-    data = row[4]
+    """Tuple shape: id, loop_id, event_type, data, actor_email, occurred_at."""
+    data = row[3]
     if isinstance(data, str):
         data = json.loads(data)
     return LoopEvent(
         id=row[0],
         loop_id=row[1],
-        stage_id=row[2],
-        event_type=row[3],
+        event_type=row[2],
         data=data,
-        actor_email=row[5],
-        occurred_at=row[6],
+        actor_email=row[4],
+        occurred_at=row[5],
     )
 
 
@@ -947,25 +732,7 @@ def _row_to_email_thread(row: tuple) -> EmailThread:
     )
 
 
-def _row_to_time_slot(row: tuple) -> TimeSlot:
-    return TimeSlot(
-        id=row[0],
-        stage_id=row[1],
-        start_time=row[2],
-        duration_minutes=row[3],
-        timezone=row[4],
-        zoom_link=row[5],
-        notes=row[6],
-        created_at=row[7],
-    )
-
-
 def _loop_to_summary(loop: Loop) -> LoopSummary:
-    urgent = loop.most_urgent_stage
-    next_ts = None
-    if urgent and urgent.time_slots:
-        next_ts = urgent.time_slots[0]
-
     client_company = "Unknown"
     if loop.client_contact and loop.client_contact.company:
         client_company = loop.client_contact.company
@@ -974,17 +741,6 @@ def _loop_to_summary(loop: Loop) -> LoopSummary:
         title=loop.title,
         candidate_name=loop.candidate.name if loop.candidate else "Unknown",
         client_company=client_company,
-        most_urgent_stage_id=urgent.id if urgent else None,
-        most_urgent_stage_name=urgent.name if urgent else None,
-        most_urgent_next_action=urgent.next_action if urgent else None,
-        most_urgent_state=urgent.state if urgent else None,
-        next_time_slot=next_ts,
+        state=loop.state,
+        next_action=loop.next_action,
     )
-
-
-def _validate_transition(from_state: StageState, to_state: StageState) -> None:
-    allowed = ALLOWED_TRANSITIONS.get(from_state, set())
-    if to_state not in allowed:
-        raise InvalidTransitionError(
-            f"Cannot transition from {from_state} to {to_state}. Allowed: {sorted(allowed)}"
-        )

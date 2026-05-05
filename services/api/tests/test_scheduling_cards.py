@@ -3,6 +3,7 @@
 from api.scheduling.cards import (
     build_contextual_unlinked,
     build_create_loop_form,
+    build_loop_pending_card,
     set_action_url,
 )
 
@@ -49,7 +50,6 @@ class TestCreateLoopForm:
         assert "candidate_name" in input_names
         assert "client_name" in input_names
         assert "recruiter_name" in input_names
-        assert "first_stage_name" in input_names
 
     def test_cm_section_is_collapsible(self):
         data = _card_json(build_create_loop_form())
@@ -83,3 +83,37 @@ class TestCreateLoopForm:
             for b in w["buttonList"]["buttons"]
         ]
         assert "Create Loop" in all_buttons
+
+
+class TestLoopPendingCard:
+    def test_has_refresh_button_with_reload(self):
+        data = _card_json(build_loop_pending_card("thread_xyz"))
+        card = data["action"]["navigations"][0]["updateCard"]
+        buttons = [
+            b
+            for s in card["sections"]
+            for w in s["widgets"]
+            if "buttonList" in w
+            for b in w["buttonList"]["buttons"]
+        ]
+        assert any("Refresh" in b["text"] for b in buttons)
+        refresh = next(b for b in buttons if "Refresh" in b["text"])
+        link = refresh["onClick"]["openLink"]
+        # The Refresh button must use OVERLAY + RELOAD so that closing the
+        # overlay re-fires the contextual on-message trigger and the
+        # newly-generated suggestions surface.
+        assert link["url"].endswith("/addon/refresh")
+        assert link["openAs"] == "OVERLAY"
+        assert link["onClose"] == "RELOAD"
+
+    def test_does_not_render_other_loops_suggestions(self):
+        # Sanity check: this card is intentionally a placeholder and must
+        # not include a suggestions list. Widening to the global overview
+        # is exactly the bug this card replaces.
+        data = _card_json(build_loop_pending_card("thread_xyz"))
+        card = data["action"]["navigations"][0]["updateCard"]
+        assert card["header"]["title"] == "Loop created"
+        # Single section, two widgets: text paragraph + button list.
+        assert len(card["sections"]) == 1
+        widget_kinds = {next(iter(w.keys())) for w in card["sections"][0]["widgets"]}
+        assert widget_kinds == {"textParagraph", "buttonList"}

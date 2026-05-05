@@ -64,12 +64,22 @@ def _directory_autocomplete_action() -> OnClickAction:
     return OnClickAction(function=directory_search_url())
 
 
-def _recruiter_selected_action() -> OnClickAction:
-    """Build the onChangeAction that parses "Name <email>" into peer fields."""
-    return OnClickAction(
-        function=_action_url,
-        parameters=[ActionParameter(key="action_name", value="recruiter_selected")],
-    )
+def _recruiter_selected_action(
+    extra_params: dict[str, str] | None = None,
+) -> OnClickAction:
+    """Build the onChangeAction that parses "Name <email>" into peer fields.
+
+    ``extra_params`` carries the form's hidden context (gmail_thread_id,
+    gmail_subject, gmail_message_id, suggestion_id) so the handler can
+    re-render the form preserving them. Without this, those params are lost
+    after the first autocomplete selection — the "Create Loop" click that
+    follows then has no thread to link the new loop to.
+    """
+    params = [ActionParameter(key="action_name", value="recruiter_selected")]
+    for k, v in (extra_params or {}).items():
+        if v:
+            params.append(ActionParameter(key=k, value=v))
+    return OnClickAction(function=_action_url, parameters=params)
 
 
 LRP_HEADER = CardHeader(
@@ -200,6 +210,53 @@ def build_auth_required(auth_url: str) -> CardResponse:
 # ---------------------------------------------------------------------------
 
 
+def build_loop_pending_card(gmail_thread_id: str, message_id: str | None = None) -> CardResponse:
+    """Thread-anchored placeholder shown right after a loop is created (or on a
+    linked thread that has no pending suggestions yet).
+
+    The next-action agent runs async via the worker, so at the moment of return
+    there are typically zero suggestions for the new loop. We MUST NOT widen
+    to the global overview here — that's how stale suggestions for an unrelated
+    loop ended up rendering on top of the just-created loop.
+
+    The Refresh button opens ``/addon/refresh`` as an OVERLAY with
+    ``onClose: RELOAD``, which re-fires the contextual trigger for the current
+    thread. By then the agent has typically emitted suggestions and the
+    on-message path renders them via ``get_thread_overview_data``.
+    """
+    base_url = _action_url.rsplit("/addon/", 1)[0] if _action_url else ""
+    refresh_button = Button(
+        text="↻ Refresh",
+        on_click=OnClick(
+            open_link=OpenLink(
+                url=f"{base_url}/addon/refresh",
+                open_as="OVERLAY",
+                on_close="RELOAD",
+            )
+        ),
+    )
+    return _update_card(
+        Card(
+            header=CardHeader(
+                title="Loop created",
+                subtitle="Generating suggestions…",
+            ),
+            sections=[
+                Section(
+                    widgets=[
+                        _text(
+                            "The AI is analyzing this thread and will surface "
+                            "next-step suggestions here in a few seconds. "
+                            "Click Refresh to check."
+                        ),
+                        _buttons(refresh_button),
+                    ]
+                ),
+            ],
+        )
+    )
+
+
 def build_contextual_unlinked(gmail_thread_id: str, message_id: str | None = None) -> CardResponse:
     """Prompt to create or link when thread is not associated with a loop."""
     btn_params = {"gmail_thread_id": gmail_thread_id}
@@ -253,7 +310,6 @@ def build_create_loop_form(
     prefill_recruiter_name: str | None = None,
     prefill_recruiter_email: str | None = None,
     prefill_client_company: str | None = None,
-    prefill_first_stage: str | None = None,
     error_message: str | None = None,
     banner: str | None = None,
     suggestion_id: str | None = None,
@@ -341,7 +397,17 @@ def build_create_loop_form(
     # selection; the handler parses "Name <email>" and re-renders this
     # form with the two halves in their respective fields.
     recruiter_autocomplete = _directory_autocomplete_action()
-    recruiter_onchange = _recruiter_selected_action()
+    # Thread the form's hidden context through the onChangeAction so the
+    # recruiter_selected re-render doesn't drop gmail_thread_id (which is
+    # what links the thread to the new loop on submit).
+    recruiter_onchange = _recruiter_selected_action(
+        extra_params={
+            "gmail_thread_id": gmail_thread_id or "",
+            "gmail_subject": gmail_subject or "",
+            "gmail_message_id": gmail_message_id or "",
+            "suggestion_id": suggestion_id or "",
+        }
+    )
     sections.append(
         Section(
             header="Recruiter",
@@ -395,23 +461,6 @@ def build_create_loop_form(
             ],
             collapsible=True,
             uncollapsible_widgets_count=1,
-        )
-    )
-
-    # Stage section
-    sections.append(
-        Section(
-            header="Stage",
-            widgets=[
-                TextInputWidget(
-                    text_input=TextInput(
-                        name="first_stage_name",
-                        label="First Stage Name",
-                        type="SINGLE_LINE",
-                        value=prefill_first_stage or "Round 1",
-                    )
-                ),
-            ],
         )
     )
 

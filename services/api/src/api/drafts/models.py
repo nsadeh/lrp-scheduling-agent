@@ -32,7 +32,6 @@ class EmailDraft(BaseModel):
     id: str
     suggestion_id: str
     loop_id: str
-    stage_id: str
     coordinator_email: str
     to_emails: list[str]
     cc_emails: list[str] = []
@@ -68,7 +67,6 @@ class GenerateDraftInput(BaseModel):
     recipient_name: str  # First name of the person being emailed
     candidate_name: str
     coordinator_name: str  # For the sign-off
-    extracted_entities: str  # JSON string of availability, phone numbers, zoom links, etc.
     thread_messages: str  # Formatted list of recent emails for reply context
     is_external: bool  # True when recipient is outside @longridgepartners.com
 

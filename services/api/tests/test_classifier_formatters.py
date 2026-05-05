@@ -9,7 +9,6 @@ from api.classifier.formatters import (
     format_loop_state,
     format_stage_states,
     format_thread_history,
-    format_transitions,
 )
 from api.gmail.models import EmailAddress, Message
 from api.scheduling.models import (
@@ -19,7 +18,6 @@ from api.scheduling.models import (
     EventType,
     Loop,
     LoopEvent,
-    Stage,
     StageState,
 )
 
@@ -52,6 +50,7 @@ def _loop(loop_id: str = "lop_abc", title: str = "Round 1 - John Smith") -> Loop
         recruiter_id="con_1",
         candidate_id="can_1",
         title=title,
+        state=StageState.AWAITING_CANDIDATE,
         created_at=datetime(2026, 4, 10, tzinfo=UTC),
         updated_at=datetime(2026, 4, 14, tzinfo=UTC),
         candidate=Candidate(
@@ -71,17 +70,6 @@ def _loop(loop_id: str = "lop_abc", title: str = "Round 1 - John Smith") -> Loop
             role="recruiter",
             created_at=datetime(2026, 4, 10, tzinfo=UTC),
         ),
-        stages=[
-            Stage(
-                id="stg_1",
-                loop_id=loop_id,
-                name="Round 1",
-                state=StageState.AWAITING_CANDIDATE,
-                ordinal=0,
-                created_at=datetime(2026, 4, 10, tzinfo=UTC),
-                updated_at=datetime(2026, 4, 14, tzinfo=UTC),
-            ),
-        ],
     )
 
 
@@ -169,14 +157,14 @@ class TestFormatEvents:
             LoopEvent(
                 id="evt_1",
                 loop_id="lop_1",
-                event_type=EventType.STAGE_ADVANCED,
+                event_type=EventType.STATE_ADVANCED,
                 data={},
                 actor_email="alice@lrp.com",
                 occurred_at=datetime(2026, 4, 14, 10, 0, tzinfo=UTC),
             )
         ]
         result = format_events(events)
-        assert "stage_advanced" in result
+        assert "state_advanced" in result
         assert "alice@lrp.com" in result
 
 
@@ -185,8 +173,3 @@ class TestFormatStaticContent:
         result = format_stage_states()
         for state in StageState:
             assert state.value in result
-
-    def test_transitions_includes_new(self):
-        result = format_transitions()
-        assert "new →" in result
-        assert "awaiting_client" in result

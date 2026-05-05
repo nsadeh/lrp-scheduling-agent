@@ -3,13 +3,18 @@
 Two model families:
 - ClassificationResult / SuggestionItem: LLM output schema (what the endpoint parses)
 - Suggestion: database model (what gets persisted to agent_suggestions)
+
+action_data is a polymorphic JSONB field. Per-action shape is defined by the
+typed models below (AdvanceStageData, DraftEmailData, etc.) and dispatched by
+ACTION_DATA_MODELS. The LLM emits a loose dict; guardrails parse it into the
+correct typed shape and feed validation errors back through the retry loop.
 """
 
 from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -32,7 +37,6 @@ class SuggestedAction(StrEnum):
     CREATE_LOOP = "create_loop"
     LINK_THREAD = "link_thread"
     DRAFT_EMAIL = "draft_email"
-    MARK_COLD = "mark_cold"
     ASK_COORDINATOR = "ask_coordinator"
     NO_ACTION = "no_action"
 
@@ -49,23 +53,37 @@ class SuggestionStatus(StrEnum):
 # -- Action data: typed payloads per action type --
 
 
-class DraftEmailData(BaseModel):
-    """Action data for DRAFT_EMAIL suggestions.
+class AdvanceStageData(BaseModel):
+    """Action data for ADVANCE_STAGE — the new state the loop should move to."""
 
-    The classifier (agent brain) fills this when it decides an email should
-    be drafted. The drafter (tool) reads it as its instruction set.
+    target_stage: StageState
+
+
+class DraftEmailData(BaseModel):
+    """Action data for DRAFT_EMAIL — instructions to the drafter agent.
+
+    The drafter only knows tone rules; the directive must encode all the
+    context it needs (candidate availability, client preferences, zoom links,
+    etc.) since action_data no longer carries a separate extracted_entities
+    blob.
     """
 
-    # TODO: Define the fields that the classifier should provide
-    # to the drafter. Consider:
-    #   - What instruction does the drafter need?
-    #   - What recipient context matters?
-    #   - What entities should be highlighted vs. left in extracted_entities?
-    #
-    # The drafter prompt only knows tone rules — it relies on this data
-    # to know WHAT to write.
-    directive: str  # e.g. "Share Claire's availability with the client"
-    recipient_type: str  # "client" or "recruiter"
+    directive: str
+    recipient_type: Literal["client", "recruiter", "internal"]
+
+
+class AskCoordinatorData(BaseModel):
+    """Action data for ASK_COORDINATOR — a single question to surface in the UI."""
+
+    question: str
+
+
+class NoActionData(BaseModel):
+    """Action data for NO_ACTION — empty by design."""
+
+
+class LinkThreadData(BaseModel):
+    """Action data for LINK_THREAD — empty; target_loop_id on the suggestion is authoritative."""
 
 
 class CreateLoopExtraction(BaseModel):
@@ -75,7 +93,7 @@ class CreateLoopExtraction(BaseModel):
     manual-path extractor (``extract_create_loop_fields``). Every field is
     optional — the consumer (the create-loop form) tolerates any subset and
     falls back to deterministic prefill / stored contact rows when a field
-    is null. See rfcs/rfc-infer-create-loop-fields.md.
+    is null.
     """
 
     candidate_name: str | None = None
@@ -88,6 +106,18 @@ class CreateLoopExtraction(BaseModel):
     recruiter_email: str | None = None
 
 
+# Dispatcher: action -> ActionData class. Used by guardrails to validate
+# the loose dict that the LLM emits matches the expected per-action schema.
+ACTION_DATA_MODELS: dict[SuggestedAction, type[BaseModel]] = {
+    SuggestedAction.ADVANCE_STAGE: AdvanceStageData,
+    SuggestedAction.DRAFT_EMAIL: DraftEmailData,
+    SuggestedAction.ASK_COORDINATOR: AskCoordinatorData,
+    SuggestedAction.NO_ACTION: NoActionData,
+    SuggestedAction.LINK_THREAD: LinkThreadData,
+    SuggestedAction.CREATE_LOOP: CreateLoopExtraction,
+}
+
+
 # -- LLM output schema --
 
 
@@ -98,13 +128,9 @@ class SuggestionItem(BaseModel):
     action: SuggestedAction
     confidence: float = Field(ge=0.0, le=1.0)
     summary: str
-    target_state: StageState | None = None
+    reasoning: str
     target_loop_id: str | None = None
-    target_stage_id: str | None = None
-    auto_advance: bool = False
-    extracted_entities: dict[str, Any] = {}
-    questions: list[str] = []
-    action_data: dict[str, Any] = {}  # Typed per action — DraftEmailData for DRAFT_EMAIL
+    action_data: dict[str, Any] = {}
 
 
 class ClassificationResult(BaseModel):
@@ -125,15 +151,10 @@ class Suggestion(BaseModel):
     gmail_message_id: str
     gmail_thread_id: str
     loop_id: str | None = None
-    stage_id: str | None = None
     classification: EmailClassification
     action: SuggestedAction
-    auto_advance: bool = False
     confidence: float
     summary: str
-    target_state: StageState | None = None
-    extracted_entities: dict[str, Any] = {}
-    questions: list[str] = []
     action_data: dict[str, Any] = {}
     reasoning: str | None = None
     status: SuggestionStatus = SuggestionStatus.PENDING

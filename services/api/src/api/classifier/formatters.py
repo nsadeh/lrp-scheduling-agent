@@ -89,12 +89,13 @@ def format_thread_history(
 
 
 def format_loop_state(loop: Loop | None) -> str:
-    """Format a loop's current state for the LLM — stages, actors, key info."""
+    """Format a loop's current state for the LLM — actors and current state."""
     if loop is None:
         return "No matching loop found for this thread."
 
     lines = [
         f"Loop: {loop.title} (ID: {loop.id})",
+        f"State: {loop.state.value}",
     ]
 
     if loop.candidate:
@@ -104,13 +105,6 @@ def format_loop_state(loop: Loop | None) -> str:
         lines.append(f"Client: {loop.client_contact.name} ({company})")
     if loop.recruiter:
         lines.append(f"Recruiter: {loop.recruiter.name} <{loop.recruiter.email}>")
-
-    if loop.stages:
-        lines.append("\nStages:")
-        for stage in loop.stages:
-            lines.append(f"  - {stage.name} (ID: {stage.id}): {stage.state.value}")
-    else:
-        lines.append("\nNo stages yet.")
 
     return "\n".join(lines)
 
@@ -149,11 +143,10 @@ def format_active_loops(loops: list[Loop]) -> str:
             if loop.client_contact and loop.client_contact.company
             else "Unknown"
         )
-        stage_summary = ", ".join(f"{s.name}={s.state.value}" for s in loop.stages if s.is_active)
         lines.append(
             f"  - {loop.title} (ID: {loop.id}): "
-            f"Candidate={candidate_name}, Client={client_company}"
-            f"{f', Stages: [{stage_summary}]' if stage_summary else ''}"
+            f"Candidate={candidate_name}, Client={client_company}, "
+            f"State={loop.state.value}"
         )
 
     return "\n".join(lines)
@@ -185,18 +178,4 @@ def format_stage_states() -> str:
     lines = ["Stage states:"]
     for state in StageState:
         lines.append(f"  - {state.value}: {NEXT_ACTIONS[state]}")
-    return "\n".join(lines)
-
-
-def format_transitions() -> str:
-    """Format allowed transitions for the system prompt."""
-    from api.scheduling.models import ALLOWED_TRANSITIONS
-
-    lines = ["Allowed state transitions:"]
-    for from_state, to_states in ALLOWED_TRANSITIONS.items():
-        if to_states:
-            targets = ", ".join(sorted(s.value for s in to_states))
-            lines.append(f"  {from_state.value} → {targets}")
-        else:
-            lines.append(f"  {from_state.value} → (terminal, no transitions)")
     return "\n".join(lines)

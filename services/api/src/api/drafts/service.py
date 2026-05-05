@@ -1,7 +1,7 @@
 """DraftService — generates, persists, and manages AI email drafts.
 
 Orchestrates the draft lifecycle: LLM generation → persistence → coordinator
-review → send/discard. Recipient routing is deterministic from stage state
+review → send/discard. Recipient routing is deterministic from loop.state
 and centralized in resolve_recipients() for DRY reuse across the codebase.
 """
 
@@ -27,28 +27,21 @@ if TYPE_CHECKING:
     from api.ai.llm_service import LLMService
     from api.classifier.models import Suggestion
     from api.gmail.models import Message
-    from api.scheduling.models import Loop, Stage
+    from api.scheduling.models import Loop
     from api.scheduling.service import LoopService
 
 
 def _is_forward_draft(to_emails: list[str], thread_messages: list[Message] | None) -> bool:
-    """Determine if a draft is a forward by checking if any recipient is new to the thread.
-
-    A draft is a forward when it targets someone who hasn't participated in the
-    thread yet (not in any prior message's from/to/cc). If there are no prior
-    messages to compare against, we assume it's not a forward.
-    """
+    """Determine if a draft is a forward by checking if any recipient is new to the thread."""
     if not thread_messages or not to_emails:
         return False
 
-    # Build set of all participants from prior thread messages
     seen: set[str] = set()
     for msg in thread_messages:
         seen.add(msg.from_.email.lower())
         for addr in msg.to + msg.cc:
             seen.add(addr.email.lower())
 
-    # If any recipient is not in the thread, it's a forward
     return any(email.lower() not in seen for email in to_emails)
 
 
@@ -64,9 +57,6 @@ async def _collect(async_gen) -> list:
 
 def _row_to_draft(row: dict) -> EmailDraft:
     """Convert a dict row (from psycopg dict_row factory) to an EmailDraft model."""
-    # JSONB columns may arrive as either dict (when the psycopg JSON
-    # adapter is registered) or string (raw). Normalize so Pydantic
-    # validation succeeds in both cases.
     raw_jit = row.get("pending_jit_data")
     if isinstance(raw_jit, str):
         row = {**row, "pending_jit_data": json.loads(raw_jit)}
@@ -82,24 +72,21 @@ def _row_to_draft(row: dict) -> EmailDraft:
 
 def resolve_recipients(
     loop: Loop,
-    stage: Stage | None,
     *,
     sender_email: str | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Determine to/cc emails from stage state.
+    """Determine to/cc emails from loop.state.
 
-    This is the single source of truth for recipient routing. Both the
-    DraftService and the addon compose_email handler should call this.
+    Single source of truth for recipient routing. Both DraftService and the
+    addon compose_email handler call this.
 
-    ``sender_email`` (the coordinator sending the message) is filtered
-    out of CC — coordinators are sometimes their own client manager
-    (e.g. Adam's loops where he is both coordinator and CM), and CC'ing
-    yourself on your own send is noise.
+    ``sender_email`` (the coordinator) is filtered out of CC — coordinators
+    are sometimes their own client manager, and CC'ing yourself is noise.
     """
     to_emails: list[str] = []
     cc_emails: list[str] = []
 
-    state = stage.state if stage else StageState.NEW
+    state = loop.state
 
     if state == StageState.NEW:
         # NEW → email recruiter for availability
@@ -118,7 +105,6 @@ def resolve_recipients(
         if loop.client_contact and loop.client_contact.email:
             to_emails = [loop.client_contact.email]
 
-    # Client manager is CC'd when present, but never CC the sender.
     if loop.client_manager and loop.client_manager.email:
         cm_email = loop.client_manager.email
         if not sender_email or cm_email.lower() != sender_email.lower():
@@ -159,17 +145,13 @@ class DraftService:
         On LLM failure, creates a draft with an empty body so the coordinator
         can compose manually from the sidebar.
         """
-        stage = self._resolve_stage(loop, suggestion.stage_id)
-        to_emails, cc_emails = resolve_recipients(
-            loop, stage, sender_email=suggestion.coordinator_email
-        )
+        to_emails, cc_emails = resolve_recipients(loop, sender_email=suggestion.coordinator_email)
         subject = self._resolve_subject(loop)
 
-        # Generate body via LLM (fallback to empty on failure)
         body = ""
         if self._llm and self._langfuse:
             try:
-                llm_input = self._build_input(suggestion, loop, stage, thread_messages)
+                llm_input = self._build_input(suggestion, loop, thread_messages)
                 result: DraftOutput = await generate_draft_content(
                     llm=self._llm,
                     langfuse=self._langfuse,
@@ -177,7 +159,6 @@ class DraftService:
                 )
                 body = result.body
 
-                # Guardrail: truncate overly long output
                 if len(body) > MAX_BODY_LENGTH:
                     logger.warning(
                         "draft body too long (%d chars) for suggestion %s — truncating",
@@ -192,10 +173,8 @@ class DraftService:
                     suggestion.id,
                 )
 
-        # Determine if this is a forward: are we sending to someone new?
         is_forward = _is_forward_draft(to_emails, thread_messages)
 
-        # Persist (using dict_row for clean dict→model conversion)
         draft_id = make_id("drf")
         async with self._pool.connection() as conn, conn.transaction():
             conn.row_factory = dict_row
@@ -205,7 +184,6 @@ class DraftService:
                     id=draft_id,
                     suggestion_id=suggestion.id,
                     loop_id=loop.id,
-                    stage_id=stage.id if stage else loop.stages[0].id,
                     coordinator_email=suggestion.coordinator_email,
                     to_emails=to_emails,
                     cc_emails=cc_emails,
@@ -271,24 +249,12 @@ class DraftService:
     async def update_draft_recipients(
         self, draft_id: str, to_emails: list[str], cc_emails: list[str]
     ) -> None:
-        """Patch a draft's recipients after JIT contact info was supplied.
-
-        Used by the send_draft handler when the loop was auto-created with
-        a missing recruiter/client and the coordinator filled them in inline
-        on the draft card.
-        """
         async with self._pool.connection() as conn, conn.transaction():
             await queries.update_draft_recipients(
                 conn, id=draft_id, to_emails=to_emails, cc_emails=cc_emails
             )
 
     async def update_pending_jit_data(self, draft_id: str, data: dict) -> None:
-        """Replace pending_jit_data on the draft.
-
-        Stores the coordinator's in-flight contact picks (recruiter / client
-        / CM) until they click Send. Misclicks can be undone with the "x"
-        clear button before commit.
-        """
         async with self._pool.connection() as conn, conn.transaction():
             await queries.update_pending_jit_data(
                 conn, id=draft_id, pending_jit_data=json.dumps(data)
@@ -306,25 +272,14 @@ class DraftService:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _resolve_stage(self, loop: Loop, stage_id: str | None) -> Stage | None:
-        """Find the target stage for a draft."""
-        if stage_id:
-            for stage in loop.stages:
-                if stage.id == stage_id:
-                    return stage
-        # Fallback: most urgent active stage
-        return loop.most_urgent_stage
-
     @staticmethod
     def _resolve_subject(loop: Loop) -> str:
-        """Build a subject line for the draft — reply to the loop thread."""
         return f"Re: {loop.title}"
 
     @staticmethod
-    def _resolve_recipient_name(loop: Loop, stage: Stage | None) -> str:
-        """Get the first name of the recipient for the drafter prompt."""
-        state = stage.state if stage else StageState.NEW
-        if state == StageState.NEW:
+    def _resolve_recipient_name(loop: Loop) -> str:
+        """First name of the recipient based on loop.state."""
+        if loop.state == StageState.NEW:
             return loop.recruiter.name if loop.recruiter else "Recruiter"
         return loop.client_contact.name if loop.client_contact else "Client"
 
@@ -332,14 +287,13 @@ class DraftService:
         self,
         suggestion: Suggestion,
         loop: Loop,
-        stage: Stage | None,
         thread_messages: list[Message] | None,
     ) -> GenerateDraftInput:
         """Construct the drafter LLM input.
 
-        The drafter is a "dumb tool" — the classifier provides the directive
-        via action_data. We pass that along with recipient name, entities,
-        and formatted thread messages for context.
+        The drafter is a "dumb tool" — the agent provides the directive via
+        action_data["directive"], which encodes all context needed (availability
+        times, phone numbers, zoom links, etc.).
         """
         thread_text = "No prior messages in this thread."
         if thread_messages:
@@ -347,7 +301,6 @@ class DraftService:
                 thread_messages, current_message_id=suggestion.gmail_message_id
             )
 
-        # Read directive from action_data (typed contract), fall back to summary
         from api.classifier.models import DraftEmailData
 
         directive = suggestion.summary  # fallback
@@ -362,17 +315,16 @@ class DraftService:
                     suggestion.id,
                 )
 
-        to_emails, _ = resolve_recipients(loop, stage)
+        to_emails, _ = resolve_recipients(loop)
         is_external = any(
             not email.lower().endswith("@longridgepartners.com") for email in to_emails
         )
 
         return GenerateDraftInput(
             draft_directive=directive,
-            recipient_name=self._resolve_recipient_name(loop, stage),
+            recipient_name=self._resolve_recipient_name(loop),
             candidate_name=loop.candidate.name if loop.candidate else "Candidate",
             coordinator_name=loop.coordinator.name if loop.coordinator else "Coordinator",
-            extracted_entities=json.dumps(suggestion.extracted_entities),
             thread_messages=thread_text,
             is_external=is_external,
         )

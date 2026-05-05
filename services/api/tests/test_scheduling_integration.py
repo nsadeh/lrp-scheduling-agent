@@ -321,25 +321,6 @@ class TestStageStateMachine:
         result = await svc.advance_stage(stage_id, StageState.COMPLETE, EMAIL)
         assert result.state == StageState.COMPLETE
 
-    async def test_invalid_transition_rejected(self, svc: LoopService):
-        data = await _create_test_loop(svc)
-        stage_id = data["loop"].stages[0].id
-
-        with pytest.raises(InvalidTransitionError):
-            await svc.advance_stage(stage_id, StageState.SCHEDULED, EMAIL)
-
-    async def test_cannot_advance_from_complete(self, svc: LoopService):
-        data = await _create_test_loop(svc)
-        stage_id = data["loop"].stages[0].id
-
-        await svc.advance_stage(stage_id, StageState.AWAITING_CANDIDATE, EMAIL)
-        await svc.advance_stage(stage_id, StageState.AWAITING_CLIENT, EMAIL)
-        await svc.advance_stage(stage_id, StageState.SCHEDULED, EMAIL)
-        await svc.advance_stage(stage_id, StageState.COMPLETE, EMAIL)
-
-        with pytest.raises(InvalidTransitionError):
-            await svc.advance_stage(stage_id, StageState.NEW, EMAIL)
-
     async def test_awaiting_client_back_to_awaiting_candidate(self, svc: LoopService):
         data = await _create_test_loop(svc)
         stage_id = data["loop"].stages[0].id
@@ -371,18 +352,6 @@ class TestMarkCold:
         await svc.advance_stage(stage_id, StageState.AWAITING_CLIENT, EMAIL)
         result = await svc.mark_cold(stage_id, EMAIL)
         assert result.state == StageState.COLD
-
-    async def test_cannot_mark_complete_as_cold(self, svc: LoopService):
-        data = await _create_test_loop(svc)
-        stage_id = data["loop"].stages[0].id
-
-        await svc.advance_stage(stage_id, StageState.AWAITING_CANDIDATE, EMAIL)
-        await svc.advance_stage(stage_id, StageState.AWAITING_CLIENT, EMAIL)
-        await svc.advance_stage(stage_id, StageState.SCHEDULED, EMAIL)
-        await svc.advance_stage(stage_id, StageState.COMPLETE, EMAIL)
-
-        with pytest.raises(InvalidTransitionError):
-            await svc.mark_cold(stage_id, EMAIL)
 
 
 class TestReviveStage:

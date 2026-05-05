@@ -4,7 +4,7 @@
 
 Exercises the complete flow against real infrastructure:
   - Pre-creates loops + stages in Postgres
-  - Sends email events through ClassifierHook (with DraftService wired in)
+  - Sends email events through EmailRouter (with DraftService wired in)
   - Classifier suggests DRAFT_EMAIL → DraftService generates draft
   - Queries both agent_suggestions and email_drafts tables
 
@@ -36,7 +36,9 @@ from psycopg.rows import dict_row, tuple_row  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
 
 from api.ai import init_langfuse, init_llm_service  # noqa: E402
-from api.classifier.hook import ClassifierHook  # noqa: E402
+from api.classifier.loop_classifier import LoopClassifier  # noqa: E402
+from api.classifier.next_action_agent import NextActionAgent  # noqa: E402
+from api.classifier.router import EmailRouter  # noqa: E402
 from api.classifier.service import SuggestionService  # noqa: E402
 from api.drafts.service import DraftService  # noqa: E402
 from api.gmail.hooks import EmailEvent, MessageDirection, MessageType  # noqa: E402
@@ -464,12 +466,23 @@ async def main():
         langfuse=langfuse,
     )
 
-    hook = ClassifierHook(
+    classifier = LoopClassifier(
+        llm=llm,
+        langfuse=langfuse,
+        suggestion_service=suggestion_svc,
+        loop_service=loop_svc,
+    )
+    agent = NextActionAgent(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=suggestion_svc,
         loop_service=loop_svc,
         draft_service=draft_svc,
+    )
+    hook = EmailRouter(
+        loop_classifier=classifier,
+        next_action_agent=agent,
+        loop_service=loop_svc,
     )
 
     # Run scenarios

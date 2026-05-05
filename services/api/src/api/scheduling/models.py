@@ -18,24 +18,6 @@ class StageState(StrEnum):
     COLD = "cold"
 
 
-# Valid transitions: from_state -> set of allowed to_states
-ALLOWED_TRANSITIONS: dict[StageState, set[StageState]] = {
-    StageState.NEW: {StageState.AWAITING_CANDIDATE, StageState.AWAITING_CLIENT, StageState.COLD},
-    StageState.AWAITING_CANDIDATE: {StageState.AWAITING_CLIENT, StageState.COLD},
-    StageState.AWAITING_CLIENT: {
-        StageState.SCHEDULED,
-        StageState.AWAITING_CANDIDATE,
-        StageState.COLD,
-    },
-    StageState.SCHEDULED: {StageState.COMPLETE, StageState.COLD},
-    StageState.COMPLETE: set(),  # terminal
-    StageState.COLD: {
-        StageState.NEW,
-        StageState.AWAITING_CANDIDATE,
-        StageState.AWAITING_CLIENT,
-    },  # revival
-}
-
 # What the coordinator needs to do next for each state
 NEXT_ACTIONS: dict[StageState, str] = {
     StageState.NEW: "Email recruiter for availability",
@@ -58,16 +40,12 @@ STATE_PRIORITY: dict[StageState, int] = {
 
 
 class EventType(StrEnum):
-    # Stage-level events
-    STAGE_CREATED = "stage_created"
-    STAGE_ADVANCED = "stage_advanced"
-    STAGE_MARKED_COLD = "stage_marked_cold"
-    STAGE_REVIVED = "stage_revived"
+    # Loop-level state events
+    STATE_ADVANCED = "state_advanced"
+    LOOP_MARKED_COLD = "loop_marked_cold"
+    LOOP_REVIVED = "loop_revived"
     EMAIL_DRAFTED = "email_drafted"
     EMAIL_SENT = "email_sent"
-    TIME_SLOT_ADDED = "time_slot_added"
-    TIME_SLOT_REMOVED = "time_slot_removed"
-    # Loop-level events
     LOOP_CREATED = "loop_created"
     THREAD_LINKED = "thread_linked"
     THREAD_UNLINKED = "thread_unlinked"
@@ -107,49 +85,13 @@ class Candidate(BaseModel):
     created_at: datetime
 
 
-class TimeSlot(BaseModel):
-    id: str
-    stage_id: str
-    start_time: datetime
-    duration_minutes: int
-    timezone: str
-    zoom_link: str | None = None
-    notes: str | None = None
-    created_at: datetime
-
-
 class LoopEvent(BaseModel):
     id: str
     loop_id: str
-    stage_id: str | None = None
     event_type: EventType
     data: dict[str, Any]
     actor_email: str
     occurred_at: datetime
-
-
-class Stage(BaseModel):
-    id: str
-    loop_id: str
-    name: str
-    state: StageState
-    ordinal: int
-    created_at: datetime
-    updated_at: datetime
-    time_slots: list[TimeSlot] = []
-
-    @property
-    def next_action(self) -> str:
-        return NEXT_ACTIONS[self.state]
-
-    @property
-    def is_active(self) -> bool:
-        return self.state not in (StageState.COMPLETE, StageState.COLD)
-
-    @property
-    def is_actionable(self) -> bool:
-        """Coordinator needs to do something (not just waiting)."""
-        return self.state == StageState.NEW
 
 
 class EmailThread(BaseModel):
@@ -168,6 +110,7 @@ class Loop(BaseModel):
     client_manager_id: str | None = None
     candidate_id: str
     title: str
+    state: StageState = StageState.NEW
     notes: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -177,34 +120,20 @@ class Loop(BaseModel):
     recruiter: Contact | None = None
     client_manager: Contact | None = None
     candidate: Candidate | None = None
-    stages: list[Stage] = []
     email_threads: list[EmailThread] = []
 
     @property
-    def active_stages(self) -> list[Stage]:
-        return [s for s in self.stages if s.is_active]
+    def is_active(self) -> bool:
+        return self.state not in (StageState.COMPLETE, StageState.COLD)
 
     @property
-    def most_urgent_stage(self) -> Stage | None:
-        active = self.active_stages
-        if not active:
-            return None
-        return min(active, key=lambda s: (STATE_PRIORITY[s.state], s.ordinal))
+    def is_actionable(self) -> bool:
+        """Coordinator needs to do something (not just waiting)."""
+        return self.state == StageState.NEW
 
     @property
-    def computed_status(self) -> str:
-        if not self.stages:
-            return "empty"
-        states = {s.state for s in self.stages}
-        if states == {StageState.COMPLETE}:
-            return "complete"
-        if states == {StageState.COLD}:
-            return "cold"
-        if states <= {StageState.SCHEDULED, StageState.COMPLETE}:
-            return "all_scheduled"
-        if any(s.is_active for s in self.stages):
-            return "active"
-        return "mixed"
+    def next_action(self) -> str:
+        return NEXT_ACTIONS[self.state]
 
 
 class LoopSummary(BaseModel):
@@ -214,11 +143,8 @@ class LoopSummary(BaseModel):
     title: str
     candidate_name: str
     client_company: str
-    most_urgent_stage_id: str | None = None
-    most_urgent_stage_name: str | None = None
-    most_urgent_next_action: str | None = None
-    most_urgent_state: StageState | None = None
-    next_time_slot: TimeSlot | None = None
+    state: StageState = StageState.NEW
+    next_action: str | None = None
 
 
 class StatusBoard(BaseModel):

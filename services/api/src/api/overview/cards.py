@@ -125,7 +125,7 @@ def _missing_recipient_role(view: SuggestionView) -> tuple[bool, bool]:
     draft = view.draft
     if draft is None or draft.to_emails:
         return (False, False)
-    if view.stage_state in _RECRUITER_STAGES:
+    if view.loop_state in _RECRUITER_STAGES:
         return (True, False)
     return (False, True)
 
@@ -343,25 +343,6 @@ def _render_jit_selected(
     ]
 
 
-def _build_mark_cold_suggestion(view: SuggestionView) -> list[Widget]:
-    """MARK_COLD - reasoning + one-click."""
-    sug = view.suggestion
-    widgets: list[Widget] = [
-        _decorated(sug.summary, "❄ Mark Cold"),
-    ]
-
-    if sug.reasoning:
-        widgets.append(_text(f"<i>{sug.reasoning}</i>"))
-
-    widgets.append(
-        _buttons(
-            _button("Mark Cold", "accept_suggestion", suggestion_id=sug.id),
-            _dismiss_button(sug.id),
-        )
-    )
-    return widgets
-
-
 def _build_ask_suggestion(view: SuggestionView) -> list[Widget]:
     """ASK_COORDINATOR - question + text input + disabled respond."""
     sug = view.suggestion
@@ -369,9 +350,9 @@ def _build_ask_suggestion(view: SuggestionView) -> list[Widget]:
         _text("<b>❓ Agent needs clarification</b>"),
     ]
 
-    # Show question(s)
-    for q in sug.questions:
-        widgets.append(_text(f'"{q}"'))
+    question = (sug.action_data or {}).get("question")
+    if question:
+        widgets.append(_text(f'"{question}"'))
 
     # Text input for response
     widgets.append(
@@ -409,12 +390,11 @@ def _build_create_loop_suggestion(view: SuggestionView) -> list[Widget]:
     """
     widgets: list[Widget] = []
     sug = view.suggestion
-    entities = sug.extracted_entities
     action_data = sug.action_data or {}
     sid = sug.id
 
     def _val(key: str, default: str = "") -> str:
-        return action_data.get(key) or entities.get(key, default)
+        return action_data.get(key) or default
 
     widgets.append(_text("<b>+ New loop detected</b>"))
 
@@ -538,10 +518,9 @@ def _build_advance_suggestion(view: SuggestionView) -> list[Widget]:
     sug = view.suggestion
 
     parts = ["Advance"]
-    if view.stage_name:
-        parts.append(view.stage_name)
-    current_label = _format_state_label(view.stage_state) if view.stage_state else None
-    target_label = _format_state_label(sug.target_state.value) if sug.target_state else None
+    target_stage = (sug.action_data or {}).get("target_stage")
+    current_label = _format_state_label(view.loop_state) if view.loop_state else None
+    target_label = _format_state_label(target_stage) if target_stage else None
     if current_label and target_label:
         parts.append(f"from {current_label} to {target_label}")
     elif target_label:
@@ -592,7 +571,6 @@ _SUGGESTION_BUILDERS = {
     SuggestedAction.CREATE_LOOP: _build_create_loop_suggestion,
     SuggestedAction.ADVANCE_STAGE: _build_advance_suggestion,
     SuggestedAction.LINK_THREAD: _build_link_thread_suggestion,
-    SuggestedAction.MARK_COLD: _build_mark_cold_suggestion,
     SuggestedAction.ASK_COORDINATOR: _build_ask_suggestion,
 }
 

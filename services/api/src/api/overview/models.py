@@ -19,10 +19,9 @@ class SuggestionView(BaseModel):
 
     suggestion: Suggestion
     loop_title: str | None = None
+    loop_state: str | None = None
     candidate_name: str | None = None
     client_company: str | None = None
-    stage_name: str | None = None
-    stage_state: str | None = None
     draft: EmailDraft | None = None
     # Known actor emails on the loop — surfaced as small-print hints under
     # JIT inputs so coordinators can see what we already have when asking
