@@ -1,8 +1,8 @@
 """Sender blacklist — short-circuits the classifier for known non-client senders.
 
 Loaded once at app startup from sender_blacklist.yaml. The check runs in
-ClassifierHook.on_email() before any LLM work, only for incoming emails on
-threads that are not linked to a scheduling loop.
+EmailRouter.on_email() before any LLM work or DB queries — emails from
+blacklisted senders are silently dropped.
 
 See ``services/api/sender_blacklist.yaml`` for the seed list and the rationale.
 The YAML lives at the api project root (alongside pyproject.toml, railway.toml,

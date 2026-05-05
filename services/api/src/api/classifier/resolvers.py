@@ -1,16 +1,17 @@
-"""Auto-resolver registry — actions the agent applies without coordinator approval.
+"""Auto-resolver registry — actions applied without coordinator approval.
 
-Some classifier actions (CREATE_LOOP, ADVANCE_STAGE, LINK_THREAD) are
-mechanical — there is no judgment for the coordinator to add. Showing them
-as "click to approve" cards in the sidebar just adds friction. Instead the
-classifier emits the suggestion as usual, and the matching resolver here
-applies it in the background. The suggestion is marked AUTO_APPLIED so the
+Some actions (CREATE_LOOP, ADVANCE_STAGE, LINK_THREAD) are mechanical —
+there is no judgment for the coordinator to add. The matching resolver
+applies them in the background and marks the suggestion AUTO_APPLIED so the
 overview UI never surfaces it.
 
-Architecture: registry of `SuggestedAction -> Resolver`. To add a new
-auto-resolved action, write a Resolver and register it in
-`build_registry()`. The classifier hook invokes the registry after
-persisting each suggestion.
+Two registries serve the two-stage pipeline:
+- build_classifier_registry(): CREATE_LOOP, LINK_THREAD (for LoopClassifier)
+- build_agent_registry(): ADVANCE_STAGE (for NextActionAgent)
+
+After CREATE_LOOP/LINK_THREAD auto-resolve, enqueue_next_action() fires
+the NextActionAgent on the now-linked thread — this prevents the recursion
+issue where the old reclassify path could trigger infinite loop creation.
 
 Failure mode (per design): on any exception, capture to Sentry and drop.
 The suggestion stays PENDING but is not surfaced — confirmed acceptable
@@ -71,28 +72,30 @@ class ResolverContext:
         self.suggestions = suggestion_service
         self.arq_pool = arq_pool
 
-    async def enqueue_reclassify(self) -> None:
-        """Re-fire the classifier on this message after a loop was just created
-        or linked. Without this, the first email that triggers CREATE_LOOP
-        would have its draft never generated — the classifier dropped
-        DRAFT_EMAIL on the unlinked-thread guard.
+    async def enqueue_next_action(self) -> None:
+        """Fire the NextActionAgent on this thread after a loop was created or linked.
+
+        The thread is now linked to a loop, so the agent will produce
+        follow-up suggestions (DRAFT_EMAIL, ADVANCE_STAGE) that weren't
+        possible before. Unlike the old reclassify path, this cannot
+        trigger loop creation recursion — the agent blacklists CREATE_LOOP.
         """
         if self.arq_pool is None:
             logger.warning(
-                "no arq_pool — skipping reclassify enqueue for thread %s",
+                "no arq_pool — skipping next action enqueue for thread %s",
                 self.gmail_thread_id,
             )
             return
         try:
             await self.arq_pool.enqueue_job(
-                "reclassify_after_loop_creation",
+                "run_next_action_agent",
                 self.coordinator_email,
                 self.gmail_message_id,
                 self.gmail_thread_id,
             )
         except Exception:
             logger.exception(
-                "failed to enqueue reclassify for thread %s",
+                "failed to enqueue next action agent for thread %s",
                 self.gmail_thread_id,
             )
 
@@ -170,7 +173,7 @@ class CreateLoopResolver:
             candidate_name,
         )
 
-        await ctx.enqueue_reclassify()
+        await ctx.enqueue_next_action()
 
     def _read_extraction(self, suggestion: Suggestion) -> CreateLoopExtraction:
         if not suggestion.action_data:
@@ -197,54 +200,41 @@ class CreateLoopResolver:
 
 
 class AdvanceStageResolver:
-    """Advance a loop's stage to a new state.
+    """Advance a loop's state to a new value.
 
-    Multi-loop threads are supported: the resolver uses
-    `suggestion.loop_id`/`suggestion.stage_id` (populated by the classifier
-    hook from the LLM's `target_loop_id`/`target_stage_id`) to identify the
-    correct loop and stage. If the classifier didn't pin a stage, fall back
-    to the loop's most-urgent active stage.
+    Reads the target state name from `suggestion.action_data["target_stage"]`
+    (populated by the agent's LLM output) and updates the loop directly. The
+    resolver name is kept (not "AdvanceStateResolver") because the action
+    enum value is still SuggestedAction.ADVANCE_STAGE.
     """
 
     async def resolve(self, suggestion: Suggestion, ctx: ResolverContext) -> None:
-        if not suggestion.target_state:
+        if not suggestion.loop_id:
             logger.warning(
-                "ADVANCE_STAGE suggestion %s missing target_state — skipping",
+                "ADVANCE_STAGE suggestion %s missing loop_id — skipping",
                 suggestion.id,
             )
             return
 
-        stage_id = suggestion.stage_id
-        if not stage_id:
-            stage_id = await self._fallback_stage(suggestion, ctx)
-            if not stage_id:
-                logger.warning(
-                    "ADVANCE_STAGE suggestion %s could not resolve stage_id — skipping",
-                    suggestion.id,
-                )
-                return
+        target_stage_name = (suggestion.action_data or {}).get("target_stage")
+        if not target_stage_name:
+            logger.warning(
+                "ADVANCE_STAGE suggestion %s missing action_data.target_stage — skipping",
+                suggestion.id,
+            )
+            return
 
-        await ctx.loops.advance_stage(
-            stage_id=stage_id,
-            to_state=StageState(suggestion.target_state),
+        await ctx.loops.advance_state(
+            loop_id=suggestion.loop_id,
+            to_state=StageState(target_stage_name),
             coordinator_email=ctx.coordinator_email,
             triggered_by=f"auto:{suggestion.id}",
         )
         logger.info(
-            "auto-advanced stage %s -> %s for loop %s",
-            stage_id,
-            suggestion.target_state,
+            "auto-advanced loop %s -> %s",
             suggestion.loop_id,
+            target_stage_name,
         )
-
-    async def _fallback_stage(self, suggestion: Suggestion, ctx: ResolverContext) -> str | None:
-        if not suggestion.loop_id:
-            return None
-        loop = await ctx.loops.get_loop(suggestion.loop_id)
-        urgent = loop.most_urgent_stage
-        if urgent:
-            return urgent.id
-        return loop.stages[0].id if loop.stages else None
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +246,14 @@ class LinkThreadResolver:
     """Link a Gmail thread to an existing loop the LLM matched it to.
 
     Confidence floor (0.9) is enforced upstream in
-    `ClassifierHook._apply_guardrails`; any LINK_THREAD that reaches the
-    resolver has already cleared it. After linking, enqueue reclassification
-    so the next pass can produce DRAFT_EMAIL/ADVANCE_STAGE for the
+    `LoopClassifier._apply_guardrails`; any LINK_THREAD that reaches the
+    resolver has already cleared it. After linking, enqueue the
+    NextActionAgent so it can produce follow-up suggestions for the
     now-linked loop.
     """
 
     async def resolve(self, suggestion: Suggestion, ctx: ResolverContext) -> None:
-        target_loop_id = suggestion.loop_id or suggestion.extracted_entities.get("target_loop_id")
+        target_loop_id = suggestion.loop_id
         if not target_loop_id:
             logger.warning(
                 "LINK_THREAD suggestion %s missing target_loop_id — skipping",
@@ -284,7 +274,7 @@ class LinkThreadResolver:
             result is None,
         )
 
-        await ctx.enqueue_reclassify()
+        await ctx.enqueue_next_action()
 
 
 # ---------------------------------------------------------------------------
@@ -292,18 +282,24 @@ class LinkThreadResolver:
 # ---------------------------------------------------------------------------
 
 
-def build_registry() -> dict[SuggestedAction, Resolver]:
-    """Single source of truth for which actions auto-resolve.
-
-    To make a new action auto-resolvable, write a Resolver and register it
-    here. The classifier hook reads this dict after persisting each
-    suggestion.
-    """
+def build_classifier_registry() -> dict[SuggestedAction, Resolver]:
+    """Auto-resolvers for the LoopClassifier (unlinked threads)."""
     return {
         SuggestedAction.CREATE_LOOP: CreateLoopResolver(),
-        SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver(),
         SuggestedAction.LINK_THREAD: LinkThreadResolver(),
     }
+
+
+def build_agent_registry() -> dict[SuggestedAction, Resolver]:
+    """Auto-resolvers for the NextActionAgent (linked threads)."""
+    return {
+        SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver(),
+    }
+
+
+def build_registry() -> dict[SuggestedAction, Resolver]:
+    """Combined registry — kept for backward compatibility."""
+    return {**build_classifier_registry(), **build_agent_registry()}
 
 
 async def try_auto_resolve(

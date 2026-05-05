@@ -16,12 +16,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from api.addon.routes import _merge_prefill
-from api.classifier.hook import _coerce_create_loop_action_data
 from api.classifier.models import (
     CreateLoopExtraction,
-    EmailClassification,
-    SuggestedAction,
-    SuggestionItem,
 )
 from api.main import app
 from api.scheduling.models import StatusBoard
@@ -74,70 +70,6 @@ class TestMergePrefill:
         extracted = CreateLoopExtraction()  # all None
         merged = _merge_prefill(deterministic, extracted)
         assert merged.client_email == "jane@acme.com"
-
-
-# ---------------------------------------------------------------------------
-# _coerce_create_loop_action_data (classifier hook parallel-write)
-# ---------------------------------------------------------------------------
-
-
-def _create_loop_item(**entities) -> SuggestionItem:
-    return SuggestionItem(
-        classification=EmailClassification.NEW_INTERVIEW_REQUEST,
-        action=SuggestedAction.CREATE_LOOP,
-        confidence=0.9,
-        summary="Schedule Claire for the Acme intro round",
-        extracted_entities=entities,
-    )
-
-
-class TestCoerceCreateLoopActionData:
-    def test_copies_fields_into_action_data(self):
-        item = _create_loop_item(
-            candidate_name="Claire Candidate",
-            client_name="Jane Doe",
-            client_email="jane@acme.com",
-            client_company="Acme Capital",
-            phone="+1-555-0100",  # extra field — should not appear in typed payload
-        )
-        coerced = _coerce_create_loop_action_data(item)
-
-        assert coerced.action_data["candidate_name"] == "Claire Candidate"
-        assert coerced.action_data["client_name"] == "Jane Doe"
-        assert coerced.action_data["client_email"] == "jane@acme.com"
-        assert coerced.action_data["client_company"] == "Acme Capital"
-        # Fields not populated remain null
-        assert coerced.action_data["recruiter_name"] is None
-        assert coerced.action_data["recruiter_email"] is None
-        # Typed payload must not contain the extra field
-        assert "phone" not in coerced.action_data
-        # Compat shim: extracted_entities kept untouched for one release
-        assert coerced.extracted_entities["candidate_name"] == "Claire Candidate"
-        assert coerced.extracted_entities["phone"] == "+1-555-0100"
-
-    def test_respects_existing_action_data(self):
-        item = _create_loop_item(candidate_name="Claire").model_copy(
-            update={"action_data": {"candidate_name": "Already Set", "custom": 1}},
-        )
-        coerced = _coerce_create_loop_action_data(item)
-        assert coerced.action_data == {"candidate_name": "Already Set", "custom": 1}
-
-    def test_ignores_non_create_loop_actions(self):
-        item = SuggestionItem(
-            classification=EmailClassification.AVAILABILITY_RESPONSE,
-            action=SuggestedAction.DRAFT_EMAIL,
-            confidence=0.9,
-            summary="Share availability with client",
-            extracted_entities={"candidate_name": "Claire"},
-        )
-        coerced = _coerce_create_loop_action_data(item)
-        assert coerced.action_data == {}
-
-    def test_empty_string_treated_as_null(self):
-        item = _create_loop_item(candidate_name="", client_name="Jane")
-        coerced = _coerce_create_loop_action_data(item)
-        assert coerced.action_data["candidate_name"] is None
-        assert coerced.action_data["client_name"] == "Jane"
 
 
 # ---------------------------------------------------------------------------

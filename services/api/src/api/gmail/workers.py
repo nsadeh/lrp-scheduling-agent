@@ -55,7 +55,9 @@ async def startup(ctx: dict) -> None:
 
     # AI infrastructure — required, crashes if not configured
     from api.ai import init_langfuse, init_llm_service
-    from api.classifier.hook import ClassifierHook
+    from api.classifier.loop_classifier import LoopClassifier
+    from api.classifier.next_action_agent import NextActionAgent
+    from api.classifier.router import EmailRouter
     from api.classifier.sender_blacklist import load_blacklist
     from api.classifier.service import SuggestionService
     from api.drafts.service import DraftService
@@ -65,6 +67,7 @@ async def startup(ctx: dict) -> None:
     llm = init_llm_service()
 
     loop_service = LoopService(db_pool=pool, gmail=gmail)
+    suggestion_service = SuggestionService(db_pool=pool)
     draft_service = DraftService(
         db_pool=pool,
         loop_service=loop_service,
@@ -72,19 +75,26 @@ async def startup(ctx: dict) -> None:
         langfuse=langfuse,
     )
 
-    # The hook needs an arq pool to enqueue follow-up reclassification
-    # jobs (after CREATE_LOOP / LINK_THREAD auto-resolve), but we don't
-    # create one here — arq exposes its own pool to job functions via
-    # ``ctx["redis"]``, and each job passes that into ``hook.on_email``.
-    ctx["hook"] = ClassifierHook(
+    classifier = LoopClassifier(
         llm=llm,
         langfuse=langfuse,
-        suggestion_service=SuggestionService(db_pool=pool),
+        suggestion_service=suggestion_service,
+        loop_service=loop_service,
+    )
+    agent = NextActionAgent(
+        llm=llm,
+        langfuse=langfuse,
+        suggestion_service=suggestion_service,
         loop_service=loop_service,
         draft_service=draft_service,
+    )
+    ctx["router"] = EmailRouter(
+        loop_classifier=classifier,
+        next_action_agent=agent,
+        loop_service=loop_service,
         sender_blacklist=load_blacklist(),
     )
-    logger.info("worker startup complete — ClassifierHook active")
+    logger.info("worker startup complete — EmailRouter active")
 
 
 async def shutdown(ctx: dict) -> None:
@@ -239,13 +249,13 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
        c. Fetch full message
        d. Fetch thread for forward detection context
        e. Classify direction and type
-       f. Build EmailEvent and fire hook
+       f. Build EmailEvent and fire router
     3. Update stored last_history_id
     """
     gmail: GmailClient = ctx["gmail"]
     token_store: TokenStore = ctx["token_store"]
     pool: AsyncConnectionPool = ctx["db"]
-    hook = ctx["hook"]
+    router = ctx["router"]
 
     try:
         history_response = await gmail.history_list(
@@ -330,7 +340,7 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
                 new_participants=new_participants,
                 thread_messages=thread_messages,
             )
-            await hook.on_email(event, arq_pool=ctx.get("redis"))
+            await router.on_email(event, arq_pool=ctx.get("redis"))
 
         except GmailNotFoundError:
             logger.info(
@@ -347,37 +357,36 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
         await token_store.update_history_id(coordinator_email, str(new_history_id))
 
 
-async def reclassify_after_loop_creation(
+async def run_next_action_agent(
     ctx: dict,
     coordinator_email: str,
     gmail_message_id: str | None,
     gmail_thread_id: str,
 ) -> None:
-    """Re-run the classifier on a message after a loop is created for its thread.
+    """Run the NextActionAgent on a thread that was just linked to a loop.
 
-    Enqueued by the addon when a coordinator creates a new loop. The thread is
-    now linked, so the classifier will produce follow-up suggestions (DRAFT_EMAIL,
-    ADVANCE_STAGE) that weren't possible before.
+    Enqueued by auto-resolvers (CreateLoopResolver, LinkThreadResolver) and
+    by the addon when a coordinator manually creates a loop. The thread is
+    now linked, so the agent will produce follow-up suggestions (DRAFT_EMAIL,
+    ADVANCE_STAGE). Unlike the old reclassify path, this cannot trigger loop
+    creation recursion — the agent blacklists CREATE_LOOP.
     """
     gmail: GmailClient = ctx["gmail"]
-    hook = ctx["hook"]
+    router = ctx["router"]
 
     try:
-        # Fetch the specific message, or fall back to latest on thread
         if gmail_message_id:
             message = await gmail.get_message(coordinator_email, gmail_message_id)
         else:
             thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
             if not thread.messages:
-                logger.warning("empty thread %s — skipping reclassification", gmail_thread_id)
+                logger.warning("empty thread %s — skipping next action agent", gmail_thread_id)
                 return
             message = thread.messages[-1]
 
-        # Fetch full thread for context
         thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
         thread_messages = thread.messages
 
-        # Classify direction and type (same pattern as _process_history)
         direction = classify_direction(message, coordinator_email)
         prior_messages = [
             m for m in thread_messages if m.id != message.id and m.date < message.date
@@ -392,15 +401,15 @@ async def reclassify_after_loop_creation(
             new_participants=new_participants,
             thread_messages=thread_messages,
         )
-        await hook.on_email(event, arq_pool=ctx.get("redis"))
+        await router.on_email(event, arq_pool=ctx.get("redis"))
         logger.info(
-            "reclassified message %s after loop creation (thread %s)",
+            "next action agent processed message %s (thread %s)",
             message.id,
             gmail_thread_id,
         )
     except Exception:
         logger.exception(
-            "background reclassification failed for thread %s (coordinator %s)",
+            "next action agent failed for thread %s (coordinator %s)",
             gmail_thread_id,
             coordinator_email,
         )
@@ -409,7 +418,7 @@ async def reclassify_after_loop_creation(
 class WorkerSettings:
     """arq worker configuration."""
 
-    functions = [process_gmail_push, reclassify_after_loop_creation]  # noqa: RUF012
+    functions = [process_gmail_push, run_next_action_agent]  # noqa: RUF012
     cron_jobs = [  # noqa: RUF012
         cron(poll_gmail_history, second=0),  # every 60s
         cron(renew_gmail_watches, hour={0, 6, 12, 18}, minute=0, second=0),

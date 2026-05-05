@@ -27,7 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
 
 from api.ai import init_langfuse, init_llm_service  # noqa: E402
-from api.classifier.hook import ClassifierHook  # noqa: E402
+from api.classifier.loop_classifier import LoopClassifier  # noqa: E402
+from api.classifier.next_action_agent import NextActionAgent  # noqa: E402
+from api.classifier.router import EmailRouter  # noqa: E402
 from api.classifier.service import SuggestionService  # noqa: E402
 from api.gmail.hooks import EmailEvent, MessageDirection, MessageType  # noqa: E402
 from api.gmail.models import EmailAddress, Message  # noqa: E402
@@ -183,10 +185,21 @@ async def run_tests():
     suggestion_svc = SuggestionService(db_pool=pool)
     loop_svc = LoopService(db_pool=pool, gmail=None)
 
-    hook = ClassifierHook(
+    classifier = LoopClassifier(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=suggestion_svc,
+        loop_service=loop_svc,
+    )
+    agent = NextActionAgent(
+        llm=llm,
+        langfuse=langfuse,
+        suggestion_service=suggestion_svc,
+        loop_service=loop_svc,
+    )
+    hook = EmailRouter(
+        loop_classifier=classifier,
+        next_action_agent=agent,
         loop_service=loop_svc,
     )
 

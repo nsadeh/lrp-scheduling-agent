@@ -53,6 +53,7 @@ from api.scheduling.cards import (
     build_contextual_unlinked,
     build_create_loop_form,
     build_error_card,
+    build_loop_pending_card,
 )
 from api.scheduling.models import StageState
 from api.scheduling.service import LoopService  # noqa: TC001
@@ -344,6 +345,31 @@ async def _build_refreshed_overview(request: Request, email: str) -> CardRespons
     return build_overview(groups, base_url=base_url)
 
 
+async def _build_thread_overview_or_placeholder(
+    request: Request,
+    email: str,
+    thread_id: str | None,
+    *,
+    message_id: str | None = None,
+) -> CardResponse:
+    """Render suggestions for ``thread_id``, or a thread-anchored placeholder
+    when none exist yet (e.g. agent still enqueued).
+
+    Never widens to the global overview when a thread is in scope — that's
+    what produced the stale-suggestion bug after manual create-loop, where
+    the new loop had no suggestions yet and the global view showed an
+    unrelated loop's pending items.
+    """
+    if not thread_id:
+        return await _build_refreshed_overview(request, email)
+    overview_svc = _get_overview_service(request)
+    base_url = _get_base_url(request)
+    groups = await overview_svc.get_thread_overview_data(thread_id, email)
+    if groups:
+        return build_overview(groups, base_url=base_url)
+    return build_loop_pending_card(thread_id, message_id=message_id)
+
+
 def _as_push(response: CardResponse) -> CardResponse:
     """Convert updateCard navigations to pushCard for initial triggers."""
     navigations = [
@@ -437,8 +463,10 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
             loop.id if loop else None,
         )
         if loop:
-            # Thread is linked but no pending suggestions — show full overview
-            card = await _build_refreshed_overview(request, email)
+            # Thread is linked but no pending suggestions yet — keep the
+            # user anchored to this thread instead of widening to the
+            # global overview (which would surface unrelated loops' items).
+            card = build_loop_pending_card(thread_id, message_id=message_id)
         else:
             card = build_contextual_unlinked(thread_id, message_id=message_id)
 
@@ -695,7 +723,7 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
 
     # Prefill params passed from the overview suggestion card (classifier path)
     # short-circuit AI extraction — the classifier already did this work and
-    # its output is on action_data/extracted_entities.
+    # its output is on action_data.
     has_suggestion_prefill = any(
         _get_param(body, f"prefill_{field}")
         for field in (
@@ -739,8 +767,8 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
             logger.warning("Could not fetch message %s for pre-fill", message_id, exc_info=True)
 
     # AI extraction: only on the manual path. When the user arrived from a
-    # classifier suggestion, that suggestion's extracted_entities already
-    # populated prefill_* — re-running extraction wastes LLM cost.
+    # classifier suggestion, that suggestion's action_data already populated
+    # prefill_* — re-running extraction wastes LLM cost.
     if not has_suggestion_prefill:
         extracted = await _run_create_loop_extractor(
             request=request,
@@ -876,7 +904,6 @@ async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email
         prefill_recruiter_email=new_email or None,
         prefill_cm_name=_field("cm_name"),
         prefill_cm_email=_field("cm_email"),
-        prefill_first_stage=_field("first_stage_name"),
         suggestion_id=suggestion_id,
     )
 
@@ -912,10 +939,10 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
 
     cm_name = _field("cm_name")
     cm_email = _field("cm_email")
-    first_stage = _field("first_stage_name") or "Round 1"
 
     gmail_thread_id = _get_param(body, "gmail_thread_id")
     gmail_subject = _get_param(body, "gmail_subject")
+    gmail_message_id = _get_param(body, "gmail_message_id")
 
     # Create or find contacts only when the coordinator supplied an email
     # for them. Loops with missing recruiter/client are valid — the JIT
@@ -964,7 +991,6 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
         client_contact_id=client_contact_id,
         recruiter_id=recruiter_id,
         title=title,
-        first_stage_name=first_stage,
         client_manager_id=cm_id,
         gmail_thread_id=gmail_thread_id,
         gmail_subject=gmail_subject,
@@ -977,36 +1003,40 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
         suggestion_svc = SuggestionService(db_pool=svc._pool)
         await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
 
-    # Enqueue background reclassification — the thread is now linked to the
-    # new loop, so the classifier will produce follow-up suggestions
-    # (e.g. DRAFT_EMAIL to recruiter). Runs async so the UI returns instantly.
-    gmail_message_id = _get_param(body, "gmail_message_id")
+    # Enqueue the NextActionAgent — the thread is now linked to the new
+    # loop, so the agent will produce follow-up suggestions (e.g.
+    # DRAFT_EMAIL to recruiter). Runs async so the UI returns instantly.
     if gmail_thread_id and request:
         redis = get_redis(request)
         if redis:
             try:
                 await redis.enqueue_job(
-                    "reclassify_after_loop_creation",
+                    "run_next_action_agent",
                     email,
                     gmail_message_id,
                     gmail_thread_id,
                 )
                 logger.info(
-                    "enqueued background reclassification for thread %s",
+                    "enqueued next action agent for thread %s",
                     gmail_thread_id,
                 )
             except Exception:
                 logger.exception(
-                    "failed to enqueue reclassification for thread %s",
+                    "failed to enqueue next action agent for thread %s",
                     gmail_thread_id,
                 )
         else:
             logger.warning(
-                "redis unavailable — skipping background reclassification for thread %s",
+                "redis unavailable — skipping next action agent for thread %s",
                 gmail_thread_id,
             )
 
-    return await _build_refreshed_overview(request, email)
+    # Stay anchored to the just-linked thread. The agent runs async, so
+    # this typically renders the placeholder card; the user clicks Refresh
+    # (or Gmail re-fires on-message) once the agent has emitted suggestions.
+    return await _build_thread_overview_or_placeholder(
+        request, email, gmail_thread_id, message_id=gmail_message_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1138,8 +1168,7 @@ async def _apply_jit_contacts(
     from api.drafts.service import resolve_recipients
 
     loop = await svc.get_loop(draft.loop_id)
-    stage = next((s for s in loop.stages if s.id == draft.stage_id), None)
-    to_emails, cc_emails = resolve_recipients(loop, stage, sender_email=coordinator_email)
+    to_emails, cc_emails = resolve_recipients(loop, sender_email=coordinator_email)
     await draft_svc.update_draft_recipients(draft.id, to_emails, cc_emails)
     if pending:
         await draft_svc.update_pending_jit_data(draft.id, {})
@@ -1281,7 +1310,6 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     # Send email via existing LoopService path
     await svc.send_email(
         loop_id=draft.loop_id,
-        stage_id=draft.stage_id,
         coordinator_email=email,
         to=draft.to_emails,
         subject=send_subject,
@@ -1347,27 +1375,21 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
 
     # New ADVANCE_STAGE / LINK_THREAD suggestions are auto-resolved by the
     # classifier and never render an Accept button. These branches still
-    # fire for: (1) pre-deploy PENDING rows that were created before the
-    # auto-resolver shipped — coordinators clear the backlog manually; and
-    # (2) post-deploy rows whose resolver Sentry-and-dropped. CREATE_LOOP
-    # has its own dedicated submit path (create_loop). DRAFT_EMAIL uses
-    # send_draft. ASK_COORDINATOR has no backend yet.
+    # fire for post-deploy rows whose resolver Sentry-and-dropped.
+    # CREATE_LOOP has its own dedicated submit path (create_loop).
+    # DRAFT_EMAIL uses send_draft. ASK_COORDINATOR has no backend yet.
     if suggestion.action == SuggestedAction.ADVANCE_STAGE:
-        if suggestion.stage_id and suggestion.target_state:
-            await svc.advance_stage(suggestion.stage_id, StageState(suggestion.target_state), email)
+        target_stage = (suggestion.action_data or {}).get("target_stage")
+        if suggestion.loop_id and target_stage:
+            await svc.advance_state(suggestion.loop_id, StageState(target_stage), email)
         else:
             logger.warning(
-                "ADVANCE_STAGE suggestion %s missing stage_id or target_state", suggestion_id
+                "ADVANCE_STAGE suggestion %s missing loop_id or action_data.target_stage",
+                suggestion_id,
             )
-    elif suggestion.action == SuggestedAction.MARK_COLD:
-        if suggestion.stage_id:
-            await svc.mark_cold(suggestion.stage_id, email)
-        else:
-            logger.warning("MARK_COLD suggestion %s missing stage_id", suggestion_id)
     elif suggestion.action == SuggestedAction.LINK_THREAD:
-        target_loop_id = suggestion.loop_id or suggestion.extracted_entities.get("target_loop_id")
-        if target_loop_id and suggestion.gmail_thread_id:
-            await svc.link_thread(target_loop_id, suggestion.gmail_thread_id, None, email)
+        if suggestion.loop_id and suggestion.gmail_thread_id:
+            await svc.link_thread(suggestion.loop_id, suggestion.gmail_thread_id, None, email)
         else:
             logger.warning("LINK_THREAD suggestion %s missing loop_id or thread_id", suggestion_id)
     else:
@@ -1456,7 +1478,7 @@ _ACTION_HANDLERS = {
     "view_draft": _handle_view_draft,
     "send_draft": _handle_send_draft,
     "discard_draft": _handle_discard_draft,
-    # Suggestion actions (MARK_COLD / ASK_COORDINATOR / dismiss)
+    # Suggestion actions (ADVANCE_STAGE / LINK_THREAD / ASK_COORDINATOR / dismiss)
     "accept_suggestion": _handle_accept_suggestion,
     "reject_suggestion": _handle_reject_suggestion,
     "show_suggestions_tab": _handle_show_suggestions_tab,

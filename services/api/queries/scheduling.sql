@@ -102,12 +102,12 @@ LIMIT 10;
 -- ============================================================
 
 -- name: create_loop^
-INSERT INTO loops (id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, notes)
-VALUES (:id, :coordinator_id, :client_contact_id, :recruiter_id, :client_manager_id, :candidate_id, :title, :notes)
-RETURNING id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, notes, created_at, updated_at;
+INSERT INTO loops (id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, state, notes)
+VALUES (:id, :coordinator_id, :client_contact_id, :recruiter_id, :client_manager_id, :candidate_id, :title, :state, :notes)
+RETURNING id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, notes, state, created_at, updated_at;
 
 -- name: get_loop^
-SELECT id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, notes, created_at, updated_at
+SELECT id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, notes, state, created_at, updated_at
 FROM loops WHERE id = :id;
 
 -- name: get_loop_full^
@@ -117,8 +117,6 @@ FROM loops WHERE id = :id;
 -- Client contact, recruiter, and client manager are LEFT JOIN — those FKs
 -- became nullable in migration 0009 (loops can be auto-created with
 -- incomplete contact info; missing pieces are collected JIT at send time).
--- Column aliases are explicit so the Python row-converter can use named
--- access (psycopg dict_row) and survive future SELECT-list churn.
 SELECT
     l.id                AS loop_id,
     l.coordinator_id    AS loop_coordinator_id,
@@ -128,6 +126,7 @@ SELECT
     l.candidate_id      AS loop_candidate_id,
     l.title             AS loop_title,
     l.notes             AS loop_notes,
+    l.state             AS loop_state,
     l.created_at        AS loop_created_at,
     l.updated_at        AS loop_updated_at,
     co.name             AS coord_name,
@@ -162,7 +161,6 @@ WHERE l.id = :id;
 
 -- name: get_loops_full_for_coordinator
 -- All loops for a coordinator with actor details populated (for status board).
--- See get_loop_full above for JOIN reasoning and aliasing convention.
 SELECT
     l.id                AS loop_id,
     l.coordinator_id    AS loop_coordinator_id,
@@ -172,6 +170,7 @@ SELECT
     l.candidate_id      AS loop_candidate_id,
     l.title             AS loop_title,
     l.notes             AS loop_notes,
+    l.state             AS loop_state,
     l.created_at        AS loop_created_at,
     l.updated_at        AS loop_updated_at,
     co.name             AS coord_name,
@@ -206,9 +205,8 @@ WHERE l.coordinator_id = :coordinator_id
 ORDER BY l.updated_at DESC;
 
 -- name: get_active_loops_full_for_coordinator
--- Active loops (with >=1 non-terminal stage) for a coordinator, with actors.
--- See get_loop_full above for JOIN reasoning and aliasing convention.
-SELECT DISTINCT ON (l.id)
+-- Active loops (not complete or cold) for a coordinator, with actors.
+SELECT
     l.id                AS loop_id,
     l.coordinator_id    AS loop_coordinator_id,
     l.client_contact_id AS loop_client_contact_id,
@@ -217,6 +215,7 @@ SELECT DISTINCT ON (l.id)
     l.candidate_id      AS loop_candidate_id,
     l.title             AS loop_title,
     l.notes             AS loop_notes,
+    l.state             AS loop_state,
     l.created_at        AS loop_created_at,
     l.updated_at        AS loop_updated_at,
     co.name             AS coord_name,
@@ -247,28 +246,29 @@ LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
 LEFT JOIN contacts rec ON rec.id = l.recruiter_id
 LEFT JOIN contacts cm ON cm.id = l.client_manager_id
 JOIN candidates cand ON cand.id = l.candidate_id
-JOIN stages s ON s.loop_id = l.id
 WHERE l.coordinator_id = :coordinator_id
-  AND s.state NOT IN ('complete', 'cold')
-ORDER BY l.id, l.updated_at DESC;
+  AND l.state NOT IN ('complete', 'cold')
+ORDER BY l.updated_at DESC;
 
 -- name: get_loops_for_coordinator
--- All loops for a coordinator that have at least one active stage.
-SELECT DISTINCT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-       l.client_manager_id, l.candidate_id, l.title, l.notes, l.created_at, l.updated_at
+-- All active loops for a coordinator (not complete/cold).
+SELECT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
+       l.client_manager_id, l.candidate_id, l.title, l.notes, l.state, l.created_at, l.updated_at
 FROM loops l
-JOIN stages s ON s.loop_id = l.id
 WHERE l.coordinator_id = :coordinator_id
-  AND s.state NOT IN ('complete', 'cold')
+  AND l.state NOT IN ('complete', 'cold')
 ORDER BY l.updated_at DESC;
 
 -- name: get_all_loops_for_coordinator
 -- All loops for a coordinator (including complete/cold), for the full board.
 SELECT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-       l.client_manager_id, l.candidate_id, l.title, l.notes, l.created_at, l.updated_at
+       l.client_manager_id, l.candidate_id, l.title, l.notes, l.state, l.created_at, l.updated_at
 FROM loops l
 WHERE l.coordinator_id = :coordinator_id
 ORDER BY l.updated_at DESC;
+
+-- name: update_loop_state!
+UPDATE loops SET state = :state, updated_at = now() WHERE id = :id;
 
 -- name: update_loop_timestamp!
 UPDATE loops SET updated_at = now() WHERE id = :id;
@@ -293,51 +293,18 @@ UPDATE loops SET client_manager_id = :client_manager_id, updated_at = now() WHER
 UPDATE candidates SET name = :name WHERE id = :id;
 
 -- ============================================================
--- Stages
--- ============================================================
-
--- name: create_stage^
-INSERT INTO stages (id, loop_id, name, state, ordinal)
-VALUES (:id, :loop_id, :name, :state, :ordinal)
-RETURNING id, loop_id, name, state, ordinal, created_at, updated_at;
-
--- name: get_stage^
-SELECT id, loop_id, name, state, ordinal, created_at, updated_at
-FROM stages WHERE id = :id;
-
--- name: get_stages_for_loop
-SELECT id, loop_id, name, state, ordinal, created_at, updated_at
-FROM stages
-WHERE loop_id = :loop_id
-ORDER BY ordinal, created_at;
-
--- name: update_stage_state!
-UPDATE stages SET state = :state, updated_at = now()
-WHERE id = :id;
-
--- name: get_max_ordinal_for_loop$
-SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
-FROM stages WHERE loop_id = :loop_id;
-
--- ============================================================
 -- Loop events
 -- ============================================================
 
 -- name: insert_event^
-INSERT INTO loop_events (id, loop_id, stage_id, event_type, data, actor_email)
-VALUES (:id, :loop_id, :stage_id, :event_type, :data, :actor_email)
-RETURNING id, loop_id, stage_id, event_type, data, actor_email, occurred_at;
+INSERT INTO loop_events (id, loop_id, event_type, data, actor_email)
+VALUES (:id, :loop_id, :event_type, :data, :actor_email)
+RETURNING id, loop_id, event_type, data, actor_email, occurred_at;
 
 -- name: get_events_for_loop
-SELECT id, loop_id, stage_id, event_type, data, actor_email, occurred_at
+SELECT id, loop_id, event_type, data, actor_email, occurred_at
 FROM loop_events
 WHERE loop_id = :loop_id
-ORDER BY occurred_at;
-
--- name: get_events_for_stage
-SELECT id, loop_id, stage_id, event_type, data, actor_email, occurred_at
-FROM loop_events
-WHERE stage_id = :stage_id
 ORDER BY occurred_at;
 
 -- ============================================================
@@ -361,64 +328,26 @@ ORDER BY linked_at;
 -- Multi-loop threads are possible — this returns the first one (legacy
 -- single-loop callers). New code should prefer find_loops_by_gmail_thread_id.
 SELECT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-       l.client_manager_id, l.candidate_id, l.title, l.notes, l.created_at, l.updated_at
+       l.client_manager_id, l.candidate_id, l.title, l.notes, l.state, l.created_at, l.updated_at
 FROM loops l
 JOIN loop_email_threads let ON let.loop_id = l.id
 WHERE let.gmail_thread_id = :gmail_thread_id
 LIMIT 1;
 
 -- name: find_loops_by_gmail_thread_id
--- All loops linked to a Gmail thread (a thread can be linked to multiple
--- loops, e.g. when two candidates are discussed in one chain).
+-- All loops linked to a Gmail thread. Returns ALL loops regardless of state —
+-- callers (the next-action agent) need to see cold/complete loops too in case
+-- they need to reopen one.
 SELECT l.id, l.coordinator_id, l.client_contact_id, l.recruiter_id,
-       l.client_manager_id, l.candidate_id, l.title, l.notes, l.created_at, l.updated_at
+       l.client_manager_id, l.candidate_id, l.title, l.notes, l.state, l.created_at, l.updated_at
 FROM loops l
 JOIN loop_email_threads let ON let.loop_id = l.id
 WHERE let.gmail_thread_id = :gmail_thread_id
 ORDER BY l.created_at;
 
 -- ============================================================
--- Time slots
--- ============================================================
-
--- name: create_time_slot^
-INSERT INTO time_slots (id, stage_id, start_time, duration_minutes, timezone, zoom_link, notes)
-VALUES (:id, :stage_id, :start_time, :duration_minutes, :timezone, :zoom_link, :notes)
-RETURNING id, stage_id, start_time, duration_minutes, timezone, zoom_link, notes, created_at;
-
--- name: get_time_slots_for_stage
-SELECT id, stage_id, start_time, duration_minutes, timezone, zoom_link, notes, created_at
-FROM time_slots
-WHERE stage_id = :stage_id
-ORDER BY start_time;
-
--- name: get_time_slots_for_loop
-SELECT ts.id, ts.stage_id, ts.start_time, ts.duration_minutes, ts.timezone,
-       ts.zoom_link, ts.notes, ts.created_at
-FROM time_slots ts
-JOIN stages s ON s.id = ts.stage_id
-WHERE s.loop_id = :loop_id
-ORDER BY ts.start_time;
-
--- ============================================================
 -- Batch queries (for multi-loop operations)
 -- ============================================================
-
--- name: get_stages_for_loops
--- All stages for a set of loop IDs.
-SELECT id, loop_id, name, state, ordinal, created_at, updated_at
-FROM stages
-WHERE loop_id = ANY(:loop_ids)
-ORDER BY loop_id, ordinal, created_at;
-
--- name: get_time_slots_for_loops
--- All time slots for stages belonging to a set of loop IDs.
-SELECT ts.id, ts.stage_id, ts.start_time, ts.duration_minutes, ts.timezone,
-       ts.zoom_link, ts.notes, ts.created_at
-FROM time_slots ts
-JOIN stages s ON s.id = ts.stage_id
-WHERE s.loop_id = ANY(:loop_ids)
-ORDER BY ts.start_time;
 
 -- name: get_threads_for_loops
 -- All email threads for a set of loop IDs.

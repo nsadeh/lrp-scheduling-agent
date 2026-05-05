@@ -23,7 +23,6 @@ from api.classifier.resolvers import (
 from api.scheduling.models import (
     Candidate,
     Loop,
-    Stage,
     StageState,
 )
 
@@ -45,9 +44,6 @@ def _suggestion(
     *,
     suggestion_id: str = "sug_1",
     loop_id: str | None = None,
-    stage_id: str | None = None,
-    target_state: str | None = None,
-    extracted_entities: dict | None = None,
     action_data: dict | None = None,
 ) -> Suggestion:
     return Suggestion(
@@ -56,39 +52,26 @@ def _suggestion(
         gmail_message_id="msg_1",
         gmail_thread_id="thread_1",
         loop_id=loop_id,
-        stage_id=stage_id,
         classification=EmailClassification.NEW_INTERVIEW_REQUEST,
         action=action,
         confidence=0.9,
         summary="test",
-        target_state=target_state,
-        extracted_entities=extracted_entities or {},
         action_data=action_data or {},
         status=SuggestionStatus.PENDING,
         created_at=datetime(2026, 4, 27, tzinfo=UTC),
     )
 
 
-def _loop(loop_id: str = "lop_1") -> Loop:
+def _loop(loop_id: str = "lop_1", state: StageState = StageState.NEW) -> Loop:
     return Loop(
         id=loop_id,
         coordinator_id="crd_1",
         candidate_id="can_1",
         title="Round 1",
+        state=state,
         created_at=datetime(2026, 4, 10, tzinfo=UTC),
         updated_at=datetime(2026, 4, 10, tzinfo=UTC),
         candidate=Candidate(id="can_1", name="Test", created_at=datetime(2026, 4, 10, tzinfo=UTC)),
-        stages=[
-            Stage(
-                id="stg_1",
-                loop_id=loop_id,
-                name="Round 1",
-                state=StageState.AWAITING_CANDIDATE,
-                ordinal=0,
-                created_at=datetime(2026, 4, 10, tzinfo=UTC),
-                updated_at=datetime(2026, 4, 10, tzinfo=UTC),
-            )
-        ],
     )
 
 
@@ -141,30 +124,7 @@ class TestCreateLoopResolver:
         assert kwargs["title"] == DEFAULT_CANDIDATE_NAME
 
     @pytest.mark.asyncio
-    async def test_partial_recruiter_only_creates_recruiter_contact_only(self):
-        loop_service = MagicMock()
-        loop_service.find_or_create_client_contact = AsyncMock()
-        loop_service.find_or_create_contact = AsyncMock(return_value=MagicMock(id="con_1"))
-        loop_service.create_loop = AsyncMock(return_value=_loop())
-
-        suggestion = _suggestion(
-            SuggestedAction.CREATE_LOOP,
-            action_data={
-                "candidate_name": "Jane",
-                "recruiter_email": "bob@lrp.com",
-            },
-        )
-        ctx = _ctx(loop_service, MagicMock(), arq_pool=AsyncMock())
-        await CreateLoopResolver().resolve(suggestion, ctx)
-
-        loop_service.find_or_create_client_contact.assert_not_called()
-        loop_service.find_or_create_contact.assert_awaited_once()
-        kwargs = loop_service.create_loop.await_args.kwargs
-        assert kwargs["recruiter_id"] == "con_1"
-        assert kwargs["client_contact_id"] is None
-
-    @pytest.mark.asyncio
-    async def test_enqueues_reclassify_after_creation(self):
+    async def test_enqueues_next_action_after_creation(self):
         loop_service = MagicMock()
         loop_service.find_or_create_client_contact = AsyncMock(return_value=MagicMock(id="cli_1"))
         loop_service.find_or_create_contact = AsyncMock(return_value=MagicMock(id="con_1"))
@@ -177,7 +137,7 @@ class TestCreateLoopResolver:
 
         arq_pool.enqueue_job.assert_awaited_once()
         args = arq_pool.enqueue_job.await_args.args
-        assert args[0] == "reclassify_after_loop_creation"
+        assert args[0] == "run_next_action_agent"
         assert args[1] == "coord@lrp.com"
         assert args[2] == "msg_1"
         assert args[3] == "thread_1"
@@ -185,55 +145,51 @@ class TestCreateLoopResolver:
 
 class TestAdvanceStageResolver:
     @pytest.mark.asyncio
-    async def test_uses_explicit_stage_id(self):
+    async def test_advances_loop_state_from_action_data(self):
         loop_service = MagicMock()
-        loop_service.advance_stage = AsyncMock()
+        loop_service.advance_state = AsyncMock()
 
         suggestion = _suggestion(
             SuggestedAction.ADVANCE_STAGE,
-            stage_id="stg_42",
-            target_state="awaiting_client",
+            loop_id="lop_42",
+            action_data={"target_stage": "awaiting_client"},
         )
         ctx = _ctx(loop_service, MagicMock())
         await AdvanceStageResolver().resolve(suggestion, ctx)
 
-        loop_service.advance_stage.assert_awaited_once()
-        kwargs = loop_service.advance_stage.await_args.kwargs
-        assert kwargs["stage_id"] == "stg_42"
+        loop_service.advance_state.assert_awaited_once()
+        kwargs = loop_service.advance_state.await_args.kwargs
+        assert kwargs["loop_id"] == "lop_42"
         assert kwargs["to_state"] == StageState.AWAITING_CLIENT
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_most_urgent_stage_when_stage_id_missing(self):
+    async def test_skips_when_no_target_stage(self):
         loop_service = MagicMock()
-        loop_service.advance_stage = AsyncMock()
-        loop_service.get_loop = AsyncMock(return_value=_loop())
+        loop_service.advance_state = AsyncMock()
+
+        suggestion = _suggestion(SuggestedAction.ADVANCE_STAGE, loop_id="lop_42", action_data={})
+        ctx = _ctx(loop_service, MagicMock())
+        await AdvanceStageResolver().resolve(suggestion, ctx)
+
+        loop_service.advance_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_loop_id(self):
+        loop_service = MagicMock()
+        loop_service.advance_state = AsyncMock()
 
         suggestion = _suggestion(
-            SuggestedAction.ADVANCE_STAGE,
-            loop_id="lop_1",
-            target_state="awaiting_client",
+            SuggestedAction.ADVANCE_STAGE, action_data={"target_stage": "scheduled"}
         )
         ctx = _ctx(loop_service, MagicMock())
         await AdvanceStageResolver().resolve(suggestion, ctx)
 
-        kwargs = loop_service.advance_stage.await_args.kwargs
-        assert kwargs["stage_id"] == "stg_1"
-
-    @pytest.mark.asyncio
-    async def test_skips_when_no_target_state(self):
-        loop_service = MagicMock()
-        loop_service.advance_stage = AsyncMock()
-
-        suggestion = _suggestion(SuggestedAction.ADVANCE_STAGE, stage_id="stg_42")
-        ctx = _ctx(loop_service, MagicMock())
-        await AdvanceStageResolver().resolve(suggestion, ctx)
-
-        loop_service.advance_stage.assert_not_called()
+        loop_service.advance_state.assert_not_called()
 
 
 class TestLinkThreadResolver:
     @pytest.mark.asyncio
-    async def test_links_thread_and_enqueues_reclassify(self):
+    async def test_links_thread_and_enqueues_next_action(self):
         loop_service = MagicMock()
         loop_service.link_thread = AsyncMock(return_value=MagicMock())
         arq_pool = AsyncMock()
@@ -253,7 +209,7 @@ class TestLinkThreadResolver:
         loop_service = MagicMock()
         loop_service.link_thread = AsyncMock()
 
-        suggestion = _suggestion(SuggestedAction.LINK_THREAD)  # no loop_id, no entity
+        suggestion = _suggestion(SuggestedAction.LINK_THREAD)  # no loop_id
         ctx = _ctx(loop_service, MagicMock())
         await LinkThreadResolver().resolve(suggestion, ctx)
 
@@ -261,13 +217,11 @@ class TestLinkThreadResolver:
 
 
 class TestRegistry:
-    def test_registers_three_actions(self):
+    def test_combined_registry_has_three_actions(self):
         registry = build_registry()
         assert SuggestedAction.CREATE_LOOP in registry
         assert SuggestedAction.ADVANCE_STAGE in registry
         assert SuggestedAction.LINK_THREAD in registry
-        # MARK_COLD and DRAFT_EMAIL are NOT auto-resolved
-        assert SuggestedAction.MARK_COLD not in registry
         assert SuggestedAction.DRAFT_EMAIL not in registry
 
 
@@ -275,15 +229,15 @@ class TestTryAutoResolve:
     @pytest.mark.asyncio
     async def test_marks_suggestion_auto_applied_on_success(self):
         loop_service = MagicMock()
-        loop_service.advance_stage = AsyncMock()
+        loop_service.advance_state = AsyncMock()
         suggestion_service = MagicMock()
         suggestion_service.resolve = AsyncMock()
 
         registry = {SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver()}
         suggestion = _suggestion(
             SuggestedAction.ADVANCE_STAGE,
-            stage_id="stg_1",
-            target_state="awaiting_client",
+            loop_id="lop_1",
+            action_data={"target_stage": "awaiting_client"},
         )
         ctx = _ctx(loop_service, suggestion_service)
 
@@ -295,7 +249,7 @@ class TestTryAutoResolve:
 
     @pytest.mark.asyncio
     async def test_returns_false_when_action_not_registered(self):
-        suggestion = _suggestion(SuggestedAction.MARK_COLD, stage_id="stg_1")
+        suggestion = _suggestion(SuggestedAction.NO_ACTION)
         ctx = _ctx(MagicMock(), MagicMock())
         applied = await try_auto_resolve(suggestion, ctx, build_registry())
         assert applied is False
@@ -303,15 +257,15 @@ class TestTryAutoResolve:
     @pytest.mark.asyncio
     async def test_returns_false_and_does_not_mark_when_resolver_raises(self):
         loop_service = MagicMock()
-        loop_service.advance_stage = AsyncMock(side_effect=RuntimeError("boom"))
+        loop_service.advance_state = AsyncMock(side_effect=RuntimeError("boom"))
         suggestion_service = MagicMock()
         suggestion_service.resolve = AsyncMock()
 
         registry = {SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver()}
         suggestion = _suggestion(
             SuggestedAction.ADVANCE_STAGE,
-            stage_id="stg_1",
-            target_state="awaiting_client",
+            loop_id="lop_1",
+            action_data={"target_stage": "awaiting_client"},
         )
         ctx = _ctx(loop_service, suggestion_service)
 

@@ -1,17 +1,19 @@
-"""Tests for ClassifierHook — guardrails, outgoing skip, error handling."""
+"""Tests for the two-stage classification pipeline: Router, LoopClassifier, NextActionAgent."""
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.classifier.hook import ClassifierHook, _is_internal_only, _resolve_coordinator_name
+from api.classifier.loop_classifier import LoopClassifier, _resolve_coordinator_name
 from api.classifier.models import (
     ClassificationResult,
     EmailClassification,
     SuggestedAction,
     SuggestionItem,
 )
+from api.classifier.next_action_agent import NextActionAgent
+from api.classifier.router import EmailRouter, _is_internal_only
 from api.classifier.sender_blacklist import SenderBlacklist
 from api.gmail.hooks import EmailEvent, MessageDirection, MessageType
 from api.gmail.models import EmailAddress, Message
@@ -21,7 +23,6 @@ from api.scheduling.models import (
     Contact,
     Coordinator,
     Loop,
-    Stage,
     StageState,
 )
 
@@ -53,7 +54,7 @@ def _event(
     )
 
 
-def _loop(loop_id="lop_1", stage_state=StageState.AWAITING_CANDIDATE) -> Loop:
+def _loop(loop_id="lop_1", state=StageState.AWAITING_CANDIDATE) -> Loop:
     return Loop(
         id=loop_id,
         coordinator_id="crd_1",
@@ -61,6 +62,7 @@ def _loop(loop_id="lop_1", stage_state=StageState.AWAITING_CANDIDATE) -> Loop:
         recruiter_id="con_1",
         candidate_id="can_1",
         title="Round 1 - John Smith",
+        state=state,
         created_at=datetime(2026, 4, 10, tzinfo=UTC),
         updated_at=datetime(2026, 4, 14, tzinfo=UTC),
         candidate=Candidate(
@@ -80,17 +82,6 @@ def _loop(loop_id="lop_1", stage_state=StageState.AWAITING_CANDIDATE) -> Loop:
             role="recruiter",
             created_at=datetime(2026, 4, 10, tzinfo=UTC),
         ),
-        stages=[
-            Stage(
-                id="stg_1",
-                loop_id=loop_id,
-                name="Round 1",
-                state=stage_state,
-                ordinal=0,
-                created_at=datetime(2026, 4, 10, tzinfo=UTC),
-                updated_at=datetime(2026, 4, 14, tzinfo=UTC),
-            ),
-        ],
     )
 
 
@@ -98,16 +89,27 @@ def _suggestion_item(
     classification=EmailClassification.AVAILABILITY_RESPONSE,
     action=SuggestedAction.ADVANCE_STAGE,
     confidence=0.95,
-    target_state=StageState.AWAITING_CLIENT,
-    auto_advance=False,
+    target_loop_id="lop_1",
+    target_stage=StageState.AWAITING_CLIENT,
+    action_data=None,
 ) -> SuggestionItem:
+    if action_data is None:
+        if action == SuggestedAction.ADVANCE_STAGE:
+            action_data = {"target_stage": target_stage.value}
+        elif action == SuggestedAction.DRAFT_EMAIL:
+            action_data = {"directive": "Draft something", "recipient_type": "recruiter"}
+        elif action == SuggestedAction.ASK_COORDINATOR:
+            action_data = {"question": "What should I do?"}
+        else:
+            action_data = {}
     return SuggestionItem(
         classification=classification,
         action=action,
         confidence=confidence,
         summary="Test suggestion",
-        target_state=target_state,
-        auto_advance=auto_advance,
+        reasoning="Test reasoning",
+        target_loop_id=target_loop_id,
+        action_data=action_data,
     )
 
 
@@ -118,127 +120,273 @@ def _classification_result(items=None, reasoning="test"):
     )
 
 
-def _make_hook(sender_blacklist: SenderBlacklist | None = None):
-    """Create a ClassifierHook with mocked dependencies."""
+def _make_router(sender_blacklist: SenderBlacklist | None = None):
+    """Create an EmailRouter with mocked classifier and agent."""
+    classifier = MagicMock(spec=LoopClassifier)
+    classifier.classify = AsyncMock()
+
+    agent = MagicMock(spec=NextActionAgent)
+    agent.act = AsyncMock()
+
+    loop_service = MagicMock()
+    loop_service.find_loops_by_thread = AsyncMock(return_value=[])
+
+    router = EmailRouter(
+        loop_classifier=classifier,
+        next_action_agent=agent,
+        loop_service=loop_service,
+        sender_blacklist=sender_blacklist,
+    )
+    return router, classifier, agent, loop_service
+
+
+def _make_classifier():
+    """Create a LoopClassifier with mocked dependencies."""
     llm = MagicMock()
     langfuse = MagicMock()
     suggestion_service = MagicMock()
     suggestion_service.create_suggestion = AsyncMock(return_value=MagicMock(id="sug_test"))
-    suggestion_service.supersede_pending_for_loop = AsyncMock()
 
     loop_service = MagicMock()
-    loop_service.find_loop_by_thread = AsyncMock(return_value=None)
-    loop_service.find_loops_by_thread = AsyncMock(return_value=[])
     loop_service.get_coordinator_by_email = AsyncMock(return_value=None)
-    loop_service.get_events = AsyncMock(return_value=[])
-    loop_service.advance_stage = AsyncMock()
+    loop_service._pool = MagicMock()
 
-    hook = ClassifierHook(
+    classifier = LoopClassifier(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=suggestion_service,
         loop_service=loop_service,
-        sender_blacklist=sender_blacklist,
     )
-    return hook, llm, langfuse, suggestion_service, loop_service
+    return classifier, suggestion_service
 
 
-class TestGuardrails:
-    def test_link_thread_below_threshold_converts_to_create_loop(self):
-        hook, *_ = _make_hook()
-        item = _suggestion_item(
-            action=SuggestedAction.LINK_THREAD,
-            confidence=0.8,
-        )
-        result = hook._apply_guardrails(item, None)
-        assert result.action == SuggestedAction.CREATE_LOOP
-        assert "confidence too low" in result.summary
+def _make_agent():
+    """Create a NextActionAgent with mocked dependencies."""
+    llm = MagicMock()
+    langfuse = MagicMock()
+    suggestion_service = MagicMock()
+    suggestion_service.create_suggestion = AsyncMock(return_value=MagicMock(id="sug_test"))
 
-    def test_link_thread_above_threshold_passes(self):
-        hook, *_ = _make_hook()
-        item = _suggestion_item(
-            action=SuggestedAction.LINK_THREAD,
-            confidence=0.95,
-        )
-        result = hook._apply_guardrails(item, None)
-        assert result.action == SuggestedAction.LINK_THREAD
+    loop_service = MagicMock()
+    loop_service.get_coordinator_by_email = AsyncMock(return_value=None)
+    loop_service.get_events = AsyncMock(return_value=[])
 
-    def test_invalid_transition_demotes_to_ask_coordinator(self):
-        hook, *_ = _make_hook()
-        loop = _loop(stage_state=StageState.AWAITING_CANDIDATE)
-        # AWAITING_CANDIDATE cannot go to SCHEDULED directly
-        item = _suggestion_item(
-            action=SuggestedAction.ADVANCE_STAGE,
-            target_state=StageState.SCHEDULED,
-        )
-        result = hook._apply_guardrails(item, loop)
-        assert result.action == SuggestedAction.ASK_COORDINATOR
-        assert "not allowed" in result.questions[0]
-
-    def test_valid_transition_passes(self):
-        hook, *_ = _make_hook()
-        loop = _loop(stage_state=StageState.AWAITING_CANDIDATE)
-        # AWAITING_CANDIDATE → AWAITING_CLIENT is valid
-        item = _suggestion_item(
-            action=SuggestedAction.ADVANCE_STAGE,
-            target_state=StageState.AWAITING_CLIENT,
-        )
-        result = hook._apply_guardrails(item, loop)
-        assert result.action == SuggestedAction.ADVANCE_STAGE
+    agent = NextActionAgent(
+        llm=llm,
+        langfuse=langfuse,
+        suggestion_service=suggestion_service,
+        loop_service=loop_service,
+    )
+    return agent, suggestion_service
 
 
-class TestOutgoingSkip:
+# --- Router tests ---
+
+
+class TestRouterRouting:
     @pytest.mark.asyncio
     async def test_outgoing_on_unlinked_thread_skips(self):
-        hook, _, _, suggestion_service, loop_service = _make_hook()
-        loop_service.find_loop_by_thread.return_value = None
+        router, classifier, agent, loop_service = _make_router()
         loop_service.find_loops_by_thread.return_value = []
 
         event = _event(direction=MessageDirection.OUTGOING)
-        await hook.on_email(event)
+        await router.on_email(event)
 
-        suggestion_service.create_suggestion.assert_not_called()
+        classifier.classify.assert_not_called()
+        agent.act.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_outgoing_on_linked_thread_classifies(self):
-        hook, _, _, suggestion_service, loop_service = _make_hook()
-        loop_service.find_loop_by_thread.return_value = _loop()
+    async def test_outgoing_on_linked_thread_routes_to_agent(self):
+        router, classifier, agent, loop_service = _make_router()
         loop_service.find_loops_by_thread.return_value = [_loop()]
 
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-            return_value=_classification_result(
-                [
-                    _suggestion_item(auto_advance=True),
-                ]
-            ),
-        ):
-            event = _event(direction=MessageDirection.OUTGOING)
-            await hook.on_email(event)
+        event = _event(direction=MessageDirection.OUTGOING)
+        await router.on_email(event)
 
-        suggestion_service.create_suggestion.assert_called_once()
+        agent.act.assert_called_once()
+        classifier.classify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_incoming_on_unlinked_thread_routes_to_classifier(self):
+        router, classifier, agent, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = _event(direction=MessageDirection.INCOMING)
+        await router.on_email(event)
+
+        classifier.classify.assert_called_once()
+        agent.act.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_incoming_on_linked_thread_routes_to_agent(self):
+        router, classifier, agent, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = [_loop()]
+
+        event = _event(direction=MessageDirection.INCOMING)
+        await router.on_email(event)
+
+        agent.act.assert_called_once()
+        classifier.classify.assert_not_called()
+
+
+class TestSenderBlacklist:
+    @pytest.mark.asyncio
+    async def test_blacklisted_sender_skips(self):
+        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
+        router, classifier, agent, loop_service = _make_router(sender_blacklist=blacklist)
+
+        event = _event(from_email="alerts@withintelligence-email.com")
+        await router.on_email(event)
+
+        classifier.classify.assert_not_called()
+        agent.act.assert_not_called()
+        loop_service.find_loops_by_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_blacklisted_sender_routes_normally(self):
+        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
+        router, classifier, _, loop_service = _make_router(sender_blacklist=blacklist)
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = _event(from_email="alice@candidate.com")
+        await router.on_email(event)
+
+        classifier.classify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_blacklist_uses_empty_default(self):
+        router, classifier, _, loop_service = _make_router(sender_blacklist=None)
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = _event(from_email="alerts@withintelligence-email.com")
+        await router.on_email(event)
+
+        classifier.classify.assert_called_once()
+
+
+# --- Classifier guardrails ---
+
+
+class TestClassifierGuardrails:
+    def test_link_thread_below_threshold_converts_to_create_loop(self):
+        classifier, _ = _make_classifier()
+        item = _suggestion_item(action=SuggestedAction.LINK_THREAD, confidence=0.8)
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.CREATE_LOOP
+        assert error is not None
+        assert "confidence" in error
+
+    def test_link_thread_above_threshold_passes(self):
+        classifier, _ = _make_classifier()
+        item = _suggestion_item(action=SuggestedAction.LINK_THREAD, confidence=0.95)
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.LINK_THREAD
+        assert error is None
+
+    def test_disallowed_action_converts_to_no_action(self):
+        classifier, _ = _make_classifier()
+        item = _suggestion_item(action=SuggestedAction.ADVANCE_STAGE)
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+
+
+# --- Agent guardrails ---
+
+
+class TestAgentGuardrails:
+    def test_create_loop_blacklisted(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.CREATE_LOOP)
+        result, error = agent._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+        assert "not allowed" in error
+
+    def test_link_thread_blacklisted(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.LINK_THREAD)
+        result, error = agent._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+
+    def test_advance_stage_passes(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.ADVANCE_STAGE,
+            target_stage=StageState.AWAITING_CLIENT,
+        )
+        result, error = agent._apply_guardrails(item)
+        assert result.action == SuggestedAction.ADVANCE_STAGE
+        assert error is None
+
+    def test_draft_email_passes(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.DRAFT_EMAIL)
+        result, error = agent._apply_guardrails(item)
+        assert result.action == SuggestedAction.DRAFT_EMAIL
+        assert error is None
+
+    def test_missing_target_loop_id_fails(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.DRAFT_EMAIL, target_loop_id=None)
+        result, error = agent._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+        assert "target_loop_id" in error
+
+    def test_invalid_action_data_fails(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.ADVANCE_STAGE,
+            action_data={},  # missing target_stage
+        )
+        result, error = agent._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+        assert "action_data" in error
+
+
+# --- Error handling ---
 
 
 class TestErrorHandling:
     @pytest.mark.asyncio
-    async def test_llm_failure_creates_needs_attention(self):
-        hook, _, _, suggestion_service, loop_service = _make_hook()
-        loop_service.find_loop_by_thread.return_value = None
-        loop_service.find_loops_by_thread.return_value = []
+    async def test_classifier_llm_failure_creates_needs_attention(self):
+        classifier, suggestion_service = _make_classifier()
 
         with patch(
-            "api.classifier.hook.classify_email",
+            "api.classifier.loop_classifier.classify_new_thread",
             new_callable=AsyncMock,
             side_effect=Exception("LLM down"),
         ):
             event = _event()
-            await hook.on_email(event)
+            await classifier.classify(event)
 
         suggestion_service.create_suggestion.assert_called_once()
         call_kwargs = suggestion_service.create_suggestion.call_args.kwargs
         assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
         assert call_kwargs["item"].confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_agent_llm_failure_creates_needs_attention(self):
+        agent, suggestion_service = _make_agent()
+
+        with patch(
+            "api.classifier.next_action_agent.determine_next_action",
+            new_callable=AsyncMock,
+            side_effect=Exception("LLM down"),
+        ):
+            event = _event()
+            await agent.act(event, [_loop()])
+
+        suggestion_service.create_suggestion.assert_called_once()
+        call_kwargs = suggestion_service.create_suggestion.call_args.kwargs
+        assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
+        assert call_kwargs["item"].confidence == 0.0
+
+
+# --- Coordinator name resolution ---
 
 
 class TestResolveCoordinatorName:
@@ -258,7 +406,6 @@ class TestResolveCoordinatorName:
         assert name == "Nim Sadeh"
 
     def test_falls_back_to_incoming_to_header_display_name(self):
-        # Incoming email: coordinator is in `to`. DB row absent.
         msg = Message(
             id="msg1",
             thread_id="thread1",
@@ -278,7 +425,6 @@ class TestResolveCoordinatorName:
         assert _resolve_coordinator_name(event, None) == "Nim (from Gmail)"
 
     def test_falls_back_to_outgoing_from_header_display_name(self):
-        # Outgoing email: coordinator is `from_`. DB row absent.
         msg = Message(
             id="msg1",
             thread_id="thread1",
@@ -298,88 +444,11 @@ class TestResolveCoordinatorName:
         assert _resolve_coordinator_name(event, None) == "Nim Sadeh"
 
     def test_falls_back_to_local_part_when_no_display_name_anywhere(self):
-        # No DB row, no display name on headers.
-        event = _event()  # to: [EmailAddress(email="coord@lrp.com")] — no name
+        event = _event()
         assert _resolve_coordinator_name(event, None) == "coord"
 
 
-class TestSenderBlacklist:
-    """Pre-classifier sender blacklist — silent skip on unlinked threads."""
-
-    @pytest.mark.asyncio
-    async def test_blacklisted_sender_on_unlinked_thread_skips(self):
-        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
-        hook, _, _, suggestion_service, loop_service = _make_hook(sender_blacklist=blacklist)
-        loop_service.find_loop_by_thread.return_value = None
-        loop_service.find_loops_by_thread.return_value = []
-
-        # classify_email patched only to assert it isn't called
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-        ) as mock_classify:
-            event = _event(from_email="alerts@withintelligence-email.com")
-            await hook.on_email(event)
-
-        mock_classify.assert_not_called()
-        suggestion_service.create_suggestion.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_blacklisted_sender_on_linked_thread_still_classifies(self):
-        """Linked threads bypass the blacklist — newsletters forwarded into an
-        active candidate conversation should still be classified."""
-        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
-        hook, _, _, suggestion_service, loop_service = _make_hook(sender_blacklist=blacklist)
-        loop_service.find_loop_by_thread.return_value = _loop()
-        loop_service.find_loops_by_thread.return_value = [_loop()]
-
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-            return_value=_classification_result(),
-        ) as mock_classify:
-            event = _event(from_email="alerts@withintelligence-email.com")
-            await hook.on_email(event)
-
-        mock_classify.assert_called_once()
-        suggestion_service.create_suggestion.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_non_blacklisted_sender_classifies_normally(self):
-        # The sender domain is NOT in the blacklist — the LLM should run.
-        # (Whether a suggestion ultimately persists is a downstream guardrail
-        # decision unrelated to the blacklist; we only assert classify was called.)
-        blacklist = SenderBlacklist(domains=frozenset({"withintelligence-email.com"}))
-        hook, _, _, _, loop_service = _make_hook(sender_blacklist=blacklist)
-        loop_service.find_loop_by_thread.return_value = None
-        loop_service.find_loops_by_thread.return_value = []
-
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-            return_value=_classification_result(),
-        ) as mock_classify:
-            event = _event(from_email="alice@candidate.com")
-            await hook.on_email(event)
-
-        mock_classify.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_no_blacklist_passed_uses_empty_default(self):
-        """When no blacklist is injected, default is empty — nothing is blocked."""
-        hook, _, _, _, loop_service = _make_hook(sender_blacklist=None)
-        loop_service.find_loop_by_thread.return_value = None
-        loop_service.find_loops_by_thread.return_value = []
-
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-            return_value=_classification_result(),
-        ) as mock_classify:
-            event = _event(from_email="alerts@withintelligence-email.com")
-            await hook.on_email(event)
-
-        mock_classify.assert_called_once()
+# --- Internal-only filter ---
 
 
 def _internal_msg(
@@ -431,7 +500,7 @@ class TestIsInternalOnly:
 class TestInternalOnlyFilter:
     @pytest.mark.asyncio
     async def test_all_internal_skips_classification(self):
-        hook, _, _, suggestion_service, loop_service = _make_hook()
+        router, classifier, agent, loop_service = _make_router()
         event = EmailEvent(
             message=_internal_msg(cc_emails=("carol@longridgepartners.com",)),
             coordinator_email="alice@longridgepartners.com",
@@ -439,15 +508,14 @@ class TestInternalOnlyFilter:
             message_type=MessageType.REPLY,
             new_participants=[],
         )
-        with patch("api.classifier.hook.classify_email", new_callable=AsyncMock) as mock_classify:
-            await hook.on_email(event)
-        mock_classify.assert_not_called()
-        suggestion_service.create_suggestion.assert_not_called()
+        await router.on_email(event)
+        classifier.classify.assert_not_called()
+        agent.act.assert_not_called()
         loop_service.find_loops_by_thread.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mixed_participants_classifies(self):
-        hook, _, _, _, loop_service = _make_hook()
+    async def test_mixed_participants_routes_normally(self):
+        router, classifier, _, loop_service = _make_router()
         loop_service.find_loops_by_thread.return_value = []
         msg = _internal_msg(to_emails=("candidate@gmail.com",))
         event = EmailEvent(
@@ -457,17 +525,12 @@ class TestInternalOnlyFilter:
             message_type=MessageType.REPLY,
             new_participants=[],
         )
-        with patch(
-            "api.classifier.hook.classify_email",
-            new_callable=AsyncMock,
-            return_value=_classification_result(),
-        ) as mock_classify:
-            await hook.on_email(event)
-        mock_classify.assert_called_once()
+        await router.on_email(event)
+        classifier.classify.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_internal_only_skips_even_on_linked_thread(self):
-        hook, _, _, suggestion_service, loop_service = _make_hook()
+        router, classifier, agent, loop_service = _make_router()
         event = EmailEvent(
             message=_internal_msg(),
             coordinator_email="alice@longridgepartners.com",
@@ -475,8 +538,7 @@ class TestInternalOnlyFilter:
             message_type=MessageType.REPLY,
             new_participants=[],
         )
-        with patch("api.classifier.hook.classify_email", new_callable=AsyncMock) as mock_classify:
-            await hook.on_email(event)
-        mock_classify.assert_not_called()
-        suggestion_service.create_suggestion.assert_not_called()
+        await router.on_email(event)
+        classifier.classify.assert_not_called()
+        agent.act.assert_not_called()
         loop_service.find_loops_by_thread.assert_not_called()
