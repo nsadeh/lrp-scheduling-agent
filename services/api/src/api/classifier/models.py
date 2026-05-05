@@ -60,15 +60,9 @@ class AdvanceStageData(BaseModel):
 
 
 class DraftEmailData(BaseModel):
-    """Action data for DRAFT_EMAIL — instructions to the drafter agent.
+    """Action data for DRAFT_EMAIL — the agent drafts the email body directly."""
 
-    The drafter only knows tone rules; the directive must encode all the
-    context it needs (candidate availability, client preferences, zoom links,
-    etc.) since action_data no longer carries a separate extracted_entities
-    blob.
-    """
-
-    directive: str
+    body: str
     recipient_type: Literal["client", "recruiter", "internal"]
 
 

@@ -1,8 +1,8 @@
-"""DraftService — generates, persists, and manages AI email drafts.
+"""DraftService — persists and manages email drafts.
 
-Orchestrates the draft lifecycle: LLM generation → persistence → coordinator
-review → send/discard. Recipient routing is deterministic from loop.state
-and centralized in resolve_recipients() for DRY reuse across the codebase.
+Orchestrates the draft lifecycle: persistence → coordinator review →
+send/discard. Recipient routing is deterministic from loop.state and
+centralized in resolve_recipients() for DRY reuse across the codebase.
 """
 
 from __future__ import annotations
@@ -13,41 +13,44 @@ from typing import TYPE_CHECKING
 
 from psycopg.rows import dict_row, tuple_row
 
-from api.classifier.formatters import format_thread_history
-from api.drafts.endpoint import generate_draft_content
-from api.drafts.models import DraftOutput, DraftStatus, EmailDraft, GenerateDraftInput
+from api.drafts.models import DraftStatus, EmailDraft
 from api.drafts.queries import queries
 from api.ids import make_id
 from api.scheduling.models import StageState
 
 if TYPE_CHECKING:
-    from langfuse import Langfuse
     from psycopg_pool import AsyncConnectionPool
 
-    from api.ai.llm_service import LLMService
     from api.classifier.models import Suggestion
     from api.gmail.models import Message
     from api.scheduling.models import Loop
     from api.scheduling.service import LoopService
 
 
-def _is_forward_draft(to_emails: list[str], thread_messages: list[Message] | None) -> bool:
-    """Determine if a draft is a forward by checking if any recipient is new to the thread."""
+def _is_forward_draft(
+    to_emails: list[str],
+    thread_messages: list[Message] | None,
+    trigger_message_id: str | None = None,
+) -> bool:
+    """A draft is a forward when the recipient wasn't on the triggering message."""
     if not thread_messages or not to_emails:
         return False
 
-    seen: set[str] = set()
-    for msg in thread_messages:
-        seen.add(msg.from_.email.lower())
-        for addr in msg.to + msg.cc:
-            seen.add(addr.email.lower())
+    trigger = None
+    if trigger_message_id:
+        trigger = next((m for m in thread_messages if m.id == trigger_message_id), None)
+    if trigger is None:
+        trigger = max(thread_messages, key=lambda m: m.date)
+
+    seen: set[str] = {trigger.from_.email.lower()}
+    for addr in trigger.to + trigger.cc:
+        seen.add(addr.email.lower())
 
     return any(email.lower() not in seen for email in to_emails)
 
 
 logger = logging.getLogger(__name__)
 
-# Maximum generated body length before truncation (scheduling emails are short)
 MAX_BODY_LENGTH = 2000
 
 
@@ -114,23 +117,19 @@ def resolve_recipients(
 
 
 class DraftService:
-    """Generates and manages AI email drafts for scheduling communications."""
+    """Persists and manages email drafts for scheduling communications."""
 
     def __init__(
         self,
         *,
         db_pool: AsyncConnectionPool,
         loop_service: LoopService,
-        llm: LLMService | None = None,
-        langfuse: Langfuse | None = None,
     ):
         self._pool = db_pool
         self._loops = loop_service
-        self._llm = llm
-        self._langfuse = langfuse
 
     # ------------------------------------------------------------------
-    # Draft generation
+    # Draft creation
     # ------------------------------------------------------------------
 
     async def generate_draft(
@@ -139,41 +138,21 @@ class DraftService:
         suggestion: Suggestion,
         loop: Loop,
         thread_messages: list[Message] | None = None,
+        body: str = "",
     ) -> EmailDraft:
-        """Generate and persist an email draft for a DRAFT_EMAIL suggestion.
-
-        On LLM failure, creates a draft with an empty body so the coordinator
-        can compose manually from the sidebar.
-        """
+        """Create and persist an email draft for a DRAFT_EMAIL suggestion."""
         to_emails, cc_emails = resolve_recipients(loop, sender_email=suggestion.coordinator_email)
         subject = self._resolve_subject(loop)
 
-        body = ""
-        if self._llm and self._langfuse:
-            try:
-                llm_input = self._build_input(suggestion, loop, thread_messages)
-                result: DraftOutput = await generate_draft_content(
-                    llm=self._llm,
-                    langfuse=self._langfuse,
-                    data=llm_input,
-                )
-                body = result.body
+        if len(body) > MAX_BODY_LENGTH:
+            logger.warning(
+                "draft body too long (%d chars) for suggestion %s — truncating",
+                len(body),
+                suggestion.id,
+            )
+            body = body[:MAX_BODY_LENGTH] + "\n\n[Draft truncated — please review]"
 
-                if len(body) > MAX_BODY_LENGTH:
-                    logger.warning(
-                        "draft body too long (%d chars) for suggestion %s — truncating",
-                        len(body),
-                        suggestion.id,
-                    )
-                    body = body[:MAX_BODY_LENGTH] + "\n\n[Draft truncated — please review]"
-
-            except Exception:
-                logger.exception(
-                    "draft LLM call failed for suggestion %s — creating empty draft",
-                    suggestion.id,
-                )
-
-        is_forward = _is_forward_draft(to_emails, thread_messages)
+        is_forward = _is_forward_draft(to_emails, thread_messages, suggestion.gmail_message_id)
 
         draft_id = make_id("drf")
         async with self._pool.connection() as conn, conn.transaction():
@@ -275,56 +254,3 @@ class DraftService:
     @staticmethod
     def _resolve_subject(loop: Loop) -> str:
         return f"Re: {loop.title}"
-
-    @staticmethod
-    def _resolve_recipient_name(loop: Loop) -> str:
-        """First name of the recipient based on loop.state."""
-        if loop.state == StageState.NEW:
-            return loop.recruiter.name if loop.recruiter else "Recruiter"
-        return loop.client_contact.name if loop.client_contact else "Client"
-
-    def _build_input(
-        self,
-        suggestion: Suggestion,
-        loop: Loop,
-        thread_messages: list[Message] | None,
-    ) -> GenerateDraftInput:
-        """Construct the drafter LLM input.
-
-        The drafter is a "dumb tool" — the agent provides the directive via
-        action_data["directive"], which encodes all context needed (availability
-        times, phone numbers, zoom links, etc.).
-        """
-        thread_text = "No prior messages in this thread."
-        if thread_messages:
-            thread_text = format_thread_history(
-                thread_messages, current_message_id=suggestion.gmail_message_id
-            )
-
-        from api.classifier.models import DraftEmailData
-
-        directive = suggestion.summary  # fallback
-        if suggestion.action_data:
-            try:
-                draft_data = DraftEmailData.model_validate(suggestion.action_data)
-                directive = draft_data.directive
-            except Exception:
-                logger.warning(
-                    "could not parse action_data as DraftEmailData for suggestion %s, "
-                    "falling back to summary",
-                    suggestion.id,
-                )
-
-        to_emails, _ = resolve_recipients(loop)
-        is_external = any(
-            not email.lower().endswith("@longridgepartners.com") for email in to_emails
-        )
-
-        return GenerateDraftInput(
-            draft_directive=directive,
-            recipient_name=self._resolve_recipient_name(loop),
-            candidate_name=loop.candidate.name if loop.candidate else "Candidate",
-            coordinator_name=loop.coordinator.name if loop.coordinator else "Coordinator",
-            thread_messages=thread_text,
-            is_external=is_external,
-        )

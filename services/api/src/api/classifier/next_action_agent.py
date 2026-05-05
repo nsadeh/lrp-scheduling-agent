@@ -38,6 +38,8 @@ from api.classifier.resolvers import (
 from api.classifier.schemas import NextActionInput
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from arq.connections import ArqRedis
     from langfuse import Langfuse
 
@@ -78,6 +80,25 @@ def _resolve_coordinator_name(event: EmailEvent, coord: Coordinator | None) -> s
             return name
 
     return addr_email.split("@", 1)[0]
+
+
+def _format_per_loop_actors(
+    loops: list[Loop],
+    extract: Callable[[Loop], str | None],
+) -> str:
+    """Format a per-loop actor field.
+
+    Single loop → plain name.  Multiple loops → "- lop_id: Name" per loop.
+    """
+    if not loops:
+        return "Unknown"
+    if len(loops) == 1:
+        return extract(loops[0]) or "Unknown"
+    lines: list[str] = []
+    for lp in loops:
+        name = extract(lp) or "Unknown"
+        lines.append(f"- {lp.id}: {name}")
+    return "\n".join(lines)
 
 
 class NextActionAgent:
@@ -230,14 +251,16 @@ class NextActionAgent:
                 and target_loop is not None
             ):
                 try:
+                    draft_body = item.action_data.get("body", "")
                     await self._draft_service.generate_draft(
                         suggestion=suggestion,
                         loop=target_loop,
                         thread_messages=event.thread_messages,
+                        body=draft_body,
                     )
-                    logger.info("draft generated for suggestion %s", suggestion.id)
+                    logger.info("draft created for suggestion %s", suggestion.id)
                 except Exception:
-                    logger.exception("draft generation failed for suggestion %s", suggestion.id)
+                    logger.exception("draft creation failed for suggestion %s", suggestion.id)
 
     async def _build_context(
         self,
@@ -254,16 +277,38 @@ class NextActionAgent:
 
         coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
         coordinator_name = _resolve_coordinator_name(event, coord)
-        coordinator_str = f"{coordinator_name}<{event.coordinator_email}>"
         date_str = datetime.now(UTC).date().isoformat()
 
         events = []
         if linked_loops:
             events = await self._loops.get_events(linked_loops[0].id)
 
+        candidate_name = _format_per_loop_actors(
+            linked_loops, lambda lp: lp.candidate.name if lp.candidate else None
+        )
+        recruiter_name = _format_per_loop_actors(
+            linked_loops, lambda lp: lp.recruiter.name if lp.recruiter else None
+        )
+
+        # Client/company are shared across loops on a thread — take the first non-null.
+        client_name = "Unknown"
+        client_company = "Unknown"
+        for lp in linked_loops:
+            if lp.client_contact:
+                if lp.client_contact.name:
+                    client_name = lp.client_contact.name
+                if lp.client_contact.company:
+                    client_company = lp.client_contact.company
+                break
+
         return NextActionInput(
-            coordinator=coordinator_str,
+            coordinator_name=coordinator_name,
+            coordinator_email=event.coordinator_email,
             date=date_str,
+            candidate_name=candidate_name,
+            recruiter_name=recruiter_name,
+            client_name=client_name,
+            client_company=client_company,
             direction=event.direction.value,
             email=format_email(msg, event.direction.value, event.message_type.value),
             thread_history=thread_history_text,

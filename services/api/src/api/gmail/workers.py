@@ -71,8 +71,6 @@ async def startup(ctx: dict) -> None:
     draft_service = DraftService(
         db_pool=pool,
         loop_service=loop_service,
-        llm=llm,
-        langfuse=langfuse,
     )
 
     classifier = LoopClassifier(

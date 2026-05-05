@@ -1,12 +1,12 @@
-"""Tests for DraftService — recipient routing, draft generation, lifecycle."""
+"""Tests for DraftService — recipient routing, draft creation, lifecycle."""
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from api.classifier.models import EmailClassification, Suggestion, SuggestionStatus
-from api.drafts.models import DraftOutput, DraftStatus
+from api.drafts.models import DraftStatus
 from api.drafts.service import DraftService, _is_forward_draft, _row_to_draft, resolve_recipients
 from api.gmail.models import EmailAddress, Message
 from api.scheduling.models import (
@@ -91,7 +91,7 @@ def _suggestion(
         confidence=0.95,
         summary="Share availability with client",
         action_data={
-            "directive": "Share John's availability with Haley",
+            "body": "Hi Haley, John is available (in ET): Mon 3/2: 8am-11am.",
             "recipient_type": "client",
         },
         reasoning="Availability response detected",
@@ -165,32 +165,61 @@ class TestResolveRecipients:
 
 
 def _thread_msg(
-    from_email: str, to_emails: list[str], cc_emails: list[str] | None = None
+    from_email: str,
+    to_emails: list[str],
+    cc_emails: list[str] | None = None,
+    msg_id: str = "msg_1",
+    date: datetime | None = None,
 ) -> Message:
     return Message(
-        id="msg_1",
+        id=msg_id,
         thread_id="thread_1",
         subject="Interview",
         **{"from": EmailAddress(email=from_email)},
         to=[EmailAddress(email=e) for e in to_emails],
         cc=[EmailAddress(email=e) for e in (cc_emails or [])],
-        date=datetime(2026, 4, 15, tzinfo=UTC),
+        date=date or datetime(2026, 4, 15, tzinfo=UTC),
         body_text="test",
     )
 
 
 class TestIsForwardDraft:
     def test_new_recipient_is_forward(self):
-        prior = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
-        assert _is_forward_draft(["bob@b.com"], prior) is True
+        msgs = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        assert _is_forward_draft(["bob@b.com"], msgs) is True
 
     def test_existing_recipient_is_not_forward(self):
-        prior = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
-        assert _is_forward_draft(["alice@a.com"], prior) is False
+        msgs = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        assert _is_forward_draft(["alice@a.com"], msgs) is False
 
     def test_no_thread_messages_is_not_forward(self):
         assert _is_forward_draft(["anyone@a.com"], None) is False
         assert _is_forward_draft(["anyone@a.com"], []) is False
+
+    def test_only_checks_trigger_message(self):
+        """Recipient on an earlier message but NOT on the trigger → forward."""
+        old = _thread_msg(
+            "bob@b.com",
+            ["coord@lrp.com"],
+            msg_id="msg_old",
+            date=datetime(2026, 4, 14, tzinfo=UTC),
+        )
+        trigger = _thread_msg(
+            "alice@a.com",
+            ["coord@lrp.com"],
+            msg_id="msg_new",
+            date=datetime(2026, 4, 15, tzinfo=UTC),
+        )
+        assert _is_forward_draft(["bob@b.com"], [old, trigger], "msg_new") is True
+
+    def test_recipient_on_trigger_is_not_forward(self):
+        """Recipient on the trigger message → not a forward."""
+        trigger = _thread_msg(
+            "alice@a.com",
+            ["bob@b.com", "coord@lrp.com"],
+            msg_id="msg_new",
+        )
+        assert _is_forward_draft(["bob@b.com"], [trigger], "msg_new") is False
 
 
 class _AsyncCtx:
@@ -214,84 +243,36 @@ def _mock_pool():
 
 class TestGenerateDraft:
     @pytest.mark.asyncio
-    async def test_happy_path(self):
+    async def test_body_persisted(self):
         mock_pool, _ = _mock_pool()
-
-        svc = DraftService(
-            db_pool=mock_pool,
-            loop_service=MagicMock(),
-            llm=MagicMock(),
-            langfuse=MagicMock(),
-        )
+        svc = DraftService(db_pool=mock_pool, loop_service=MagicMock())
 
         loop = _loop(state=StageState.AWAITING_CANDIDATE)
         suggestion = _suggestion()
+        body = "Hi Haley, John is available (in ET): Mon 3/2: 8am-11am."
 
-        draft_output = DraftOutput(
-            body="Hi Haley, John is available (in ET): Mon 3/2: 8am-11am.",
-            reasoning="Sharing availability with client",
-        )
+        from unittest.mock import patch
 
-        with (
-            patch(
-                "api.drafts.service.generate_draft_content",
-                new_callable=AsyncMock,
-                return_value=draft_output,
-            ),
-            patch("api.drafts.service.queries") as mock_queries,
-        ):
-            mock_queries.create_draft = AsyncMock(return_value=_draft_row(body=draft_output.body))
-
-            draft = await svc.generate_draft(suggestion=suggestion, loop=loop)
-            assert draft.body == draft_output.body
+        with patch("api.drafts.service.queries") as mock_queries:
+            mock_queries.create_draft = AsyncMock(return_value=_draft_row(body=body))
+            draft = await svc.generate_draft(suggestion=suggestion, loop=loop, body=body)
+            assert draft.body == body
             assert draft.to_emails == ["haley@client.com"]
             mock_queries.create_draft.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_llm_failure_creates_empty_draft(self):
+    async def test_empty_body_creates_draft(self):
         mock_pool, _ = _mock_pool()
-
-        svc = DraftService(
-            db_pool=mock_pool,
-            loop_service=MagicMock(),
-            llm=MagicMock(),
-            langfuse=MagicMock(),
-        )
+        svc = DraftService(db_pool=mock_pool, loop_service=MagicMock())
 
         loop = _loop(state=StageState.AWAITING_CANDIDATE)
         suggestion = _suggestion()
 
-        with (
-            patch(
-                "api.drafts.service.generate_draft_content",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("LLM timeout"),
-            ),
-            patch("api.drafts.service.queries") as mock_queries,
-        ):
-            mock_queries.create_draft = AsyncMock(return_value=_draft_row(body=""))
-
-            draft = await svc.generate_draft(suggestion=suggestion, loop=loop)
-            assert draft.body == ""
-
-    @pytest.mark.asyncio
-    async def test_no_llm_creates_empty_draft(self):
-        mock_pool, _ = _mock_pool()
-
-        svc = DraftService(
-            db_pool=mock_pool,
-            loop_service=MagicMock(),
-            llm=None,
-            langfuse=None,
-        )
-
-        loop = _loop(state=StageState.AWAITING_CANDIDATE)
-        suggestion = _suggestion()
+        from unittest.mock import patch
 
         with patch("api.drafts.service.queries") as mock_queries:
             mock_queries.create_draft = AsyncMock(return_value=_draft_row(body=""))
-
-            draft = await svc.generate_draft(suggestion=suggestion, loop=loop)
+            draft = await svc.generate_draft(suggestion=suggestion, loop=loop, body="")
             assert draft.body == ""
 
 
@@ -300,6 +281,8 @@ class TestDraftLifecycle:
     async def test_mark_sent(self):
         mock_pool, mock_conn = _mock_pool()
         svc = DraftService(db_pool=mock_pool, loop_service=MagicMock())
+
+        from unittest.mock import patch
 
         with patch("api.drafts.service.queries") as mock_queries:
             mock_queries.mark_draft_sent = AsyncMock()
@@ -310,6 +293,8 @@ class TestDraftLifecycle:
     async def test_update_draft_body(self):
         mock_pool, mock_conn = _mock_pool()
         svc = DraftService(db_pool=mock_pool, loop_service=MagicMock())
+
+        from unittest.mock import patch
 
         with patch("api.drafts.service.queries") as mock_queries:
             mock_queries.update_draft_body = AsyncMock()

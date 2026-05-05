@@ -122,7 +122,7 @@ class TestDraftSuggestionBuilder:
             action=SuggestedAction.DRAFT_EMAIL,
             summary="Share availability with ACME",
             draft=_draft(),
-            action_data={"directive": "Share availability", "recipient_type": "client"},
+            action_data={"body": "Share availability", "recipient_type": "client"},
         )
         widgets = _build_draft_suggestion(view)
         assert len(widgets) >= 6
@@ -133,7 +133,7 @@ class TestDraftSuggestionBuilder:
         view = _view(
             action=SuggestedAction.DRAFT_EMAIL,
             summary="Share availability",
-            action_data={"directive": "Share availability", "recipient_type": "client"},
+            action_data={"body": "Share availability", "recipient_type": "client"},
         )
         widgets = _build_draft_suggestion(view)
         text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])

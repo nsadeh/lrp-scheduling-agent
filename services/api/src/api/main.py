@@ -72,8 +72,6 @@ async def lifespan(app: FastAPI):
     draft_service = DraftService(
         db_pool=pool,
         loop_service=app.state.scheduling,
-        llm=llm_service,
-        langfuse=langfuse,
     )
     app.state.draft_service = draft_service
     logger.info("DraftService initialized")

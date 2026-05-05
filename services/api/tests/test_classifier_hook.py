@@ -97,7 +97,7 @@ def _suggestion_item(
         if action == SuggestedAction.ADVANCE_STAGE:
             action_data = {"target_stage": target_stage.value}
         elif action == SuggestedAction.DRAFT_EMAIL:
-            action_data = {"directive": "Draft something", "recipient_type": "recruiter"}
+            action_data = {"body": "Draft something", "recipient_type": "recruiter"}
         elif action == SuggestedAction.ASK_COORDINATOR:
             action_data = {"question": "What should I do?"}
         else:

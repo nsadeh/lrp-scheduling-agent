@@ -1,8 +1,6 @@
-"""Models for AI-generated email drafts.
+"""Models for email drafts.
 
-Two families:
-- LLM I/O: GenerateDraftInput (template vars) and DraftOutput (LLM response)
-- Database: EmailDraft (email_drafts row) and DraftStatus enum
+EmailDraft (email_drafts row) and DraftStatus enum.
 """
 
 from __future__ import annotations
@@ -48,31 +46,3 @@ class EmailDraft(BaseModel):
     sent_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
-
-
-# ---------------------------------------------------------------------------
-# LLM I/O models
-# ---------------------------------------------------------------------------
-
-
-class GenerateDraftInput(BaseModel):
-    """Template variables for the draft-email-v1 LangFuse prompt.
-
-    The drafter is a "dumb tool" — it doesn't understand the scheduling state
-    machine. The classifier (the agent brain) provides a tight directive of what
-    to draft. The drafter just follows tone instructions and the directive.
-    """
-
-    draft_directive: str  # From classifier summary, e.g. "Share candidate availability with client"
-    recipient_name: str  # First name of the person being emailed
-    candidate_name: str
-    coordinator_name: str  # For the sign-off
-    thread_messages: str  # Formatted list of recent emails for reply context
-    is_external: bool  # True when recipient is outside @longridgepartners.com
-
-
-class DraftOutput(BaseModel):
-    """LLM output — the generated email body."""
-
-    body: str
-    reasoning: str  # Why this content was chosen (for debugging/eval, not shown to user)
