@@ -230,14 +230,16 @@ class NextActionAgent:
                 and target_loop is not None
             ):
                 try:
+                    draft_body = item.action_data.get("body", "")
                     await self._draft_service.generate_draft(
                         suggestion=suggestion,
                         loop=target_loop,
                         thread_messages=event.thread_messages,
+                        body=draft_body,
                     )
-                    logger.info("draft generated for suggestion %s", suggestion.id)
+                    logger.info("draft created for suggestion %s", suggestion.id)
                 except Exception:
-                    logger.exception("draft generation failed for suggestion %s", suggestion.id)
+                    logger.exception("draft creation failed for suggestion %s", suggestion.id)
 
     async def _build_context(
         self,
@@ -261,9 +263,25 @@ class NextActionAgent:
         if linked_loops:
             events = await self._loops.get_events(linked_loops[0].id)
 
+        primary = linked_loops[0] if linked_loops else None
+        candidate_name = primary.candidate.name if primary and primary.candidate else "Unknown"
+        recruiter_name = primary.recruiter.name if primary and primary.recruiter else "Unknown"
+        client_name = (
+            primary.client_contact.name if primary and primary.client_contact else "Unknown"
+        )
+        client_company = (
+            primary.client_contact.company
+            if primary and primary.client_contact and primary.client_contact.company
+            else "Unknown"
+        )
+
         return NextActionInput(
             coordinator=coordinator_str,
             date=date_str,
+            candidate_name=candidate_name,
+            recruiter_name=recruiter_name,
+            client_name=client_name,
+            client_company=client_company,
             direction=event.direction.value,
             email=format_email(msg, event.direction.value, event.message_type.value),
             thread_history=thread_history_text,

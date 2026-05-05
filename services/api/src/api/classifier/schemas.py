@@ -32,6 +32,10 @@ class NextActionInput(BaseModel):
 
     coordinator: str
     date: str
+    candidate_name: str
+    recruiter_name: str
+    client_name: str
+    client_company: str
     direction: str
     email: str
     thread_history: str
