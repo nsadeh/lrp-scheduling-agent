@@ -38,6 +38,8 @@ from api.classifier.resolvers import (
 from api.classifier.schemas import NextActionInput
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from arq.connections import ArqRedis
     from langfuse import Langfuse
 
@@ -78,6 +80,25 @@ def _resolve_coordinator_name(event: EmailEvent, coord: Coordinator | None) -> s
             return name
 
     return addr_email.split("@", 1)[0]
+
+
+def _format_per_loop_actors(
+    loops: list[Loop],
+    extract: Callable[[Loop], str | None],
+) -> str:
+    """Format a per-loop actor field.
+
+    Single loop → plain name.  Multiple loops → "- lop_id: Name" per loop.
+    """
+    if not loops:
+        return "Unknown"
+    if len(loops) == 1:
+        return extract(loops[0]) or "Unknown"
+    lines: list[str] = []
+    for lp in loops:
+        name = extract(lp) or "Unknown"
+        lines.append(f"- {lp.id}: {name}")
+    return "\n".join(lines)
 
 
 class NextActionAgent:
@@ -262,17 +283,23 @@ class NextActionAgent:
         if linked_loops:
             events = await self._loops.get_events(linked_loops[0].id)
 
-        primary = linked_loops[0] if linked_loops else None
-        candidate_name = primary.candidate.name if primary and primary.candidate else "Unknown"
-        recruiter_name = primary.recruiter.name if primary and primary.recruiter else "Unknown"
-        client_name = (
-            primary.client_contact.name if primary and primary.client_contact else "Unknown"
+        candidate_name = _format_per_loop_actors(
+            linked_loops, lambda lp: lp.candidate.name if lp.candidate else None
         )
-        client_company = (
-            primary.client_contact.company
-            if primary and primary.client_contact and primary.client_contact.company
-            else "Unknown"
+        recruiter_name = _format_per_loop_actors(
+            linked_loops, lambda lp: lp.recruiter.name if lp.recruiter else None
         )
+
+        # Client/company are shared across loops on a thread — take the first non-null.
+        client_name = "Unknown"
+        client_company = "Unknown"
+        for lp in linked_loops:
+            if lp.client_contact:
+                if lp.client_contact.name:
+                    client_name = lp.client_contact.name
+                if lp.client_contact.company:
+                    client_company = lp.client_contact.company
+                break
 
         return NextActionInput(
             coordinator_name=coordinator_name,
