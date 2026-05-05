@@ -30,7 +30,8 @@ class NextActionInput(BaseModel):
     Used for emails (inbound or outgoing) on threads already linked to a loop.
     """
 
-    coordinator: str
+    coordinator_name: str
+    coordinator_email: str
     date: str
     candidate_name: str
     recruiter_name: str

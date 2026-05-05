@@ -256,7 +256,6 @@ class NextActionAgent:
 
         coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
         coordinator_name = _resolve_coordinator_name(event, coord)
-        coordinator_str = f"{coordinator_name}<{event.coordinator_email}>"
         date_str = datetime.now(UTC).date().isoformat()
 
         events = []
@@ -276,7 +275,8 @@ class NextActionAgent:
         )
 
         return NextActionInput(
-            coordinator=coordinator_str,
+            coordinator_name=coordinator_name,
+            coordinator_email=event.coordinator_email,
             date=date_str,
             candidate_name=candidate_name,
             recruiter_name=recruiter_name,
