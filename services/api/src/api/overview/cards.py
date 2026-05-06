@@ -623,6 +623,10 @@ def _build_candidate_rename(group: LoopSuggestionGroup) -> list[Widget]:
 # ---------------------------------------------------------------------------
 
 
+_MAX_SUGGESTIONS_PER_GROUP = 5
+_MAX_TOTAL_SUGGESTIONS = 15
+
+
 def build_overview(
     groups: list[LoopSuggestionGroup],
     base_url: str | None = None,
@@ -631,6 +635,9 @@ def build_overview(
 
     Each loop group becomes a Section. Standalone suggestions (no loop)
     are rendered in a headerless section at the top.
+
+    Google enforces a 28KB response size limit on card JSON, so we cap
+    the number of rendered suggestions per group and globally.
     """
     sections: list[Section] = []
     header_section = _overview_header_buttons(base_url)
@@ -648,6 +655,8 @@ def build_overview(
         )
         return _update_card(Card(sections=sections))
 
+    total_rendered = 0
+
     for group in groups:
         # Build all widgets for suggestions in this group
         group_widgets: list[Widget] = []
@@ -659,10 +668,25 @@ def build_overview(
             group_widgets.extend(rename_widgets)
             group_widgets.append(_divider())
 
+        group_rendered = 0
+        group_total = len(group.suggestions)
+
         for i, view in enumerate(group.suggestions):
+            if group_rendered >= _MAX_SUGGESTIONS_PER_GROUP:
+                break
+            if total_rendered >= _MAX_TOTAL_SUGGESTIONS:
+                break
             if i > 0:
                 group_widgets.append(_divider())
             group_widgets.extend(_build_suggestion_widgets(view))
+            group_rendered += 1
+            total_rendered += 1
+
+        hidden = group_total - group_rendered
+        if hidden > 0:
+            msg = f"{hidden} more — dismiss above to see more."
+            group_widgets.append(_divider())
+            group_widgets.append(_text(f'<font color="#888888"><i>{msg}</i></font>'))
 
         # Section header: loop title or "Unassigned" for loop-less
         header = None
@@ -673,8 +697,15 @@ def build_overview(
             parts = [p for p in [group.candidate_name, group.client_company] if p]
             header = ", ".join(parts) if parts else f"Loop {group.loop_id[:8]}"
 
-        # Add "Open in Gmail" link if the loop has threads (first thread)
-        # This is added as a small button in the section
         sections.append(Section(header=header, widgets=group_widgets))
+
+        if total_rendered >= _MAX_TOTAL_SUGGESTIONS:
+            remaining_groups = len(groups) - (groups.index(group) + 1)
+            if remaining_groups > 0:
+                msg = f"{remaining_groups} more loop(s) not shown — dismiss above to see more."
+                sections.append(
+                    Section(widgets=[_text(f'<font color="#888888"><i>{msg}</i></font>')])
+                )
+            break
 
     return _update_card(Card(sections=sections))
