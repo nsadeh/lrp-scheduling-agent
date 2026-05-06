@@ -43,3 +43,4 @@ class NextActionInput(BaseModel):
     loop_state: str
     events: str
     error: str
+    pending_suggestions: str = "No current pending suggestions."

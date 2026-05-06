@@ -11,6 +11,7 @@ CREATE_LOOP and LINK_THREAD are blacklisted to prevent recursion.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ from api.classifier.formatters import (
     format_email,
     format_events,
     format_linked_loops,
+    format_pending_suggestions,
     format_thread_history,
 )
 from api.classifier.models import (
@@ -44,6 +46,7 @@ if TYPE_CHECKING:
     from langfuse import Langfuse
 
     from api.ai.llm_service import LLMService
+    from api.classifier.models import Suggestion
     from api.classifier.service import SuggestionService
     from api.drafts.service import DraftService
     from api.gmail.hooks import EmailEvent
@@ -80,6 +83,11 @@ def _resolve_coordinator_name(event: EmailEvent, coord: Coordinator | None) -> s
             return name
 
     return addr_email.split("@", 1)[0]
+
+
+def _suggestion_fingerprint(loop_id: str | None, action: str, action_data: dict) -> str:
+    """Canonical fingerprint for deduplication: loop_id + action + normalized action_data."""
+    return f"{loop_id or ''}|{action}|{json.dumps(action_data, sort_keys=True, default=str)}"
 
 
 def _format_per_loop_actors(
@@ -129,7 +137,9 @@ class NextActionAgent:
     ) -> None:
         msg = event.message
 
-        context_input = await self._build_context(event, linked_loops, event.thread_messages)
+        context_input, existing_pending = await self._build_context(
+            event, linked_loops, event.thread_messages
+        )
 
         try:
             result: ClassificationResult = await determine_next_action(
@@ -215,14 +225,29 @@ class NextActionAgent:
                 if not error:
                     valid_items.append((item, target_loop))
 
+        seen_fingerprints: set[str] = {
+            _suggestion_fingerprint(s.loop_id, s.action, s.action_data) for s in existing_pending
+        }
+
         for item, target_loop in valid_items:
+            loop_id = target_loop.id if target_loop else None
+            fp = _suggestion_fingerprint(loop_id, item.action, item.action_data)
+            if fp in seen_fingerprints:
+                logger.info(
+                    "dedup: skipping duplicate suggestion (action=%s, loop_id=%s)",
+                    item.action,
+                    loop_id,
+                )
+                continue
+            seen_fingerprints.add(fp)
+
             suggestion = await self._suggestions.create_suggestion(
                 coordinator_email=event.coordinator_email,
                 gmail_message_id=msg.id,
                 gmail_thread_id=msg.thread_id,
                 item=item,
                 reasoning=result.reasoning,
-                loop_id=target_loop.id if target_loop else None,
+                loop_id=loop_id,
             )
 
             logger.info(
@@ -267,7 +292,7 @@ class NextActionAgent:
         event: EmailEvent,
         linked_loops: list[Loop],
         thread_messages: list[Message] | None = None,
-    ) -> NextActionInput:
+    ) -> tuple[NextActionInput, list[Suggestion]]:
         msg = event.message
 
         if thread_messages:
@@ -301,6 +326,10 @@ class NextActionAgent:
                     client_company = lp.client_contact.company
                 break
 
+        all_pending: list[Suggestion] = []
+        for lp in linked_loops:
+            all_pending.extend(await self._suggestions.get_pending_for_loop(lp.id))
+
         return NextActionInput(
             coordinator_name=coordinator_name,
             coordinator_email=event.coordinator_email,
@@ -315,7 +344,8 @@ class NextActionAgent:
             loop_state=format_linked_loops(linked_loops),
             events=format_events(events),
             error="N/A",
-        )
+            pending_suggestions=format_pending_suggestions(all_pending),
+        ), all_pending
 
     def _resolve_target_loop(
         self,
