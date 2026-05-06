@@ -10,7 +10,10 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
+from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
+
+from api.gmail.exceptions import GmailTokenStaleError
 
 if TYPE_CHECKING:
     from google.oauth2.credentials import Credentials
@@ -39,4 +42,7 @@ async def execute(credentials: Credentials, fn, *, op_name: str = "gmail") -> An
     distinct messages.get vs messages.send vs history.list calls.
     """
     with sentry_sdk.start_span(op="http.client", name=f"gmail:{op_name}"):
-        return await asyncio.to_thread(_execute_sync, credentials, fn)
+        try:
+            return await asyncio.to_thread(_execute_sync, credentials, fn)
+        except RefreshError as exc:
+            raise GmailTokenStaleError(f"Gmail token refresh failed: {exc}") from exc

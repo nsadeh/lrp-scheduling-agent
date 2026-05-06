@@ -25,6 +25,13 @@ class GmailRateLimitError(GmailApiError):
     """Gmail API quota exceeded."""
 
 
+class GmailTokenStaleError(GmailAuthError):
+    """Refresh token is revoked/expired — token has been marked stale in the DB.
+
+    The user must re-authenticate via the OAuth flow to clear this state.
+    """
+
+
 class GmailScopeError(GmailAuthError):
     """Stored token is missing required OAuth scopes — user must re-authorize."""
 
