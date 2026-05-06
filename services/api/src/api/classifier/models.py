@@ -122,7 +122,7 @@ class SuggestionItem(BaseModel):
     action: SuggestedAction
     confidence: float = Field(ge=0.0, le=1.0)
     summary: str
-    reasoning: str
+    reasoning: str = ""
     target_loop_id: str | None = None
     action_data: dict[str, Any] = {}
 
@@ -131,7 +131,7 @@ class ClassificationResult(BaseModel):
     """LLM output schema — one or more suggestions per email."""
 
     suggestions: list[SuggestionItem]
-    reasoning: str
+    reasoning: str = ""
 
 
 # -- Database model --
