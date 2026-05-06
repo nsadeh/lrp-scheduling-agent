@@ -14,6 +14,7 @@ from api.gmail.exceptions import (
     GmailTokenStaleError,
     GmailUserNotAuthorizedError,
 )
+from api.gmail.queries import token_queries
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -31,8 +32,6 @@ _DEFAULT_SCOPES = ",".join(
 )
 SCOPES = os.environ.get("REQUIRED_SCOPES", _DEFAULT_SCOPES).split(",")
 TOKEN_URI = "https://oauth2.googleapis.com/token"
-
-_LOAD_SQL = "SELECT refresh_token_encrypted, scopes, is_stale FROM gmail_tokens WHERE user_email = %(email)s"  # noqa: E501
 
 
 class TokenStore:
@@ -59,17 +58,11 @@ class TokenStore:
         """Encrypt and upsert a refresh token for a user."""
         encrypted = self._encrypt(refresh_token)
         async with self._pool.connection() as conn:
-            await conn.execute(
-                """
-                INSERT INTO gmail_tokens (user_email, refresh_token_encrypted, scopes, updated_at)
-                VALUES (%(user_email)s, %(token)s, %(scopes)s, now())
-                ON CONFLICT (user_email) DO UPDATE SET
-                    refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-                    scopes = EXCLUDED.scopes,
-                    is_stale = false,
-                    updated_at = now()
-                """,
-                {"user_email": user_email, "token": encrypted, "scopes": scopes},
+            await token_queries.store_token(
+                conn,
+                user_email=user_email,
+                refresh_token_encrypted=encrypted,
+                scopes=scopes,
             )
 
     async def load_credentials(self, user_email: str) -> Credentials:
@@ -79,8 +72,7 @@ class TokenStore:
         GmailScopeError if re-authorization is needed.
         """
         async with self._pool.connection() as conn:
-            cur = await conn.execute(_LOAD_SQL, {"email": user_email})
-            row = await cur.fetchone()
+            row = await token_queries.load_token(conn, user_email=user_email)
 
         if row is None:
             raise GmailUserNotAuthorizedError(
@@ -114,41 +106,23 @@ class TokenStore:
     async def mark_stale(self, user_email: str) -> None:
         """Flag a token as stale after a RefreshError — stops further attempts."""
         async with self._pool.connection() as conn:
-            await conn.execute(
-                """
-                UPDATE gmail_tokens SET is_stale = true, updated_at = now()
-                WHERE user_email = %(email)s
-                """,
-                {"email": user_email},
-            )
+            await token_queries.mark_stale(conn, user_email=user_email)
 
     async def is_token_stale(self, user_email: str) -> bool:
         """Check if a user's token is marked stale."""
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT is_stale FROM gmail_tokens WHERE user_email = %(email)s",
-                {"email": user_email},
-            )
-            row = await cur.fetchone()
-            return bool(row[0]) if row else False
+            result = await token_queries.is_token_stale(conn, user_email=user_email)
+            return bool(result)
 
     async def delete_token(self, user_email: str) -> None:
         """Remove a user's stored token."""
         async with self._pool.connection() as conn:
-            await conn.execute(
-                "DELETE FROM gmail_tokens WHERE user_email = %(email)s",
-                {"email": user_email},
-            )
+            await token_queries.delete_token(conn, user_email=user_email)
 
     async def has_token(self, user_email: str) -> bool:
         """Check if a user has stored credentials."""
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT EXISTS(SELECT 1 FROM gmail_tokens WHERE user_email = %(email)s)",
-                {"email": user_email},
-            )
-            row = await cur.fetchone()
-            return row[0] if row else False
+            return await token_queries.has_token(conn, user_email=user_email)
 
     # --- Push pipeline state ---
 
@@ -197,6 +171,5 @@ class TokenStore:
     async def get_all_watched_emails(self) -> list[str]:
         """List all coordinator emails with valid (non-stale) stored tokens."""
         async with self._pool.connection() as conn:
-            cur = await conn.execute("SELECT user_email FROM gmail_tokens WHERE NOT is_stale")
-            rows = await cur.fetchall()
+            rows = await token_queries.get_all_watched_emails(conn)
             return [row[0] for row in rows]
