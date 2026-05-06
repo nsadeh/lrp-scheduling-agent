@@ -240,6 +240,49 @@ class TestRefresh:
         assert "window.close()" in resp.text
 
 
+class TestNormalizeGmailId:
+    """Unit tests for _normalize_gmail_id — the contextual-trigger ID normalizer."""
+
+    def test_none_returns_none(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        assert _normalize_gmail_id(None) is None
+
+    def test_empty_string_returns_none(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        assert _normalize_gmail_id("") is None
+
+    def test_thread_f_decimal_converted_to_hex(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        result = _normalize_gmail_id("thread-f:1864465495488333224")
+        assert result == hex(1864465495488333224)[2:]
+
+    def test_msg_f_decimal_converted_to_hex(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        result = _normalize_gmail_id("msg-f:1864465495488333224")
+        assert result == hex(1864465495488333224)[2:]
+
+    def test_compound_pipe_separated_uses_first_segment(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        raw = "thread-f:1864465495488333224|msg-f:1864465495488333224"
+        result = _normalize_gmail_id(raw)
+        assert result == hex(1864465495488333224)[2:]
+
+    def test_already_hex_returned_as_is(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        assert _normalize_gmail_id("19dfda858c78f74e") == "19dfda858c78f74e"
+
+    def test_unknown_format_returned_as_is(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        assert _normalize_gmail_id("some-other-format") == "some-other-format"
+
+
 class TestStaticFiles:
     async def test_logo_served(self, client: AsyncClient):
         resp = await client.get("/static/logo.png")
