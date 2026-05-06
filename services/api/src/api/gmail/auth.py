@@ -171,5 +171,4 @@ class TokenStore:
     async def get_all_watched_emails(self) -> list[str]:
         """List all coordinator emails with valid (non-stale) stored tokens."""
         async with self._pool.connection() as conn:
-            rows = await token_queries.get_all_watched_emails(conn)
-            return [row[0] for row in rows]
+            return [row[0] async for row in token_queries.get_all_watched_emails(conn)]
