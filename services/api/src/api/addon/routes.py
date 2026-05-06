@@ -7,7 +7,6 @@ Token verification is applied at the router level via Depends().
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -404,14 +403,10 @@ async def addon_homepage(body: AddonRequest, request: Request) -> dict:
 
     auth_card = await _check_gmail_auth(request, email)
     if auth_card:
-        result = _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
-        logger.info("Homepage response (auth): %s", json.dumps(result))
-        return result
+        return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
     card = await _build_refreshed_overview(request, email)
-    result = _as_push(card).model_dump(by_alias=True, exclude_none=True)
-    logger.info("Homepage response: %s", json.dumps(result))
-    return result
+    return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
 
 @addon_router.post("/on-message")
@@ -424,9 +419,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     auth_card = await _check_gmail_auth(request, email)
     if auth_card:
         logger.info("on-message: returning auth-required card for %s", email)
-        result = _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
-        logger.info("on-message response (auth): %s", json.dumps(result))
-        return result
+        return _as_push(auth_card).model_dump(by_alias=True, exclude_none=True)
 
     thread_id = None
     message_id = None
@@ -444,9 +437,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
     if not thread_id:
         # No thread context — show full overview
         card = await _build_refreshed_overview(request, email)
-        result = _as_push(card).model_dump(by_alias=True, exclude_none=True)
-        logger.info("on-message response (no thread): %s", json.dumps(result))
-        return result
+        return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
     # Show suggestions filtered to this thread
     overview_svc = _get_overview_service(request)
@@ -479,9 +470,7 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
         else:
             card = build_contextual_unlinked(thread_id, message_id=message_id)
 
-    result = _as_push(card).model_dump(by_alias=True, exclude_none=True)
-    logger.info("on-message response: %s", json.dumps(result))
-    return result
+    return _as_push(card).model_dump(by_alias=True, exclude_none=True)
 
 
 @addon_router.post("/action")
