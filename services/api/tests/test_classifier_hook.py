@@ -10,7 +10,9 @@ from api.classifier.models import (
     ClassificationResult,
     EmailClassification,
     SuggestedAction,
+    Suggestion,
     SuggestionItem,
+    SuggestionStatus,
 )
 from api.classifier.next_action_agent import NextActionAgent
 from api.classifier.router import EmailRouter, _is_internal_only
@@ -166,6 +168,7 @@ def _make_agent():
     langfuse = MagicMock()
     suggestion_service = MagicMock()
     suggestion_service.create_suggestion = AsyncMock(return_value=MagicMock(id="sug_test"))
+    suggestion_service.get_pending_for_loop = AsyncMock(return_value=[])
 
     loop_service = MagicMock()
     loop_service.get_coordinator_by_email = AsyncMock(return_value=None)
@@ -542,3 +545,104 @@ class TestInternalOnlyFilter:
         classifier.classify.assert_not_called()
         agent.act.assert_not_called()
         loop_service.find_loops_by_thread.assert_not_called()
+
+
+# --- Deduplication ---
+
+
+def _pending_suggestion(
+    loop_id="lop_1",
+    action=SuggestedAction.ADVANCE_STAGE,
+    action_data=None,
+) -> Suggestion:
+    if action_data is None:
+        action_data = {"target_stage": "awaiting_client"}
+    return Suggestion(
+        id="sug_existing",
+        coordinator_email="coord@lrp.com",
+        gmail_message_id="msg0",
+        gmail_thread_id="thread1",
+        loop_id=loop_id,
+        classification=EmailClassification.AVAILABILITY_RESPONSE,
+        action=action,
+        confidence=0.9,
+        summary="Existing suggestion",
+        action_data=action_data,
+        status=SuggestionStatus.PENDING,
+    )
+
+
+class TestDeduplication:
+    @pytest.mark.asyncio
+    async def test_duplicate_of_existing_pending_is_skipped(self):
+        agent, suggestion_service = _make_agent()
+        existing = _pending_suggestion(
+            action=SuggestedAction.ADVANCE_STAGE,
+            action_data={"target_stage": "awaiting_client"},
+        )
+        suggestion_service.get_pending_for_loop.return_value = [existing]
+
+        result = _classification_result(
+            items=[
+                _suggestion_item(
+                    action=SuggestedAction.ADVANCE_STAGE,
+                    target_stage=StageState.AWAITING_CLIENT,
+                )
+            ]
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.determine_next_action",
+            new_callable=AsyncMock,
+            return_value=result,
+        ):
+            await agent.act(_event(), [_loop()])
+
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_same_batch_duplicate_only_creates_first(self):
+        agent, suggestion_service = _make_agent()
+
+        item = _suggestion_item(
+            action=SuggestedAction.DRAFT_EMAIL,
+            action_data={"body": "Hi there", "recipient_type": "recruiter"},
+        )
+        result = _classification_result(items=[item, item])
+
+        with patch(
+            "api.classifier.next_action_agent.determine_next_action",
+            new_callable=AsyncMock,
+            return_value=result,
+        ):
+            await agent.act(_event(), [_loop()])
+
+        assert suggestion_service.create_suggestion.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_action_data_not_deduplicated(self):
+        agent, suggestion_service = _make_agent()
+        existing = _pending_suggestion(
+            action=SuggestedAction.ADVANCE_STAGE,
+            action_data={"target_stage": "awaiting_client"},
+        )
+        suggestion_service.get_pending_for_loop.return_value = [existing]
+
+        result = _classification_result(
+            items=[
+                _suggestion_item(
+                    action=SuggestedAction.ADVANCE_STAGE,
+                    target_stage=StageState.SCHEDULED,
+                    action_data={"target_stage": "scheduled"},
+                )
+            ]
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.determine_next_action",
+            new_callable=AsyncMock,
+            return_value=result,
+        ):
+            await agent.act(_event(), [_loop()])
+
+        suggestion_service.create_suggestion.assert_called_once()

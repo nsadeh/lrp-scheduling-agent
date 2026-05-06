@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from api.classifier.models import Suggestion
     from api.gmail.models import Message
     from api.scheduling.models import Loop, LoopEvent
 
@@ -179,3 +180,35 @@ def format_stage_states() -> str:
     for state in StageState:
         lines.append(f"  - {state.value}: {NEXT_ACTIONS[state]}")
     return "\n".join(lines)
+
+
+def format_pending_suggestions(suggestions: list[Suggestion]) -> str:
+    """Format pending suggestions so the LLM can see what's already queued."""
+    if not suggestions:
+        return "No current pending suggestions."
+
+    lines = ["Pending suggestions awaiting coordinator review:"]
+    for sug in suggestions:
+        line = f"  - [{sug.loop_id}] {sug.action}"
+        if sug.summary:
+            line += f": {sug.summary}"
+        if sug.action_data:
+            highlights = _action_data_highlights(sug.action, sug.action_data)
+            if highlights:
+                line += f" ({highlights})"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _action_data_highlights(action: str, action_data: dict) -> str:
+    if action == "advance_stage":
+        return f"target_stage={action_data.get('target_stage', '?')}"
+    elif action == "draft_email":
+        recipient = action_data.get("recipient_type", "?")
+        return f"to={recipient}"
+    elif action == "ask_coordinator":
+        q = action_data.get("question", "")
+        preview = q[:80] + ("..." if len(q) > 80 else "")
+        return f'question="{preview}"'
+    return ""

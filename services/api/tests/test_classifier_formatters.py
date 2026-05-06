@@ -7,8 +7,15 @@ from api.classifier.formatters import (
     format_email,
     format_events,
     format_loop_state,
+    format_pending_suggestions,
     format_stage_states,
     format_thread_history,
+)
+from api.classifier.models import (
+    EmailClassification,
+    SuggestedAction,
+    Suggestion,
+    SuggestionStatus,
 )
 from api.gmail.models import EmailAddress, Message
 from api.scheduling.models import (
@@ -173,3 +180,62 @@ class TestFormatStaticContent:
         result = format_stage_states()
         for state in StageState:
             assert state.value in result
+
+
+def _suggestion(
+    loop_id="lop_1",
+    action=SuggestedAction.ADVANCE_STAGE,
+    action_data=None,
+    summary="Move to next stage",
+) -> Suggestion:
+    if action_data is None:
+        action_data = {"target_stage": "awaiting_client"}
+    return Suggestion(
+        id="sug_1",
+        coordinator_email="coord@lrp.com",
+        gmail_message_id="msg1",
+        gmail_thread_id="thread1",
+        loop_id=loop_id,
+        classification=EmailClassification.AVAILABILITY_RESPONSE,
+        action=action,
+        confidence=0.9,
+        summary=summary,
+        action_data=action_data,
+        status=SuggestionStatus.PENDING,
+    )
+
+
+class TestFormatPendingSuggestions:
+    def test_empty_returns_default(self):
+        result = format_pending_suggestions([])
+        assert result == "No current pending suggestions."
+
+    def test_multiple_suggestions_formatted(self):
+        suggestions = [
+            _suggestion(
+                loop_id="lop_1",
+                action=SuggestedAction.ADVANCE_STAGE,
+                action_data={"target_stage": "awaiting_client"},
+                summary="Move to awaiting client",
+            ),
+            _suggestion(
+                loop_id="lop_2",
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "Hi there", "recipient_type": "recruiter"},
+                summary="Send availability request",
+            ),
+            _suggestion(
+                loop_id="lop_1",
+                action=SuggestedAction.ASK_COORDINATOR,
+                action_data={"question": "Which time works?"},
+                summary="Need clarification",
+            ),
+        ]
+        result = format_pending_suggestions(suggestions)
+        assert "Pending suggestions" in result
+        assert "[lop_1] advance_stage: Move to awaiting client" in result
+        assert "target_stage=awaiting_client" in result
+        assert "[lop_2] draft_email: Send availability request" in result
+        assert "to=recruiter" in result
+        assert "[lop_1] ask_coordinator: Need clarification" in result
+        assert 'question="Which time works?"' in result
