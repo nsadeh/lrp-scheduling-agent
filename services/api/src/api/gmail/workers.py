@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from api.gmail.auth import TokenStore
 from api.gmail.client import GmailClient
-from api.gmail.exceptions import GmailNotFoundError, GmailScopeError
+from api.gmail.exceptions import GmailNotFoundError, GmailScopeError, GmailTokenStaleError
 from api.gmail.hooks import (
     EmailEvent,
     classify_direction,
@@ -146,17 +146,22 @@ async def process_gmail_push(ctx: dict, coordinator_email: str, history_id: str)
             logger.debug("debounced push for %s", coordinator_email)
             return
 
-    # Use our stored cursor, not the push notification's history_id
-    stored_history_id = await token_store.get_history_id(coordinator_email)
-    if not stored_history_id:
-        # No baseline yet (OAuth callback didn't set one, or legacy user).
-        # Use the push notification's history_id so we don't skip any messages.
-        logger.info("no baseline for %s, using push history_id=%s", coordinator_email, history_id)
-        await token_store.update_history_id(coordinator_email, history_id)
-        await _process_history(ctx, coordinator_email, history_id)
-        return
+    try:
+        # Use our stored cursor, not the push notification's history_id
+        stored_history_id = await token_store.get_history_id(coordinator_email)
+        if not stored_history_id:
+            # No baseline yet (OAuth callback didn't set one, or legacy user).
+            # Use the push notification's history_id so we don't skip any messages.
+            logger.info(
+                "no baseline for %s, using push history_id=%s", coordinator_email, history_id
+            )
+            await token_store.update_history_id(coordinator_email, history_id)
+            await _process_history(ctx, coordinator_email, history_id)
+            return
 
-    await _process_history(ctx, coordinator_email, stored_history_id)
+        await _process_history(ctx, coordinator_email, stored_history_id)
+    except GmailTokenStaleError:
+        logger.warning("stale token for %s during push processing — skipping", coordinator_email)
 
 
 async def poll_gmail_history(ctx: dict) -> None:
@@ -176,6 +181,8 @@ async def poll_gmail_history(ctx: dict) -> None:
                 continue
 
             await _process_history(ctx, coordinator_email, stored_history_id)
+        except GmailTokenStaleError:
+            logger.warning("stale token for %s — skipping until re-auth", coordinator_email)
         except GmailScopeError:
             logger.warning("scope error for %s — skipping until re-auth", coordinator_email)
         except Exception:
@@ -202,6 +209,8 @@ async def renew_gmail_watches(ctx: dict) -> None:
                 expiry,
             )
             logger.info("renewed watch for %s, expires %s", coordinator_email, expiry)
+        except GmailTokenStaleError:
+            logger.warning("stale token for %s — skipping watch renewal", coordinator_email)
         except GmailScopeError:
             logger.warning("scope error for %s — skipping watch renewal", coordinator_email)
         except Exception:
@@ -340,6 +349,8 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
             )
             await router.on_email(event, arq_pool=ctx.get("redis"))
 
+        except GmailTokenStaleError:
+            raise
         except GmailNotFoundError:
             logger.info(
                 "message %s not fetchable for %s (likely spam/filter/delete)",
@@ -403,6 +414,12 @@ async def run_next_action_agent(
         logger.info(
             "next action agent processed message %s (thread %s)",
             message.id,
+            gmail_thread_id,
+        )
+    except GmailTokenStaleError:
+        logger.warning(
+            "stale token for %s — next action agent skipped (thread %s)",
+            coordinator_email,
             gmail_thread_id,
         )
     except Exception:

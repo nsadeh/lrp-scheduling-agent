@@ -45,6 +45,7 @@ def app():
     # Mock Gmail client — has_token must be AsyncMock since it's awaited
     mock_gmail = MagicMock()
     mock_gmail.has_token = AsyncMock(return_value=True)
+    mock_gmail._token_store.is_token_stale = AsyncMock(return_value=False)
     test_app.state.gmail = mock_gmail
 
     # Mock Redis

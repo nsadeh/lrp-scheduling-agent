@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 from cryptography.fernet import Fernet, InvalidToken
 from google.oauth2.credentials import Credentials
 
-from api.gmail.exceptions import GmailAuthError, GmailScopeError, GmailUserNotAuthorizedError
+from api.gmail.exceptions import (
+    GmailAuthError,
+    GmailScopeError,
+    GmailTokenStaleError,
+    GmailUserNotAuthorizedError,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -27,7 +32,7 @@ _DEFAULT_SCOPES = ",".join(
 SCOPES = os.environ.get("REQUIRED_SCOPES", _DEFAULT_SCOPES).split(",")
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
-_LOAD_SQL = "SELECT refresh_token_encrypted, scopes FROM gmail_tokens WHERE user_email = %(email)s"
+_LOAD_SQL = "SELECT refresh_token_encrypted, scopes, is_stale FROM gmail_tokens WHERE user_email = %(email)s"  # noqa: E501
 
 
 class TokenStore:
@@ -61,6 +66,7 @@ class TokenStore:
                 ON CONFLICT (user_email) DO UPDATE SET
                     refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
                     scopes = EXCLUDED.scopes,
+                    is_stale = false,
                     updated_at = now()
                 """,
                 {"user_email": user_email, "token": encrypted, "scopes": scopes},
@@ -81,6 +87,11 @@ class TokenStore:
                 f"No stored token for {user_email}. User must authorize via the add-on first."
             )
 
+        if row[2]:  # is_stale
+            raise GmailTokenStaleError(
+                f"Token for {user_email} is stale (revoked/expired). Re-authorization required."
+            )
+
         granted = set(row[1])
         required = set(SCOPES)
         missing = required - granted
@@ -99,6 +110,27 @@ class TokenStore:
             token_uri=TOKEN_URI,
             scopes=row[1],
         )
+
+    async def mark_stale(self, user_email: str) -> None:
+        """Flag a token as stale after a RefreshError — stops further attempts."""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                """
+                UPDATE gmail_tokens SET is_stale = true, updated_at = now()
+                WHERE user_email = %(email)s
+                """,
+                {"email": user_email},
+            )
+
+    async def is_token_stale(self, user_email: str) -> bool:
+        """Check if a user's token is marked stale."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT is_stale FROM gmail_tokens WHERE user_email = %(email)s",
+                {"email": user_email},
+            )
+            row = await cur.fetchone()
+            return bool(row[0]) if row else False
 
     async def delete_token(self, user_email: str) -> None:
         """Remove a user's stored token."""
@@ -163,8 +195,8 @@ class TokenStore:
             )
 
     async def get_all_watched_emails(self) -> list[str]:
-        """List all coordinator emails with stored tokens."""
+        """List all coordinator emails with valid (non-stale) stored tokens."""
         async with self._pool.connection() as conn:
-            cur = await conn.execute("SELECT user_email FROM gmail_tokens")
+            cur = await conn.execute("SELECT user_email FROM gmail_tokens WHERE NOT is_stale")
             rows = await cur.fetchall()
             return [row[0] for row in rows]

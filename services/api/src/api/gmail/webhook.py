@@ -106,6 +106,9 @@ async def gmail_webhook(request: Request) -> Response:
     if not await gmail.has_token(coordinator_email):
         logger.debug("webhook for unknown coordinator: %s", coordinator_email)
         return Response(status_code=200)
+    if await gmail._token_store.is_token_stale(coordinator_email):
+        logger.debug("webhook for stale-token coordinator: %s", coordinator_email)
+        return Response(status_code=200)
 
     # Enqueue background job
     redis = get_redis(request)

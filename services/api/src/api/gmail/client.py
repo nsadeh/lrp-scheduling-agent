@@ -16,6 +16,7 @@ from api.gmail.exceptions import (
     GmailAuthError,
     GmailNotFoundError,
     GmailRateLimitError,
+    GmailTokenStaleError,
     GmailValidationError,
 )
 from api.gmail.models import Draft, Message, Thread, parse_message
@@ -87,6 +88,10 @@ class GmailClient:
         creds = await self._get_creds(user_email)
         try:
             return await _transport.execute(creds, fn, op_name=caller_name)
+        except GmailTokenStaleError:
+            await self._token_store.mark_stale(user_email)
+            logger.warning("marked token stale for %s (RefreshError)", user_email)
+            raise
         except HttpError as exc:
             raise _map_http_error(exc) from exc
 
