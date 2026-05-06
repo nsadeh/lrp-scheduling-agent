@@ -206,7 +206,9 @@ def _action_data_highlights(action: str, action_data: dict) -> str:
         return f"target_stage={action_data.get('target_stage', '?')}"
     elif action == "draft_email":
         recipient = action_data.get("recipient_type", "?")
-        return f"to={recipient}"
+        body = action_data.get("body", "")
+        body_preview = body[:80] + ("..." if len(body) > 80 else "")
+        return f'to={recipient}, body="{body_preview}"'
     elif action == "ask_coordinator":
         q = action_data.get("question", "")
         preview = q[:80] + ("..." if len(q) > 80 else "")

@@ -237,5 +237,6 @@ class TestFormatPendingSuggestions:
         assert "target_stage=awaiting_client" in result
         assert "[lop_2] draft_email: Send availability request" in result
         assert "to=recruiter" in result
+        assert 'body="Hi there"' in result
         assert "[lop_1] ask_coordinator: Need clarification" in result
         assert 'question="Which time works?"' in result
