@@ -135,33 +135,72 @@ class TestRowToDraft:
 
 
 class TestResolveRecipients:
-    def test_new_state_routes_to_recruiter(self):
-        loop = _loop(state=StageState.NEW)
-        to, cc = resolve_recipients(loop)
+    """Recipient routing is driven by the agent's recipient_type, NOT loop state.
+
+    State describes where the loop is in its lifecycle; recipient_type
+    describes who the next email is for. They're independent — e.g. on a
+    SCHEDULED loop the agent may legitimately want to message the recruiter
+    to relay a confirmation. These tests assert that the routing honors the
+    agent's decision regardless of state.
+    """
+
+    def test_recruiter_recipient_type_routes_to_recruiter(self):
+        loop = _loop(state=StageState.AWAITING_CANDIDATE)
+        to, cc = resolve_recipients(loop, "recruiter")
         assert to == ["mike@recruiter.com"]
         assert cc == []
 
-    def test_awaiting_candidate_routes_to_client(self):
-        loop = _loop(state=StageState.AWAITING_CANDIDATE)
-        to, cc = resolve_recipients(loop)
+    def test_client_recipient_type_routes_to_client(self):
+        loop = _loop(state=StageState.NEW)
+        to, cc = resolve_recipients(loop, "client")
         assert to == ["haley@client.com"]
         assert cc == []
 
-    def test_awaiting_client_routes_to_client(self):
-        loop = _loop(state=StageState.AWAITING_CLIENT)
-        to, cc = resolve_recipients(loop)
-        assert to == ["haley@client.com"]
+    def test_internal_recipient_type_yields_empty_to(self):
+        """Internal notes have no external 'to' — only CC the CM if present."""
+        loop = _loop(state=StageState.SCHEDULED, with_client_manager=True)
+        to, cc = resolve_recipients(loop, "internal")
+        assert to == []
+        assert cc == ["sarah@lrp.com"]
 
-    def test_scheduled_routes_to_client(self):
+    def test_state_does_not_override_recipient_type(self):
+        """Regression: SCHEDULED loop + recipient_type='recruiter' → recruiter, not client."""
         loop = _loop(state=StageState.SCHEDULED)
-        to, cc = resolve_recipients(loop)
-        assert to == ["haley@client.com"]
+        to, _ = resolve_recipients(loop, "recruiter")
+        assert to == ["mike@recruiter.com"]
+
+    def test_missing_recruiter_yields_empty_to(self):
+        """If recipient_type='recruiter' but loop.recruiter is None, return empty
+        to_emails so the JIT contact-collection path can prompt the coordinator
+        instead of silently routing to the wrong person."""
+        loop = _loop(state=StageState.NEW)
+        loop.recruiter = None
+        to, _ = resolve_recipients(loop, "recruiter")
+        assert to == []
+
+    def test_missing_client_yields_empty_to(self):
+        loop = _loop(state=StageState.AWAITING_CLIENT)
+        loop.client_contact = None
+        to, _ = resolve_recipients(loop, "client")
+        assert to == []
+
+    def test_unknown_recipient_type_yields_empty_to(self):
+        loop = _loop(state=StageState.NEW)
+        to, _ = resolve_recipients(loop, None)
+        assert to == []
 
     def test_client_manager_cc_when_present(self):
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
-        to, cc = resolve_recipients(loop)
+        to, cc = resolve_recipients(loop, "client")
         assert to == ["haley@client.com"]
         assert cc == ["sarah@lrp.com"]
+
+    def test_sender_filtered_from_cc(self):
+        """Coordinators are sometimes their own CM — don't CC yourself."""
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        # sarah@lrp.com is the CM in the fixture
+        _, cc = resolve_recipients(loop, "client", sender_email="sarah@lrp.com")
+        assert cc == []
 
 
 def _thread_msg(
