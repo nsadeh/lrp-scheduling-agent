@@ -295,7 +295,7 @@ def parse_name_email(text: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
-def _normalize_gmail_id(raw_id: str | None) -> str | None:
+def _normalize_gmail_id(raw_id: str | None) -> tuple[str | None, bool]:
     """Convert Google contextual-trigger IDs to Gmail API hex format.
 
     Google's contextual triggers send IDs like 'thread-f:1862729221917227576'
@@ -304,36 +304,34 @@ def _normalize_gmail_id(raw_id: str | None) -> str | None:
 
     Some Workspace editions send compound IDs like
     'thread-f:DEC|msg-f:DEC' — we split on '|' and use the first segment.
+
+    Returns ``(normalized_id, was_rewritten)`` where *was_rewritten* is True
+    when the raw input contained a pipe or an unparseable prefix — a signal
+    that the caller should verify the result against the Gmail API.
     """
     if not raw_id:
-        return None
+        return None, False
     segment = raw_id.split("|")[0]
-    if segment != raw_id:
+    was_compound = segment != raw_id
+    if was_compound:
         logger.warning("Compound Gmail ID received: %s — using first segment", raw_id)
     m = _GMAIL_CONTEXTUAL_ID_RE.match(segment)
     if m:
-        return hex(int(m.group(1)))[2:]  # strip '0x' prefix
-    return raw_id
+        return hex(int(m.group(1)))[2:], was_compound  # strip '0x' prefix
+    return raw_id, False
 
 
-async def _resolve_thread_id_via_api(access_token: str, message_id: str) -> str | None:
-    """Fetch the canonical threadId from the Gmail API using the add-on's access token.
+async def _resolve_thread_id_via_gmail(
+    gmail_client, user_email: str, message_id: str
+) -> str | None:
+    """Fetch the canonical threadId from the Gmail API via domain-wide delegation.
 
-    Used as a last-resort fallback when ``_normalize_gmail_id`` produces an ID
-    that doesn't match anything in our database.
+    Used as a last-resort fallback when ``_normalize_gmail_id`` rewrites a
+    compound ID and we want to verify the result.
     """
-    import httpx
-
-    url = f"https://www.googleapis.com/gmail/v1/users/me/messages/{message_id}"
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"fields": "threadId"},
-            )
-            resp.raise_for_status()
-            return resp.json().get("threadId")
+        message = await gmail_client.get_message(user_email, message_id)
+        return message.thread_id
     except Exception:
         logger.exception("Gmail API fallback failed for message %s", message_id)
         return None
@@ -452,9 +450,10 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
 
     thread_id = None
     message_id = None
+    id_was_rewritten = False
     if body.gmail:
-        thread_id = _normalize_gmail_id(body.gmail.thread_id)
-        message_id = _normalize_gmail_id(body.gmail.message_id)
+        thread_id, id_was_rewritten = _normalize_gmail_id(body.gmail.thread_id)
+        message_id, _ = _normalize_gmail_id(body.gmail.message_id)
 
     logger.info(
         "on-message: thread_id=%s, message_id=%s, email=%s",
@@ -491,11 +490,13 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
             thread_id,
             loop.id if loop else None,
         )
-        # Gmail API fallback: if normalization produced an ID that matches
-        # nothing, ask the Gmail API for the canonical threadId using the
-        # add-on's short-lived access token.
-        if not loop and body.gmail and body.gmail.access_token and message_id:
-            api_thread_id = await _resolve_thread_id_via_api(body.gmail.access_token, message_id)
+        # Gmail API fallback: only when normalization rewrote a compound ID
+        # (pipe-separated) and the result matched nothing. Uses the
+        # GmailClient (domain-wide delegation) — not the add-on's
+        # accessToken, which lacks Gmail API scopes.
+        gmail = get_gmail(request)
+        if not loop and id_was_rewritten and gmail and message_id:
+            api_thread_id = await _resolve_thread_id_via_gmail(gmail, email, message_id)
             if api_thread_id and api_thread_id != thread_id:
                 logger.info(
                     "on-message: API fallback resolved thread_id=%s (was %s)",

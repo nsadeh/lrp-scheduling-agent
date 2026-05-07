@@ -246,41 +246,52 @@ class TestNormalizeGmailId:
     def test_none_returns_none(self):
         from api.addon.routes import _normalize_gmail_id
 
-        assert _normalize_gmail_id(None) is None
+        result, rewritten = _normalize_gmail_id(None)
+        assert result is None
+        assert rewritten is False
 
     def test_empty_string_returns_none(self):
         from api.addon.routes import _normalize_gmail_id
 
-        assert _normalize_gmail_id("") is None
+        result, rewritten = _normalize_gmail_id("")
+        assert result is None
+        assert rewritten is False
 
     def test_thread_f_decimal_converted_to_hex(self):
         from api.addon.routes import _normalize_gmail_id
 
-        result = _normalize_gmail_id("thread-f:1864465495488333224")
+        result, rewritten = _normalize_gmail_id("thread-f:1864465495488333224")
         assert result == hex(1864465495488333224)[2:]
+        assert rewritten is False
 
     def test_msg_f_decimal_converted_to_hex(self):
         from api.addon.routes import _normalize_gmail_id
 
-        result = _normalize_gmail_id("msg-f:1864465495488333224")
+        result, rewritten = _normalize_gmail_id("msg-f:1864465495488333224")
         assert result == hex(1864465495488333224)[2:]
+        assert rewritten is False
 
     def test_compound_pipe_separated_uses_first_segment(self):
         from api.addon.routes import _normalize_gmail_id
 
         raw = "thread-f:1864465495488333224|msg-f:1864465495488333224"
-        result = _normalize_gmail_id(raw)
+        result, rewritten = _normalize_gmail_id(raw)
         assert result == hex(1864465495488333224)[2:]
+        assert rewritten is True
 
     def test_already_hex_returned_as_is(self):
         from api.addon.routes import _normalize_gmail_id
 
-        assert _normalize_gmail_id("19dfda858c78f74e") == "19dfda858c78f74e"
+        result, rewritten = _normalize_gmail_id("19dfda858c78f74e")
+        assert result == "19dfda858c78f74e"
+        assert rewritten is False
 
     def test_unknown_format_returned_as_is(self):
         from api.addon.routes import _normalize_gmail_id
 
-        assert _normalize_gmail_id("some-other-format") == "some-other-format"
+        result, rewritten = _normalize_gmail_id("some-other-format")
+        assert result == "some-other-format"
+        assert rewritten is False
 
 
 class TestStaticFiles:
