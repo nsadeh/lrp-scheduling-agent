@@ -95,6 +95,11 @@ class SuggestionService:
                 conn, id=suggestion_id, status=status, resolved_by=resolved_by
             )
 
+    async def unresolve(self, suggestion_id: str, new_summary: str) -> None:
+        """Revert an accepted suggestion to pending (used when async processing fails)."""
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.unresolve_suggestion(conn, id=suggestion_id, summary=new_summary)
+
     async def supersede_pending_for_loop(self, loop_id: str, resolved_by: str) -> None:
         """Mark all pending suggestions for a loop as superseded."""
         async with self._pool.connection() as conn, conn.transaction():

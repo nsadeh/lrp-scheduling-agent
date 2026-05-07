@@ -134,11 +134,15 @@ class NextActionAgent:
         linked_loops: list[Loop],
         *,
         arq_pool: ArqRedis | None = None,
+        coordinator_response: str | None = None,
     ) -> None:
         msg = event.message
 
         context_input, existing_pending = await self._build_context(
-            event, linked_loops, event.thread_messages
+            event,
+            linked_loops,
+            event.thread_messages,
+            coordinator_response=coordinator_response,
         )
 
         try:
@@ -292,6 +296,8 @@ class NextActionAgent:
         event: EmailEvent,
         linked_loops: list[Loop],
         thread_messages: list[Message] | None = None,
+        *,
+        coordinator_response: str | None = None,
     ) -> tuple[NextActionInput, list[Suggestion]]:
         msg = event.message
 
@@ -345,6 +351,7 @@ class NextActionAgent:
             events=format_events(events),
             error="N/A",
             pending_suggestions=format_pending_suggestions(all_pending),
+            coordinator_response=coordinator_response or "No active questions.",
         ), all_pending
 
     def _resolve_target_loop(

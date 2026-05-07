@@ -58,6 +58,12 @@ UPDATE agent_suggestions
 SET status = :status, resolved_at = now(), resolved_by = :resolved_by
 WHERE id = :id AND status = 'pending';
 
+-- name: unresolve_suggestion!
+-- Revert an accepted suggestion back to pending (e.g., async processing failed).
+UPDATE agent_suggestions
+SET status = 'pending', resolved_at = NULL, resolved_by = NULL, summary = :summary
+WHERE id = :id AND status = 'accepted';
+
 -- name: supersede_pending_suggestions_for_loop!
 -- Mark all pending suggestions for a loop as superseded (outgoing email invalidated them).
 UPDATE agent_suggestions
