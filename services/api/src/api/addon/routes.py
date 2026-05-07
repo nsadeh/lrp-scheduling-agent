@@ -1204,10 +1204,17 @@ async def _apply_jit_contacts(
 
     # Re-resolve recipients now that the loop has the contacts attached,
     # and clear the staging area so the draft is clean if Send is retried.
+    # We need recipient_type from the originating suggestion to route
+    # correctly — fetch the suggestion to read its action_data.
+    from api.classifier.service import SuggestionService
     from api.drafts.service import resolve_recipients
 
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get(suggestion_id)
+    recipient_type = (suggestion.action_data or {}).get("recipient_type") if suggestion else None
+
     loop = await svc.get_loop(draft.loop_id)
-    to_emails, cc_emails = resolve_recipients(loop, sender_email=coordinator_email)
+    to_emails, cc_emails = resolve_recipients(loop, recipient_type, sender_email=coordinator_email)
     await draft_svc.update_draft_recipients(draft.id, to_emails, cc_emails)
     if pending:
         await draft_svc.update_pending_jit_data(draft.id, {})

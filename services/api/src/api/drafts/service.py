@@ -1,22 +1,24 @@
 """DraftService — persists and manages email drafts.
 
 Orchestrates the draft lifecycle: persistence → coordinator review →
-send/discard. Recipient routing is deterministic from loop.state and
-centralized in resolve_recipients() for DRY reuse across the codebase.
+send/discard. Recipient routing is driven by the agent's
+``action_data.recipient_type`` (the LLM's decision about who the email is
+for) and centralized in resolve_recipients() for DRY reuse across the
+codebase. Loop state is *not* used for recipient routing — state describes
+where the loop is, not who the next email is for.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from psycopg.rows import dict_row, tuple_row
 
 from api.drafts.models import DraftStatus, EmailDraft
 from api.drafts.queries import queries
 from api.ids import make_id
-from api.scheduling.models import StageState
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
@@ -25,6 +27,9 @@ if TYPE_CHECKING:
     from api.gmail.models import Message
     from api.scheduling.models import Loop
     from api.scheduling.service import LoopService
+
+# Mirrors api.classifier.models.DraftEmailData.recipient_type.
+RecipientType = Literal["client", "recruiter", "internal"]
 
 
 def _is_forward_draft(
@@ -75,38 +80,58 @@ def _row_to_draft(row: dict) -> EmailDraft:
 
 def resolve_recipients(
     loop: Loop,
+    recipient_type: RecipientType | None,
     *,
     sender_email: str | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Determine to/cc emails from loop.state.
+    """Determine to/cc emails from the agent's recipient_type decision.
 
     Single source of truth for recipient routing. Both DraftService and the
     addon compose_email handler call this.
 
+    Routing is driven by ``recipient_type`` from the agent's action_data:
+      - ``"recruiter"``  → ``loop.recruiter.email``
+      - ``"client"``     → ``loop.client_contact.email``
+      - ``"internal"``   → empty ``to_emails`` (coordinator-only; CC'd CM
+                           if present)
+
+    Loop state is intentionally NOT consulted. State describes where the
+    loop is in its lifecycle, not who the next email should go to. Those
+    are independent concerns — e.g. on a SCHEDULED loop the agent may
+    legitimately want to message the recruiter to relay confirmation to
+    the candidate.
+
+    When the targeted contact slot is null (e.g. recipient_type="recruiter"
+    but ``loop.recruiter is None``), this returns empty ``to_emails`` so
+    the JIT contact-collection path can prompt the coordinator instead of
+    silently routing to the wrong person.
+
     ``sender_email`` (the coordinator) is filtered out of CC — coordinators
     are sometimes their own client manager, and CC'ing yourself is noise.
+
+    ``recipient_type=None`` is tolerated for backward-compat with old
+    suggestions whose action_data predates this field; in that case we
+    return empty ``to_emails`` and let JIT collection handle it.
     """
     to_emails: list[str] = []
     cc_emails: list[str] = []
 
-    state = loop.state
-
-    if state == StageState.NEW:
-        # NEW → email recruiter for availability
+    if recipient_type == "recruiter":
         if loop.recruiter and loop.recruiter.email:
             to_emails = [loop.recruiter.email]
-    elif state in (StageState.AWAITING_CANDIDATE, StageState.AWAITING_CLIENT):
-        # AWAITING_CANDIDATE/CLIENT → email client contact
+    elif recipient_type == "client":
         if loop.client_contact and loop.client_contact.email:
             to_emails = [loop.client_contact.email]
-    elif state == StageState.SCHEDULED:
-        # SCHEDULED → confirmation to client contact
-        if loop.client_contact and loop.client_contact.email:
-            to_emails = [loop.client_contact.email]
+    elif recipient_type == "internal":
+        # Internal note — no external "to". CM gets CC'd below if present.
+        pass
     else:
-        # Fallback for COMPLETE/COLD (shouldn't normally draft here)
-        if loop.client_contact and loop.client_contact.email:
-            to_emails = [loop.client_contact.email]
+        # Unknown / missing recipient_type — leave empty so JIT prompts.
+        logger.warning(
+            "resolve_recipients: unknown or missing recipient_type=%r for loop %s",
+            recipient_type,
+            loop.id,
+        )
 
     if loop.client_manager and loop.client_manager.email:
         cm_email = loop.client_manager.email
@@ -141,7 +166,10 @@ class DraftService:
         body: str = "",
     ) -> EmailDraft:
         """Create and persist an email draft for a DRAFT_EMAIL suggestion."""
-        to_emails, cc_emails = resolve_recipients(loop, sender_email=suggestion.coordinator_email)
+        recipient_type = (suggestion.action_data or {}).get("recipient_type")
+        to_emails, cc_emails = resolve_recipients(
+            loop, recipient_type, sender_email=suggestion.coordinator_email
+        )
         subject = self._resolve_subject(loop)
 
         if len(body) > MAX_BODY_LENGTH:

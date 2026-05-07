@@ -46,14 +46,6 @@ from api.scheduling.cards import (
     get_action_url,
     set_action_url,  # noqa: F401 - re-exported for routes
 )
-from api.scheduling.models import StageState
-
-# Stage states where the draft is sent to the recruiter (vs. client).
-# Mirrors `resolve_recipients` in drafts/service.py - the single source
-# of truth for routing - but we need it inline at render time to decide
-# which JIT inputs to show.
-_RECRUITER_STAGES = {StageState.NEW.value}
-
 
 # ---------------------------------------------------------------------------
 # Tab navigation
@@ -117,17 +109,26 @@ def _format_known_actors(view: SuggestionView, *, exclude: str) -> str:
 def _missing_recipient_role(view: SuggestionView) -> tuple[bool, bool]:
     """Return (needs_recruiter, needs_client) for a draft view.
 
-    A draft has a missing recipient when its `to_emails` is empty - the
-    loop's relevant contact is null. The role is determined by stage state
-    (same logic as `resolve_recipients` in drafts/service.py). Mutually
-    exclusive: a draft only ever needs one role at a time.
+    A draft has a missing recipient when its ``to_emails`` is empty — the
+    loop's relevant contact is null. The role is determined by the agent's
+    ``recipient_type`` decision (same source of truth as
+    ``resolve_recipients`` in drafts/service.py). Mutually exclusive: a
+    draft only ever needs one role at a time.
+
+    Loop state is intentionally NOT consulted — the agent decides who the
+    email is for, regardless of where the loop is in its lifecycle.
     """
     draft = view.draft
     if draft is None or draft.to_emails:
         return (False, False)
-    if view.loop_state in _RECRUITER_STAGES:
+    recipient_type = (view.suggestion.action_data or {}).get("recipient_type")
+    if recipient_type == "recruiter":
         return (True, False)
-    return (False, True)
+    if recipient_type == "client":
+        return (False, True)
+    # internal / unknown / missing — no JIT prompt; the addon's send-button
+    # disabled state will keep the coordinator from sending an empty draft.
+    return (False, False)
 
 
 def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
