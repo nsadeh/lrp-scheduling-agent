@@ -44,3 +44,4 @@ class NextActionInput(BaseModel):
     events: str
     error: str
     pending_suggestions: str = "No current pending suggestions."
+    coordinator_response: str = "No active questions."

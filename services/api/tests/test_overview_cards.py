@@ -195,7 +195,8 @@ class TestAskCoordinatorSuggestionBuilder:
         widgets = _build_ask_suggestion(view)
         text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
         assert "morning or afternoon" in text
-        assert "coming soon" in text.lower()
+        assert "respond_to_question" in text
+        assert "coordinator_response_sug_1" in text
 
 
 class TestSuggestionDispatcher:

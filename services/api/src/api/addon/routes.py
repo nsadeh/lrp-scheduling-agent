@@ -1508,6 +1508,69 @@ async def _handle_update_candidate_name(body: AddonRequest, svc: LoopService, em
     return await _build_refreshed_overview(request, email)
 
 
+async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Handle coordinator response to an ASK_COORDINATOR suggestion."""
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    suggestion_id = _get_param(body, "suggestion_id")
+    if not suggestion_id or not request:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+    if not suggestion:
+        return await _build_refreshed_overview(request, email)
+
+    user_input = _get_form_value(body, f"coordinator_response_{suggestion_id}")
+    if not user_input or not user_input.strip():
+        return await _build_refreshed_overview(request, email)
+    user_input = user_input.strip()
+
+    original_question = (suggestion.action_data or {}).get("question", "")
+    coordinator_response = (
+        f"Agent question (you asked): {original_question}\n"
+        f"Coordinator's response (they clarified): {user_input}"
+    )
+
+    await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
+
+    redis = get_redis(request)
+    if redis:
+        try:
+            await redis.enqueue_job(
+                "process_coordinator_response",
+                suggestion_id,
+                coordinator_response,
+                email,
+                suggestion.gmail_thread_id,
+            )
+            logger.info(
+                "enqueued coordinator response processing for suggestion %s",
+                suggestion_id,
+            )
+        except Exception:
+            logger.exception(
+                "failed to enqueue coordinator response for suggestion %s — unresolving",
+                suggestion_id,
+            )
+            await suggestion_svc.unresolve(
+                suggestion_id,
+                f"Failed to queue response for processing. Original: {original_question}",
+            )
+    else:
+        logger.warning(
+            "redis unavailable — cannot process coordinator response for suggestion %s",
+            suggestion_id,
+        )
+        await suggestion_svc.unresolve(
+            suggestion_id,
+            f"Background processing unavailable. Original: {original_question}",
+        )
+
+    return await _build_refreshed_overview(request, email)
+
+
 _ACTION_HANDLERS = {
     # Loop creation (manual path)
     "show_create_form": _handle_show_create_form,
@@ -1520,6 +1583,7 @@ _ACTION_HANDLERS = {
     # Suggestion actions (ADVANCE_STAGE / LINK_THREAD / ASK_COORDINATOR / dismiss)
     "accept_suggestion": _handle_accept_suggestion,
     "reject_suggestion": _handle_reject_suggestion,
+    "respond_to_question": _handle_respond_to_question,
     "show_suggestions_tab": _handle_show_suggestions_tab,
     # JIT candidate rename (when classifier auto-created with placeholder)
     "update_candidate_name": _handle_update_candidate_name,

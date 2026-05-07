@@ -92,6 +92,9 @@ async def startup(ctx: dict) -> None:
         loop_service=loop_service,
         sender_blacklist=load_blacklist(),
     )
+    ctx["next_action_agent"] = agent
+    ctx["suggestion_service"] = suggestion_service
+    ctx["loop_service"] = loop_service
     logger.info("worker startup complete — EmailRouter active")
 
 
@@ -430,10 +433,94 @@ async def run_next_action_agent(
         )
 
 
+async def process_coordinator_response(
+    ctx: dict,
+    suggestion_id: str,
+    coordinator_response: str,
+    coordinator_email: str,
+    gmail_thread_id: str,
+) -> None:
+    """Re-run the NextActionAgent after a coordinator answers an ASK_COORDINATOR question.
+
+    The addon resolves the suggestion as ACCEPTED before enqueueing this job.
+    On failure, we un-resolve the suggestion so it reappears in the UI.
+    """
+    gmail: GmailClient = ctx["gmail"]
+    agent = ctx["next_action_agent"]
+    suggestion_svc = ctx["suggestion_service"]
+    loop_service = ctx["loop_service"]
+
+    try:
+        thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
+        if not thread.messages:
+            logger.warning("empty thread %s — cannot process coordinator response", gmail_thread_id)
+            await suggestion_svc.unresolve(
+                suggestion_id, "Thread has no messages — please review manually."
+            )
+            return
+
+        message = thread.messages[-1]
+
+        direction = classify_direction(message, coordinator_email)
+        prior_messages = [
+            m for m in thread.messages if m.id != message.id and m.date < message.date
+        ]
+        message_type, new_participants = classify_message_type(message, prior_messages)
+
+        event = EmailEvent(
+            message=message,
+            coordinator_email=coordinator_email,
+            direction=direction,
+            message_type=message_type,
+            new_participants=new_participants,
+            thread_messages=thread.messages,
+        )
+
+        linked_loops = await loop_service.find_loops_by_thread(gmail_thread_id)
+        if not linked_loops:
+            logger.warning(
+                "no linked loops for thread %s — cannot process coordinator response",
+                gmail_thread_id,
+            )
+            await suggestion_svc.unresolve(
+                suggestion_id, "Thread is no longer linked to a loop — please review manually."
+            )
+            return
+
+        await agent.act(
+            event,
+            linked_loops,
+            coordinator_response=coordinator_response,
+            arq_pool=ctx.get("redis"),
+        )
+        logger.info(
+            "coordinator response processed for suggestion %s (thread %s)",
+            suggestion_id,
+            gmail_thread_id,
+        )
+    except GmailTokenStaleError:
+        logger.warning(
+            "stale token for %s — coordinator response skipped (suggestion %s)",
+            coordinator_email,
+            suggestion_id,
+        )
+        await suggestion_svc.unresolve(
+            suggestion_id,
+            "Gmail access expired — please ask your admin to re-authorize, then try again.",
+        )
+    except Exception as exc:
+        logger.exception(
+            "coordinator response processing failed for suggestion %s (thread %s)",
+            suggestion_id,
+            gmail_thread_id,
+        )
+        await suggestion_svc.unresolve(suggestion_id, f"Processing failed: {exc}")
+
+
 class WorkerSettings:
     """arq worker configuration."""
 
-    functions = [process_gmail_push, run_next_action_agent]  # noqa: RUF012
+    functions = [process_gmail_push, run_next_action_agent, process_coordinator_response]  # noqa: RUF012
     cron_jobs = [  # noqa: RUF012
         cron(poll_gmail_history, second=0),  # every 60s
         cron(renew_gmail_watches, hour={0, 6, 12, 18}, minute=0, second=0),

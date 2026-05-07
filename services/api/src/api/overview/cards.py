@@ -365,13 +365,16 @@ def _build_ask_suggestion(view: SuggestionView) -> list[Widget]:
         )
     )
 
-    # Respond button (disabled - backend not implemented yet)
+    input_name = f"coordinator_response_{sug.id}"
     widgets.append(
         _buttons(
             Button(
-                text="Respond (coming soon)",
-                on_click=_action("accept_suggestion", suggestion_id=sug.id),
-                disabled=True,
+                text="Respond",
+                on_click=_action(
+                    "respond_to_question",
+                    required_widgets=[input_name],
+                    suggestion_id=sug.id,
+                ),
             ),
             _dismiss_button(sug.id),
         )
