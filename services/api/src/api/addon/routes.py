@@ -1031,6 +1031,7 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
         recruiter_id=recruiter_id,
         title=title,
         client_manager_id=cm_id,
+        client_company=client_company or None,
         gmail_thread_id=gmail_thread_id,
         gmail_subject=gmail_subject,
     )

@@ -101,6 +101,23 @@ LIMIT 10;
 -- Loops
 -- ============================================================
 
+-- name: find_active_loop_by_candidate_name_at_client^
+-- Check if an active loop already exists for this candidate-at-client combo.
+-- Matches on client company name (not contact ID) so different contacts at
+-- the same firm still dedup correctly.
+SELECT l.id
+FROM loops l
+JOIN candidates cand ON cand.id = l.candidate_id
+LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
+WHERE l.coordinator_id = :coordinator_id
+  AND LOWER(TRIM(cand.name)) = LOWER(TRIM(:candidate_name))
+  AND (
+    LOWER(TRIM(cc.company)) = LOWER(TRIM(:client_company))
+    OR (cc.company IS NULL AND :client_company IS NULL)
+  )
+  AND l.state NOT IN ('complete', 'cold')
+LIMIT 1;
+
 -- name: create_loop^
 INSERT INTO loops (id, coordinator_id, client_contact_id, recruiter_id, client_manager_id, candidate_id, title, state, notes)
 VALUES (:id, :coordinator_id, :client_contact_id, :recruiter_id, :client_manager_id, :candidate_id, :title, :state, :notes)
@@ -206,6 +223,8 @@ ORDER BY l.updated_at DESC;
 
 -- name: get_active_loops_full_for_coordinator
 -- Active loops (not complete or cold) for a coordinator, with actors.
+-- Sorted by most recent loop_event (true activity signal), falling back
+-- to loop.created_at for loops with no events yet.
 SELECT
     l.id                AS loop_id,
     l.coordinator_id    AS loop_coordinator_id,
@@ -246,9 +265,15 @@ LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
 LEFT JOIN contacts rec ON rec.id = l.recruiter_id
 LEFT JOIN contacts cm ON cm.id = l.client_manager_id
 JOIN candidates cand ON cand.id = l.candidate_id
+LEFT JOIN LATERAL (
+    SELECT MAX(le.occurred_at) AS last_event_at
+    FROM loop_events le
+    WHERE le.loop_id = l.id
+) latest_event ON true
 WHERE l.coordinator_id = :coordinator_id
   AND l.state NOT IN ('complete', 'cold')
-ORDER BY l.updated_at DESC;
+ORDER BY COALESCE(latest_event.last_event_at, l.created_at) DESC
+LIMIT 50;
 
 -- name: get_loops_for_coordinator
 -- All active loops for a coordinator (not complete/cold).

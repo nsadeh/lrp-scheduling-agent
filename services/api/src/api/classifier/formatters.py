@@ -131,24 +131,48 @@ def format_linked_loops(loops: list[Loop]) -> str:
     return "\n".join(blocks).rstrip()
 
 
-def format_active_loops(loops: list[Loop]) -> str:
-    """Format coordinator's active loops summary for thread-to-loop matching."""
+DEFAULT_ACTIVE_LOOPS_CHAR_BUDGET = 20_000
+
+
+def format_active_loops(
+    loops: list[Loop],
+    char_budget: int = DEFAULT_ACTIVE_LOOPS_CHAR_BUDGET,
+) -> str:
+    """Format coordinator's active loops summary for thread-to-loop matching.
+
+    Truncates from the end when the formatted output exceeds char_budget,
+    following the same pattern as format_thread_history.
+    """
     if not loops:
         return "No active loops for this coordinator."
 
-    lines = ["Active scheduling loops:"]
-    for loop in loops:
+    header = f"Active scheduling loops ({len(loops)} total):"
+    lines = [header]
+    total_chars = len(header)
+    truncated_count = 0
+
+    for i, loop in enumerate(loops):
         candidate_name = loop.candidate.name if loop.candidate else "Unknown"
         client_company = (
             loop.client_contact.company
             if loop.client_contact and loop.client_contact.company
             else "Unknown"
         )
-        lines.append(
+        line = (
             f"  - {loop.title} (ID: {loop.id}): "
             f"Candidate={candidate_name}, Client={client_company}, "
             f"State={loop.state.value}"
         )
+
+        if total_chars + len(line) + 1 > char_budget and i > 0:
+            truncated_count = len(loops) - i
+            break
+
+        lines.append(line)
+        total_chars += len(line) + 1  # +1 for newline
+
+    if truncated_count > 0:
+        lines.append(f"  [...{truncated_count} more loop(s) truncated...]")
 
     return "\n".join(lines)
 

@@ -122,7 +122,12 @@ class CreateLoopResolver:
     async def resolve(self, suggestion: Suggestion, ctx: ResolverContext) -> None:
         extraction = self._read_extraction(suggestion)
 
-        candidate_name = (extraction.candidate_name or "").strip() or DEFAULT_CANDIDATE_NAME
+        candidate_name = (extraction.candidate_name or "").strip()
+        if not candidate_name or candidate_name.lower() == "unknown candidate":
+            raise ValueError(
+                "candidate_name must be a real name, not 'Unknown Candidate'. "
+                "Re-read the email to extract the candidate's actual name."
+            )
 
         client_contact_id: str | None = None
         if extraction.client_email:
@@ -161,6 +166,7 @@ class CreateLoopResolver:
             recruiter_id=recruiter_id,
             title=title,
             client_manager_id=client_manager_id,
+            client_company=extraction.client_company or None,
             gmail_thread_id=ctx.gmail_thread_id,
             gmail_subject=ctx.gmail_subject,
         )
