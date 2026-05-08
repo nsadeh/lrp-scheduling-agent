@@ -102,6 +102,10 @@ def _suggestion_item(
             action_data = {"body": "Draft something", "recipient_type": "recruiter"}
         elif action == SuggestedAction.ASK_COORDINATOR:
             action_data = {"question": "What should I do?"}
+        elif action == SuggestedAction.LINK_THREAD:
+            action_data = {"candidate_name": "Test Candidate", "client_company": "Test Company"}
+        elif action == SuggestedAction.CREATE_LOOP:
+            action_data = {"candidate_name": "Test Candidate"}
         else:
             action_data = {}
     return SuggestionItem(

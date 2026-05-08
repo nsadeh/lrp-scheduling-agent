@@ -12,7 +12,6 @@ from api.classifier.models import (
     SuggestionStatus,
 )
 from api.classifier.resolvers import (
-    DEFAULT_CANDIDATE_NAME,
     AdvanceStageResolver,
     CreateLoopResolver,
     LinkThreadResolver,
@@ -105,23 +104,16 @@ class TestCreateLoopResolver:
         assert kwargs["title"] == "Claire Thompson, ACME"
 
     @pytest.mark.asyncio
-    async def test_empty_extraction_creates_unknown_candidate_with_null_contacts(self):
+    async def test_empty_extraction_rejects_unknown_candidate(self):
         loop_service = MagicMock()
-        loop_service.find_or_create_client_contact = AsyncMock()
-        loop_service.find_or_create_contact = AsyncMock()
         loop_service.create_loop = AsyncMock(return_value=_loop())
 
         suggestion = _suggestion(SuggestedAction.CREATE_LOOP, action_data={})
         ctx = _ctx(loop_service, MagicMock(), arq_pool=AsyncMock())
-        await CreateLoopResolver().resolve(suggestion, ctx)
+        with pytest.raises(ValueError, match="candidate_name must be a real name"):
+            await CreateLoopResolver().resolve(suggestion, ctx)
 
-        loop_service.find_or_create_client_contact.assert_not_called()
-        loop_service.find_or_create_contact.assert_not_called()
-        kwargs = loop_service.create_loop.await_args.kwargs
-        assert kwargs["candidate_name"] == DEFAULT_CANDIDATE_NAME
-        assert kwargs["client_contact_id"] is None
-        assert kwargs["recruiter_id"] is None
-        assert kwargs["title"] == DEFAULT_CANDIDATE_NAME
+        loop_service.create_loop.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_enqueues_next_action_after_creation(self):

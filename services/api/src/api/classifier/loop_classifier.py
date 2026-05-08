@@ -15,6 +15,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import sentry_sdk
 from pydantic import ValidationError
 
 from api.classifier.endpoints import classify_new_thread
@@ -26,6 +27,7 @@ from api.classifier.formatters import (
 from api.classifier.models import (
     ACTION_DATA_MODELS,
     ClassificationResult,
+    LinkThreadData,
     SuggestedAction,
     SuggestionItem,
 )
@@ -100,7 +102,36 @@ class LoopClassifier:
     ) -> None:
         msg = event.message
 
-        context_input = await self._build_context(event, event.thread_messages)
+        coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
+        active_loops: list[Loop] = []
+        if coord:
+            active_loops = await self._get_active_loops(coord.id)
+
+        active_loops_count = len(active_loops)
+        sentry_sdk.set_measurement("classifier.active_loops_count", active_loops_count)
+        scope = sentry_sdk.Scope.get_current_scope()
+        scope.set_context(
+            "classifier",
+            {
+                "active_loops_count": active_loops_count,
+                "coordinator_email": event.coordinator_email,
+            },
+        )
+        if active_loops_count > 100:
+            logger.warning(
+                "high active loop count for coordinator %s: %d loops",
+                event.coordinator_email,
+                active_loops_count,
+            )
+
+        email_text = format_email(msg, "incoming", event.message_type.value)
+        context_input = self._build_context(
+            event,
+            coord,
+            active_loops,
+            email_text,
+            event.thread_messages,
+        )
 
         # First attempt
         try:
@@ -140,19 +171,21 @@ class LoopClassifier:
         valid_items: list[SuggestionItem] = []
 
         for item in result.suggestions:
-            item, error = self._apply_guardrails(item)
+            item, error = self._apply_guardrails(item, active_loops, email_text)
             if error:
                 guardrail_errors.append(error)
             else:
                 valid_items.append(item)
 
         if guardrail_errors and not valid_items:
-            # All suggestions failed guardrails — retry with error feedback
             error_msg = "; ".join(guardrail_errors)
-            logger.info(
-                "all suggestions failed guardrails, retrying with error: %s",
+            logger.warning(
+                "all %d suggestions failed guardrails for thread %s, retrying: %s",
+                len(result.suggestions),
+                msg.thread_id,
                 error_msg,
             )
+            sentry_sdk.set_tag("classifier.guardrail_retry", "true")
             retry_input = context_input.model_copy(update={"error": error_msg})
             try:
                 result = await classify_new_thread(
@@ -166,7 +199,7 @@ class LoopClassifier:
 
             valid_items = []
             for item in result.suggestions:
-                item, error = self._apply_guardrails(item)
+                item, error = self._apply_guardrails(item, active_loops, email_text)
                 if not error:
                     valid_items.append(item)
 
@@ -197,9 +230,12 @@ class LoopClassifier:
             )
             await try_auto_resolve(suggestion, ctx, self._resolver_registry)
 
-    async def _build_context(
+    def _build_context(
         self,
         event: EmailEvent,
+        coord: Coordinator | None,
+        active_loops: list[Loop],
+        email_text: str,
         thread_messages: list[Message] | None = None,
     ) -> LoopClassifierInput:
         msg = event.message
@@ -209,11 +245,6 @@ class LoopClassifier:
         else:
             thread_history_text = "No prior messages in this thread."
 
-        coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
-        active_loops: list[Loop] = []
-        if coord:
-            active_loops = await self._get_active_loops(coord.id)
-
         coordinator_name = _resolve_coordinator_name(event, coord)
         coordinator_str = f"{coordinator_name}<{event.coordinator_email}>"
         date_str = datetime.now(UTC).date().isoformat()
@@ -221,7 +252,7 @@ class LoopClassifier:
         return LoopClassifierInput(
             coordinator=coordinator_str,
             date=date_str,
-            email=format_email(msg, "incoming", event.message_type.value),
+            email=email_text,
             thread_history=thread_history_text,
             active_loops_summary=format_active_loops(active_loops),
             error="N/A",
@@ -244,6 +275,8 @@ class LoopClassifier:
     def _apply_guardrails(
         self,
         item: SuggestionItem,
+        active_loops: list[Loop] | None = None,
+        email_text: str = "",
     ) -> tuple[SuggestionItem, str | None]:
         """Apply guardrails. Returns (item, error_message). error_message is None if valid."""
         # 1. Action allow-list
@@ -276,11 +309,24 @@ class LoopClassifier:
                 "LINK_THREAD requires target_loop_id to identify which loop to link to",
             )
 
-        # 4. LINK_THREAD confidence floor
+        # 4. LINK_THREAD semantic validation
+        if item.action == SuggestedAction.LINK_THREAD and active_loops and item.target_loop_id:
+            error = self._validate_link_thread(item, active_loops, email_text)
+            if error:
+                return item.model_copy(update={"action": SuggestedAction.NO_ACTION}), error
+
+        # 5. LINK_THREAD confidence floor
         if (
             item.action == SuggestedAction.LINK_THREAD
             and item.confidence < LINK_THREAD_MIN_CONFIDENCE
         ):
+            logger.warning(
+                "LINK_THREAD confidence %.2f below threshold %.2f for target %s",
+                item.confidence,
+                LINK_THREAD_MIN_CONFIDENCE,
+                item.target_loop_id,
+            )
+            sentry_sdk.set_tag("classifier.link_thread_demoted", "true")
             return (
                 item.model_copy(
                     update={
@@ -293,4 +339,84 @@ class LoopClassifier:
                 f"or use CREATE_LOOP",
             )
 
+        # 6. CREATE_LOOP must have a real candidate name
+        if item.action == SuggestedAction.CREATE_LOOP:
+            cand_name = (item.action_data.get("candidate_name") or "").strip()
+            if not cand_name or cand_name.lower() == "unknown candidate":
+                return (
+                    item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
+                    "CREATE_LOOP candidate_name must be a real name, not 'Unknown Candidate'. "
+                    "Re-read the email to extract the candidate's actual name.",
+                )
+
         return item, None
+
+    @staticmethod
+    def _validate_link_thread(
+        item: SuggestionItem,
+        active_loops: list[Loop],
+        email_text: str,
+    ) -> str | None:
+        """Validate a LINK_THREAD suggestion against active loops and email content.
+
+        Returns an error string for the retry mechanism, or None if valid.
+        """
+        target = next((lp for lp in active_loops if lp.id == item.target_loop_id), None)
+
+        # Check 1: target loop must exist in active loops
+        if target is None:
+            return (
+                f"LINK_THREAD target_loop_id '{item.target_loop_id}' not found in "
+                f"active loops — the loop may have been completed or archived"
+            )
+
+        # Check 2: LLM extraction must match target loop
+        try:
+            extraction = LinkThreadData.model_validate(item.action_data)
+        except ValidationError:
+            extraction = None
+
+        if (
+            extraction
+            and target.candidate
+            and extraction.candidate_name.lower().strip() != target.candidate.name.lower().strip()
+        ):
+            return (
+                f"LINK_THREAD action_data says candidate is '{extraction.candidate_name}' "
+                f"but target loop '{target.id}' is for candidate "
+                f"'{target.candidate.name}' — these don't match. "
+                f"Use CREATE_LOOP if this is a different candidate."
+            )
+
+        target_company = (
+            target.client_contact.company
+            if target.client_contact and target.client_contact.company
+            else None
+        )
+        if (
+            extraction
+            and target_company
+            and extraction.client_company.lower().strip() != target_company.lower().strip()
+        ):
+            return (
+                f"LINK_THREAD action_data says client is '{extraction.client_company}' "
+                f"but target loop '{target.id}' is for client "
+                f"'{target_company}' — these don't match. "
+                f"Use CREATE_LOOP if this is a different client."
+            )
+
+        # Check 3: target loop's candidate last name must appear in email
+        if target.candidate and email_text:
+            candidate_name = target.candidate.name.strip()
+            parts = candidate_name.split()
+            last_name = parts[-1] if parts else ""
+            if last_name and len(last_name) > 1:
+                email_lower = email_text.lower()
+                if last_name.lower() not in email_lower:
+                    return (
+                        f"LINK_THREAD target loop is for candidate '{candidate_name}' "
+                        f"but the name '{last_name}' does not appear in the email — "
+                        f"use CREATE_LOOP if this is a new candidate."
+                    )
+
+        return None

@@ -7,6 +7,7 @@ contact management, and email sending.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
 
     from api.gmail.client import GmailClient
+
+logger = logging.getLogger(__name__)
 
 
 async def _collect(async_gen) -> list:
@@ -198,12 +201,55 @@ class LoopService:
         gmail_subject: str | None = None,
         notes: str | None = None,
     ) -> Loop:
-        """Create a loop in the NEW state, recording the create event."""
+        """Create a loop in the NEW state, recording the create event.
+
+        Deduplicates by (coordinator, candidate name, client): if an active
+        loop already exists for the same combo, links the thread to it instead
+        of creating a duplicate.
+        """
         async with self._pool.connection() as conn, conn.transaction():
             coord_row = await queries.get_or_create_coordinator(
                 conn, id=make_id("crd"), name=coordinator_name, email=coordinator_email
             )
             coordinator_id = coord_row[0]
+
+            normalized = (candidate_name or "").strip()
+            is_unknown = not normalized or normalized.lower() == "unknown candidate"
+
+            if not is_unknown:
+                existing = await queries.find_active_loop_by_candidate_name_at_client(
+                    conn,
+                    coordinator_id=coordinator_id,
+                    candidate_name=candidate_name,
+                    client_contact_id=client_contact_id,
+                )
+                if existing is not None:
+                    existing_loop_id = existing[0]
+                    if gmail_thread_id:
+                        await queries.link_thread(
+                            conn,
+                            id=make_id("let"),
+                            loop_id=existing_loop_id,
+                            gmail_thread_id=gmail_thread_id,
+                            subject=gmail_subject,
+                        )
+                        await self._record_event(
+                            conn,
+                            loop_id=existing_loop_id,
+                            event_type=EventType.THREAD_LINKED,
+                            data={
+                                "gmail_thread_id": gmail_thread_id,
+                                "subject": gmail_subject,
+                            },
+                            actor_email=coordinator_email,
+                        )
+                    logger.info(
+                        "dedup: reusing loop %s for %s (coordinator=%s)",
+                        existing_loop_id,
+                        candidate_name,
+                        coordinator_email,
+                    )
+                    return await self.get_loop(existing_loop_id)
 
             cand_row = await queries.create_candidate(
                 conn, id=make_id("can"), name=candidate_name, notes=None

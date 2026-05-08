@@ -77,7 +77,10 @@ class NoActionData(BaseModel):
 
 
 class LinkThreadData(BaseModel):
-    """Action data for LINK_THREAD — empty; target_loop_id on the suggestion is authoritative."""
+    """Action data for LINK_THREAD — candidate/client identity for guardrail validation."""
+
+    candidate_name: str
+    client_company: str
 
 
 class CreateLoopExtraction(BaseModel):
