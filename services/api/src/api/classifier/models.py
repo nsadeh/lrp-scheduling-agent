@@ -121,6 +121,7 @@ ACTION_DATA_MODELS: dict[SuggestedAction, type[BaseModel]] = {
 class SuggestionItem(BaseModel):
     """Single suggestion from the LLM — part of ClassificationResult."""
 
+    pre_flight: str = ""
     classification: EmailClassification
     action: SuggestedAction
     confidence: float = Field(ge=0.0, le=1.0)
@@ -133,6 +134,7 @@ class SuggestionItem(BaseModel):
 class ClassificationResult(BaseModel):
     """LLM output schema — one or more suggestions per email."""
 
+    thinking: str = ""
     suggestions: list[SuggestionItem]
     reasoning: str = ""
 
