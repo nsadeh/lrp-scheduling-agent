@@ -339,7 +339,10 @@ class LoopClassifier:
                 f"or use CREATE_LOOP",
             )
 
-        # 6. CREATE_LOOP must have a real candidate name
+        # 6. CREATE_LOOP must have a real candidate name.
+        # The error string feeds into classify()'s error-driven retry: when
+        # all suggestions fail guardrails, the errors are joined and injected
+        # into the LLM prompt via LoopClassifierInput.error for a second attempt.
         if item.action == SuggestedAction.CREATE_LOOP:
             cand_name = (item.action_data.get("candidate_name") or "").strip()
             if not cand_name or cand_name.lower() == "unknown candidate":

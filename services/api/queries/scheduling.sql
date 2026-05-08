@@ -103,13 +103,18 @@ LIMIT 10;
 
 -- name: find_active_loop_by_candidate_name_at_client^
 -- Check if an active loop already exists for this candidate-at-client combo.
+-- Matches on client company name (not contact ID) so different contacts at
+-- the same firm still dedup correctly.
 SELECT l.id
 FROM loops l
 JOIN candidates cand ON cand.id = l.candidate_id
+LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
 WHERE l.coordinator_id = :coordinator_id
   AND LOWER(TRIM(cand.name)) = LOWER(TRIM(:candidate_name))
-  AND (l.client_contact_id = :client_contact_id
-       OR (l.client_contact_id IS NULL AND :client_contact_id IS NULL))
+  AND (
+    LOWER(TRIM(cc.company)) = LOWER(TRIM(:client_company))
+    OR (cc.company IS NULL AND :client_company IS NULL)
+  )
   AND l.state NOT IN ('complete', 'cold')
 LIMIT 1;
 

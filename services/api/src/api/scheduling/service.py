@@ -197,15 +197,16 @@ class LoopService:
         recruiter_id: str | None,
         title: str,
         client_manager_id: str | None = None,
+        client_company: str | None = None,
         gmail_thread_id: str | None = None,
         gmail_subject: str | None = None,
         notes: str | None = None,
     ) -> Loop:
         """Create a loop in the NEW state, recording the create event.
 
-        Deduplicates by (coordinator, candidate name, client): if an active
-        loop already exists for the same combo, links the thread to it instead
-        of creating a duplicate.
+        Deduplicates by (coordinator, candidate name, client company): if an
+        active loop already exists for the same combo, links the thread to it
+        instead of creating a duplicate.
         """
         async with self._pool.connection() as conn, conn.transaction():
             coord_row = await queries.get_or_create_coordinator(
@@ -221,7 +222,7 @@ class LoopService:
                     conn,
                     coordinator_id=coordinator_id,
                     candidate_name=candidate_name,
-                    client_contact_id=client_contact_id,
+                    client_company=client_company,
                 )
                 if existing is not None:
                     existing_loop_id = existing[0]

@@ -166,6 +166,7 @@ class CreateLoopResolver:
             recruiter_id=recruiter_id,
             title=title,
             client_manager_id=client_manager_id,
+            client_company=extraction.client_company or None,
             gmail_thread_id=ctx.gmail_thread_id,
             gmail_subject=ctx.gmail_subject,
         )

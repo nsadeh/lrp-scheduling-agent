@@ -22,11 +22,12 @@ step(
             ROW_NUMBER() OVER (
                 PARTITION BY l.coordinator_id,
                              LOWER(TRIM(cand.name)),
-                             l.client_contact_id
+                             LOWER(TRIM(cc.company))
                 ORDER BY l.created_at DESC
             ) AS rk
         FROM loops l
         JOIN candidates cand ON cand.id = l.candidate_id
+        LEFT JOIN client_contacts cc ON cc.id = l.client_contact_id
         WHERE l.state = 'new'
     )
     UPDATE loops
