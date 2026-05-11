@@ -303,21 +303,23 @@ def _normalize_gmail_id(raw_id: str | None) -> tuple[str | None, bool]:
     form '19d9be5bb11dba38'. They're the same number in different bases.
 
     Some Workspace editions send compound IDs like
-    'thread-f:DEC|msg-f:DEC' — we split on '|' and use the first segment.
+    'thread-f:DEC|msg-f:DEC' or 'thread-a:r-DEC|msg-f:DEC'. We try each
+    pipe-separated segment until one matches a known prefix.
 
     Returns ``(normalized_id, was_rewritten)`` so callers can decide whether
     to attempt a Gmail API fallback when the rewritten ID misses the DB.
     """
     if not raw_id:
         return None, False
-    segment = raw_id.split("|")[0]
-    was_compound = segment != raw_id
+    segments = raw_id.split("|")
+    was_compound = len(segments) > 1
     if was_compound:
-        logger.warning("Compound Gmail ID received: %s — using first segment", raw_id)
-    m = _GMAIL_CONTEXTUAL_ID_RE.match(segment)
-    if m:
-        return hex(int(m.group(1)))[2:], was_compound  # strip '0x' prefix
-    return raw_id, False
+        logger.warning("Compound Gmail ID received: %s", raw_id)
+    for segment in segments:
+        m = _GMAIL_CONTEXTUAL_ID_RE.match(segment)
+        if m:
+            return hex(int(m.group(1)))[2:], was_compound
+    return raw_id, was_compound
 
 
 async def _resolve_thread_id_via_gmail(
