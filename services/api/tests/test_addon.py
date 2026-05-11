@@ -279,6 +279,14 @@ class TestNormalizeGmailId:
         assert result == hex(1864465495488333224)[2:]
         assert rewritten is True
 
+    def test_compound_thread_a_falls_back_to_msg_f(self):
+        from api.addon.routes import _normalize_gmail_id
+
+        raw = "thread-a:r-6822992238088976943|msg-f:1864470542700924161"
+        result, rewritten = _normalize_gmail_id(raw)
+        assert result == hex(1864470542700924161)[2:]
+        assert rewritten is True
+
     def test_already_hex_returned_as_is(self):
         from api.addon.routes import _normalize_gmail_id
 
