@@ -396,10 +396,13 @@ class LoopClassifier:
             if target.client_contact and target.client_contact.company
             else None
         )
+        extracted_client = extraction.client_company.lower().strip() if extraction else ""
+        target_client = target_company.lower().strip() if target_company else ""
         if (
             extraction
             and target_company
-            and extraction.client_company.lower().strip() != target_company.lower().strip()
+            and extracted_client not in target_client
+            and target_client not in extracted_client
         ):
             return (
                 f"LINK_THREAD action_data says client is '{extraction.client_company}' "
