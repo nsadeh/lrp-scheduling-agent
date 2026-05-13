@@ -170,7 +170,7 @@ class DraftService:
         to_emails, cc_emails = resolve_recipients(
             loop, recipient_type, sender_email=suggestion.coordinator_email
         )
-        subject = self._resolve_subject(loop)
+        subject = self._resolve_subject(loop, thread_messages)
 
         if len(body) > MAX_BODY_LENGTH:
             logger.warning(
@@ -280,5 +280,27 @@ class DraftService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_subject(loop: Loop) -> str:
+    def _resolve_subject(loop: Loop, thread_messages: list[Message] | None = None) -> str:
+        """Outbound subject for a reply on this thread.
+
+        Mirrors the latest thread message's subject so Gmail on the recipient's
+        side threads our reply into the existing conversation. Per Google's
+        Gmail API threading rules (developers.google.com/gmail/api/guides/threads),
+        the Subject header must match the existing thread for the reply to
+        attach to it — even with threadId set and In-Reply-To/References
+        wired correctly. We prepend "Re: " only when the latest subject
+        doesn't already start with it (case-insensitive), so we don't stack
+        "Re: Re: Re:".
+
+        Falls back to the loop title when there's no thread history —
+        essentially unreachable today (drafts are always created on a linked
+        thread that has at least one message), but keeps the function total.
+        """
+        if thread_messages:
+            latest = max(thread_messages, key=lambda m: m.date)
+            subject = (latest.subject or "").strip()
+            if subject:
+                if subject.lower().startswith("re:"):
+                    return subject
+                return f"Re: {subject}"
         return f"Re: {loop.title}"

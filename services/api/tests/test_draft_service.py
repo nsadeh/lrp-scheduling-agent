@@ -280,6 +280,75 @@ def _mock_pool():
     return mock_pool, mock_conn
 
 
+class TestResolveSubject:
+    """Subject derivation for outbound replies.
+
+    Gmail's threading rules (developers.google.com/gmail/api/guides/threads)
+    require the outbound Subject to match the existing thread's Subject for
+    the reply to attach. The function under test mirrors the latest thread
+    message's subject rather than synthesizing from loop.title.
+    """
+
+    def test_mirrors_latest_thread_subject(self):
+        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg.subject = "Trump"
+        result = DraftService._resolve_subject(_loop(), [msg])
+        assert result == "Re: Trump"
+
+    def test_no_double_re_prefix_lowercase(self):
+        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg.subject = "re: Phone screen"
+        result = DraftService._resolve_subject(_loop(), [msg])
+        assert result == "re: Phone screen"
+
+    def test_no_double_re_prefix_uppercase(self):
+        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg.subject = "RE: Phone screen"
+        result = DraftService._resolve_subject(_loop(), [msg])
+        assert result == "RE: Phone screen"
+
+    def test_no_double_re_prefix_titlecase(self):
+        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg.subject = "Re: Phone screen"
+        result = DraftService._resolve_subject(_loop(), [msg])
+        assert result == "Re: Phone screen"
+
+    def test_falls_back_to_loop_title_when_no_thread(self):
+        result = DraftService._resolve_subject(_loop(), None)
+        assert result == "Re: Round 1 - John Smith"
+
+    def test_falls_back_to_loop_title_when_thread_empty(self):
+        result = DraftService._resolve_subject(_loop(), [])
+        assert result == "Re: Round 1 - John Smith"
+
+    def test_picks_latest_by_date_not_list_order(self):
+        """The latest message wins even when list order is oldest-first."""
+        oldest = _thread_msg(
+            "alice@a.com",
+            ["coord@lrp.com"],
+            msg_id="msg_old",
+            date=datetime(2026, 4, 14, tzinfo=UTC),
+        )
+        oldest.subject = "Re: Old subject"
+        newest = _thread_msg(
+            "alice@a.com",
+            ["coord@lrp.com"],
+            msg_id="msg_new",
+            date=datetime(2026, 4, 16, tzinfo=UTC),
+        )
+        newest.subject = "Trump"
+        result = DraftService._resolve_subject(_loop(), [oldest, newest])
+        assert result == "Re: Trump"
+
+    def test_falls_back_when_latest_subject_is_blank(self):
+        """Defensive: a thread message with whitespace-only subject falls
+        back to the loop title rather than producing 'Re: ' alone."""
+        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg.subject = "   "
+        result = DraftService._resolve_subject(_loop(), [msg])
+        assert result == "Re: Round 1 - John Smith"
+
+
 class TestGenerateDraft:
     @pytest.mark.asyncio
     async def test_body_persisted(self):
@@ -313,6 +382,32 @@ class TestGenerateDraft:
             mock_queries.create_draft = AsyncMock(return_value=_draft_row(body=""))
             draft = await svc.generate_draft(suggestion=suggestion, loop=loop, body="")
             assert draft.body == ""
+
+    @pytest.mark.asyncio
+    async def test_subject_mirrors_thread_subject_not_loop_title(self):
+        """Regression: the persisted draft subject must come from the thread
+        (Gmail threading requires Subject match), not from loop.title."""
+        mock_pool, _ = _mock_pool()
+        svc = DraftService(db_pool=mock_pool, loop_service=MagicMock())
+
+        loop = _loop(state=StageState.AWAITING_CANDIDATE)
+        suggestion = _suggestion()
+        thread_msg = _thread_msg("alice@client.com", ["coord@lrp.com"])
+        thread_msg.subject = "Trump"
+
+        from unittest.mock import patch
+
+        with patch("api.drafts.service.queries") as mock_queries:
+            mock_queries.create_draft = AsyncMock(return_value=_draft_row(body=""))
+            await svc.generate_draft(
+                suggestion=suggestion,
+                loop=loop,
+                thread_messages=[thread_msg],
+                body="",
+            )
+            call_kwargs = mock_queries.create_draft.await_args.kwargs
+            # Subject derived from thread, not from loop.title ("Round 1 - John Smith").
+            assert call_kwargs["subject"] == "Re: Trump"
 
 
 class TestDraftLifecycle:
