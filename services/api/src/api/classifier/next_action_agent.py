@@ -141,12 +141,27 @@ class NextActionAgent:
                     coordinator_response=coordinator_response,
                     originating_suggestion=originating_suggestion,
                 )
-                valid_items = await self._act_with_messages(
+                valid_items, raw_responses = await self._act_with_messages(
                     prompt,
                     messages,
                     linked_loops,
                     existing_pending,
                     allow_retry=True,
+                )
+                self._langfuse.update_current_span(
+                    output={
+                        "suggestions": [
+                            {
+                                "action": item.action,
+                                "target_loop_id": item.target_loop_id,
+                                "summary": item.summary,
+                                "action_data": item.action_data,
+                                "confidence": item.confidence,
+                            }
+                            for item, _ in valid_items
+                        ],
+                        "raw_responses": raw_responses,
+                    }
                 )
         except Exception:
             logger.exception(
@@ -250,14 +265,22 @@ class NextActionAgent:
         existing_pending: list[Suggestion],
         *,
         allow_retry: bool,
-    ) -> list[tuple[SuggestionItem, Loop | None]]:
+        prior_responses: list[str] | None = None,
+    ) -> tuple[list[tuple[SuggestionItem, Loop | None]], list[str]]:
         """Run one LLM round-trip and validate the result.
 
         On batch/per-item errors, optionally append the assistant reply plus a
         user follow-up describing the errors and recurse once with
         ``allow_retry=False``.
+
+        Returns ``(valid_items, raw_responses)`` where ``raw_responses`` is the
+        full list of assistant payloads across the initial call and any retry —
+        captured on the span output so LangFuse traces show what the model
+        produced even if guardrails dropped items.
         """
+        prior_responses = prior_responses or []
         response = await self._call_llm(prompt, messages)
+        responses = [*prior_responses, response.content]
         try:
             result = self._parse_response(response.content)
         except NextActionAgentError as exc:
@@ -275,7 +298,12 @@ class NextActionAgent:
                     {"role": "user", "content": follow_up},
                 ]
                 return await self._act_with_messages(
-                    prompt, next_messages, linked_loops, existing_pending, allow_retry=False
+                    prompt,
+                    next_messages,
+                    linked_loops,
+                    existing_pending,
+                    allow_retry=False,
+                    prior_responses=responses,
                 )
             raise
 
@@ -294,7 +322,12 @@ class NextActionAgent:
                 {"role": "user", "content": follow_up},
             ]
             return await self._act_with_messages(
-                prompt, next_messages, linked_loops, existing_pending, allow_retry=False
+                prompt,
+                next_messages,
+                linked_loops,
+                existing_pending,
+                allow_retry=False,
+                prior_responses=responses,
             )
 
         if errors:
@@ -304,7 +337,7 @@ class NextActionAgent:
                 len(valid_items),
             )
 
-        return valid_items
+        return valid_items, responses
 
     async def _call_llm(self, prompt: Any, messages: list[dict[str, str]]) -> LLMResponse:
         """Dispatch the conversation to the LLM service.
