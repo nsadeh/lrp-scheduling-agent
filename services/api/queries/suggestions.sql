@@ -82,6 +82,16 @@ UPDATE agent_suggestions
 SET status = 'expired', resolved_at = now(), resolved_by = :resolved_by
 WHERE id = :id AND status = 'pending';
 
+-- name: has_suggestion_for_thread^
+-- Cheap existence check: any suggestion row for this thread, any status.
+-- Used by the in-message sidebar to distinguish "agent has run on this
+-- thread (show 'all caught up')" from "agent hasn't run yet (show
+-- 'generating')". A single indexed lookup; we don't care which row matches.
+SELECT 1
+FROM agent_suggestions
+WHERE gmail_thread_id = :gmail_thread_id
+LIMIT 1;
+
 -- name: get_pending_suggestions_with_context
 -- Denormalized query for the overview card: suggestions + loop context + draft context.
 -- Returns everything the UI needs in a single round-trip (no N+1).

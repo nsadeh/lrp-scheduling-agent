@@ -53,6 +53,7 @@ from api.scheduling.cards import (
     build_contextual_unlinked,
     build_create_loop_form,
     build_error_card,
+    build_loop_caught_up_card,
     build_loop_pending_card,
 )
 from api.scheduling.models import StageState
@@ -486,6 +487,10 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
         # No suggestions for this thread — check if it's linked to a loop
         svc = get_scheduling(request)
         loop = await svc.find_loop_by_thread(thread_id)
+        # Track the thread_id that produced a loop match — the Gmail-API
+        # fallback below may rewrite it, and the suggestion-existence check
+        # must run against the same id the loop was found under.
+        resolved_thread_id = thread_id
         logger.info(
             "on-message: thread_id=%s, linked_loop=%s",
             thread_id,
@@ -505,9 +510,23 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
                     card = build_overview(groups, base_url=base_url)
                     return _as_push(card).model_dump(by_alias=True, exclude_none=True)
                 loop = await svc.find_loop_by_thread(api_thread_id)
+                if loop:
+                    resolved_thread_id = api_thread_id
 
         if loop:
-            card = build_loop_pending_card(thread_id, message_id=message_id)
+            # Pick between "Generating…" and "All caught up" by checking
+            # whether the agent has produced any suggestion rows for this
+            # thread at all (any status). If yes, the agent has run and
+            # there's just nothing pending right now — don't pretend work
+            # is in flight.
+            from api.classifier.service import SuggestionService
+
+            suggestion_svc = SuggestionService(db_pool=svc._pool)
+            has_history = await suggestion_svc.has_any_suggestions_for_thread(resolved_thread_id)
+            if has_history:
+                card = build_loop_caught_up_card(resolved_thread_id, message_id=message_id)
+            else:
+                card = build_loop_pending_card(resolved_thread_id, message_id=message_id)
         else:
             card = build_contextual_unlinked(thread_id, message_id=message_id)
 

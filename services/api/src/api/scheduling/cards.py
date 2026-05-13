@@ -257,6 +257,53 @@ def build_loop_pending_card(gmail_thread_id: str, message_id: str | None = None)
     )
 
 
+def build_loop_caught_up_card(gmail_thread_id: str, message_id: str | None = None) -> CardResponse:
+    """Thread-anchored empty state when the loop exists and the agent has
+    already produced suggestions on this thread, but none are pending right
+    now (everything was accepted/rejected/expired, or the agent emitted
+    no_action).
+
+    Mirrors ``build_loop_pending_card``'s shape but with copy that doesn't
+    imply work in flight — the original "Generating suggestions…" wording is
+    misleading once the agent has already run and there's simply nothing to do.
+
+    Keep the Refresh button: a new inbound on the thread can still produce
+    fresh suggestions, and coordinators often have the sidebar open while
+    waiting for the other side to reply.
+    """
+    base_url = _action_url.rsplit("/addon/", 1)[0] if _action_url else ""
+    refresh_button = Button(
+        text="↻ Refresh",
+        on_click=OnClick(
+            open_link=OpenLink(
+                url=f"{base_url}/addon/refresh",
+                open_as="OVERLAY",
+                on_close="RELOAD",
+            )
+        ),
+    )
+    return _update_card(
+        Card(
+            header=CardHeader(
+                title="All caught up",
+                subtitle="No actions needed for this thread.",
+            ),
+            sections=[
+                Section(
+                    widgets=[
+                        _text(
+                            "The agent has reviewed this thread and there are "
+                            "no pending suggestions right now. If anything "
+                            "changes, new suggestions will appear here."
+                        ),
+                        _buttons(refresh_button),
+                    ]
+                ),
+            ],
+        )
+    )
+
+
 def build_contextual_unlinked(gmail_thread_id: str, message_id: str | None = None) -> CardResponse:
     """Prompt to create or link when thread is not associated with a loop."""
     btn_params = {"gmail_thread_id": gmail_thread_id}

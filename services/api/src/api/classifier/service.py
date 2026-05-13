@@ -75,6 +75,17 @@ class SuggestionService:
             )
             return [_row_to_suggestion(r) for r in rows]
 
+    async def has_any_suggestions_for_thread(self, gmail_thread_id: str) -> bool:
+        """True iff any suggestion row exists for this thread, any status.
+
+        Heuristic for "has the agent run on this thread at least once?" — if
+        yes, the in-message sidebar shows "All caught up" instead of
+        "Generating suggestions…" when there's nothing pending.
+        """
+        async with self._pool.connection() as conn:
+            row = await queries.has_suggestion_for_thread(conn, gmail_thread_id=gmail_thread_id)
+            return row is not None
+
     async def get_pending_for_coordinator(self, coordinator_email: str) -> list[Suggestion]:
         async with self._pool.connection() as conn:
             rows = await _collect(
