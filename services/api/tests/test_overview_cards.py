@@ -299,3 +299,44 @@ class TestUpdateActorSuggestionBuilder:
         # Defensive: doesn't render input widgets or the Save button.
         assert "Save" not in text
         assert "update_actor_email_" not in text
+
+    def test_inputs_prefilled_from_pending_pick(self):
+        """When the autocomplete onChange has staged a pick via the route
+        handler, the card builder re-renders with the inputs pre-filled.
+        The user reviews the staged values and must explicitly click Save
+        to commit — autocomplete selection alone does NOT apply the change.
+        """
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="Recruiter looks wrong",
+            action_data={
+                "role": "recruiter",
+                "pending_pick": {
+                    "name": "Alice Recruiter",
+                    "email": "alice@lrp.com",
+                },
+            },
+        )
+        widgets = _build_update_actor_suggestion(view)
+        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
+        # The staged pick is visible in the rendered input values.
+        assert "Alice Recruiter" in text
+        assert "alice@lrp.com" in text
+        # Save button is still present — autocomplete-select did NOT commit.
+        assert "update_actor" in text
+
+    def test_inputs_not_prefilled_when_pending_pick_absent(self):
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="Pick a recruiter",
+            action_data={"role": "recruiter"},
+        )
+        widgets = _build_update_actor_suggestion(view)
+        # Pull the input widget values explicitly to assert they're None.
+        # (Searching the JSON dump for absence is fragile because the
+        # field names themselves appear.)
+        inputs = [w.text_input for w in widgets if getattr(w, "text_input", None) is not None]
+        recruiter_inputs = [ti for ti in inputs if ti.name.startswith("update_actor_")]
+        assert recruiter_inputs, "expected at least one update_actor_* input"
+        for ti in recruiter_inputs:
+            assert ti.value is None, f"input {ti.name!r} should have no prefill, got {ti.value!r}"

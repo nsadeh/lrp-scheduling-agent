@@ -919,10 +919,10 @@ async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email
     Three callers, distinguished by which extra params come along:
 
     - **UPDATE_ACTOR path** (``update_actor_role`` present): the coordinator
-      picked from the autocomplete on an UPDATE_ACTOR card. Delegate to
-      ``_handle_update_actor`` — autocomplete-selection IS the commit for
-      this card. (For mid-type values that don't parse as "Name <email>",
-      ``_handle_update_actor`` no-ops and refreshes.)
+      picked from the autocomplete on an UPDATE_ACTOR card. STAGE the pick
+      on the suggestion's ``action_data.pending_pick`` and refresh — the
+      card re-renders with the inputs pre-filled, and the coordinator must
+      click Save to actually commit. Autocomplete selection never commits.
 
     - **JIT path** (``draft_id`` present): the coordinator picked a recruiter
       from the autocomplete on a DRAFT_EMAIL card. Stash on draft pending
@@ -941,10 +941,13 @@ async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email
     def _field(name: str) -> str | None:
         return _get_form_value(body, name)
 
-    # UPDATE_ACTOR origin — checked FIRST so we don't fall through to the
-    # create-loop form rebuild (which silently wipes the overview).
+    # UPDATE_ACTOR origin — stage the pick rather than commit. Misclicks in
+    # the autocomplete dropdown were committing directly to the loop with no
+    # way to undo; this routes through the standard Save-button commit step.
     if suggestion_id and update_actor_role:
-        return await _handle_update_actor(body, svc, email, **kwargs)
+        return await _stash_update_actor_pick(
+            body, svc, email, request, suggestion_id, update_actor_role
+        )
 
     if draft_id and suggestion_id:
         # JIT path — stash the pick on draft.pending_jit_data instead of
@@ -1683,6 +1686,58 @@ async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, emai
 
 
 _UPDATE_ACTOR_ROLES = frozenset({"recruiter", "client_manager", "client_contact"})
+
+
+async def _stash_update_actor_pick(
+    body: AddonRequest,
+    svc: LoopService,
+    email: str,
+    request,
+    suggestion_id: str,
+    update_actor_role: str,
+):
+    """Autocomplete onChange handler for UPDATE_ACTOR cards.
+
+    Stages the directory selection by writing it to the suggestion's
+    ``action_data.pending_pick``. The card builder reads pending_pick on
+    re-render and pre-fills the autocomplete inputs with the staged values,
+    so the coordinator sees what they picked but the change is NOT
+    committed until they click Save (which routes to _handle_update_actor).
+
+    Idempotent: re-picking from the autocomplete overwrites pending_pick.
+    Mid-typed input that doesn't parse as "Name <email>" is a no-op refresh
+    — same gating as the JIT path uses.
+    """
+    from api.classifier.service import SuggestionService
+
+    name_field = f"update_actor_name_{suggestion_id}"
+    email_field = f"update_actor_email_{suggestion_id}"
+    raw_name = _get_form_value(body, name_field) or ""
+    raw_email = _get_form_value(body, email_field) or ""
+    parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
+    if parsed is None:
+        return await _build_refreshed_overview(request, email)
+    new_name, new_email = parsed
+    new_email = new_email.strip()
+    if not new_email:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+    if suggestion is None:
+        return await _build_refreshed_overview(request, email)
+
+    new_action_data = dict(suggestion.action_data or {})
+    new_action_data["role"] = update_actor_role  # idempotent — already set by the agent
+    new_action_data["pending_pick"] = {"name": new_name, "email": new_email}
+    await suggestion_svc.update_action_data(suggestion_id, new_action_data)
+    logger.info(
+        "staged update_actor pick for suggestion %s (role=%s, email=%s)",
+        suggestion_id,
+        update_actor_role,
+        new_email,
+    )
+    return await _build_refreshed_overview(request, email)
 
 
 async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str, **kwargs):

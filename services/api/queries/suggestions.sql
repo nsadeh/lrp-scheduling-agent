@@ -92,6 +92,14 @@ FROM agent_suggestions
 WHERE gmail_thread_id = :gmail_thread_id
 LIMIT 1;
 
+-- name: update_action_data!
+-- Replace the action_data JSONB blob on a suggestion. Used by the addon to
+-- stash UI-driven state (currently UPDATE_ACTOR's pending_pick from the
+-- autocomplete onChange handler) before the coordinator commits via Save.
+UPDATE agent_suggestions
+SET action_data = :action_data
+WHERE id = :id;
+
 -- name: get_pending_suggestions_with_context
 -- Denormalized query for the overview card: suggestions + loop context + draft context.
 -- Returns everything the UI needs in a single round-trip (no N+1).

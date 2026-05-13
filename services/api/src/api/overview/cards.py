@@ -616,6 +616,15 @@ def _build_update_actor_suggestion(view: SuggestionView) -> list[Widget]:
         display = f"{current_name} &lt;{current_email}&gt;" if current_name else current_email
         widgets.append(_text(f"<i>Currently: {display}</i>"))
 
+    # When the coordinator has staged a pick via the autocomplete (the
+    # onChange handler stashes to action_data.pending_pick), render the
+    # inputs pre-filled. The user must still click Save to commit — this
+    # is the difference between "I clicked a row in the dropdown" and
+    # "I confirmed that's the recruiter I want."
+    pending = data.get("pending_pick") if isinstance(data.get("pending_pick"), dict) else None
+    prefill_name = pending.get("name") if pending else None
+    prefill_email = pending.get("email") if pending else None
+
     if role in ("recruiter", "client_manager"):
         name_field = f"update_actor_name_{sid}"
         email_field = f"update_actor_email_{sid}"
@@ -625,6 +634,8 @@ def _build_update_actor_suggestion(view: SuggestionView) -> list[Widget]:
                 directory_search_url=directory_search_url(),
                 name_field=name_field,
                 email_field=email_field,
+                prefill_name=prefill_name,
+                prefill_email=prefill_email,
                 on_change_extra_params={
                     "suggestion_id": sid,
                     "update_actor_role": role,

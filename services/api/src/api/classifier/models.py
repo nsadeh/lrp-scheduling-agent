@@ -91,9 +91,16 @@ class UpdateActorData(BaseModel):
     Non-auto-resolvable: surfaces in the UI as a card with an autocomplete
     (for internal roles) or plain inputs (for client_contact), so the
     coordinator picks the new actor by hand. Variant of ASK_COORDINATOR.
+
+    ``role`` is the only agent-emitted field. ``pending_pick`` is UI state
+    written by the addon's autocomplete onChange handler — it stages a
+    directory selection so the card can re-render with the inputs
+    pre-filled, requiring the coordinator to click Save before the change
+    commits. The agent never sets pending_pick.
     """
 
     role: Literal["recruiter", "client_manager", "client_contact"]
+    pending_pick: dict[str, str] | None = None
 
 
 class LinkThreadData(BaseModel):

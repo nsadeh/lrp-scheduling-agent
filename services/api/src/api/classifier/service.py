@@ -128,6 +128,20 @@ class SuggestionService:
         async with self._pool.connection() as conn, conn.transaction():
             await queries.expire_suggestion(conn, id=suggestion_id, resolved_by=resolved_by)
 
+    async def update_action_data(self, suggestion_id: str, action_data: dict) -> None:
+        """Replace a suggestion's action_data JSONB blob.
+
+        Used by the addon to stash UI-driven state (UPDATE_ACTOR's
+        ``pending_pick`` from the autocomplete onChange handler) so the card
+        can re-render with the staged values pre-filled in the inputs. The
+        coordinator must explicitly click Save to commit — autocomplete
+        selection alone never commits.
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_action_data(
+                conn, id=suggestion_id, action_data=json.dumps(action_data)
+            )
+
 
 def _row_to_suggestion(row: tuple) -> Suggestion:
     """Tuple shape (15 cols):
