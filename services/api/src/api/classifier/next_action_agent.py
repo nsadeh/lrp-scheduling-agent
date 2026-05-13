@@ -113,6 +113,7 @@ class NextActionAgent:
         arq_pool: ArqRedis | None = None,
         coordinator_response: str | None = None,
         originating_suggestion: Suggestion | None = None,
+        rejected_suggestion: Suggestion | None = None,
     ) -> None:
         msg = event.message
 
@@ -140,6 +141,7 @@ class NextActionAgent:
                     context_input,
                     coordinator_response=coordinator_response,
                     originating_suggestion=originating_suggestion,
+                    rejected_suggestion=rejected_suggestion,
                 )
                 valid_items, raw_responses = await self._act_with_messages(
                     prompt,
@@ -194,6 +196,16 @@ class NextActionAgent:
         seen_fingerprints: set[str] = {
             _suggestion_fingerprint(s.loop_id, s.action, s.action_data) for s in existing_pending
         }
+        # The just-rejected suggestion isn't in pending (it's REJECTED), but we
+        # must not let the agent re-emit it verbatim after a rejection re-run.
+        if rejected_suggestion is not None:
+            seen_fingerprints.add(
+                _suggestion_fingerprint(
+                    rejected_suggestion.loop_id,
+                    rejected_suggestion.action,
+                    rejected_suggestion.action_data,
+                )
+            )
 
         for item, target_loop in valid_items:
             loop_id = target_loop.id if target_loop else None
@@ -364,6 +376,7 @@ class NextActionAgent:
         *,
         coordinator_response: str | None,
         originating_suggestion: Suggestion | None,
+        rejected_suggestion: Suggestion | None = None,
     ) -> list[dict[str, str]]:
         """Compile the prompt + (optionally) splice in the prior turn."""
         input_dict = context_input.model_dump()
@@ -391,6 +404,13 @@ class NextActionAgent:
                     ),
                 }
             )
+        elif rejected_suggestion is not None:
+            # The coordinator dismissed the prior suggestion. We have no "why"
+            # signal — just the fact of rejection. Tell the model to try a
+            # materially different alternative or prefer no_action.
+            assistant_content = _reconstruct_prior_assistant(rejected_suggestion)
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "user", "content": _REJECTION_FOLLOWUP_TEXT})
 
         return messages
 
@@ -608,6 +628,17 @@ class NextActionAgent:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_REJECTION_FOLLOWUP_TEXT = (
+    "The coordinator rejected the previous suggestion. "
+    "We do NOT know why they rejected it.\n\n"
+    "Propose a materially different alternative — for example: a different "
+    "recipient, a different action type, or substantively different content. "
+    "Do NOT repeat the rejected suggestion with cosmetic changes.\n\n"
+    "If no materially different alternative is appropriate, emit no_action. "
+    "It is better to do nothing than to propose another likely-bad option."
+)
 
 
 def _build_error_followup(errors: list[str]) -> str:

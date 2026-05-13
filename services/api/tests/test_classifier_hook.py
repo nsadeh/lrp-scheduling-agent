@@ -1002,3 +1002,107 @@ class TestExpireSuggestionFlow:
             await agent.act(_event(), [_loop()])
 
         suggestion_service.create_suggestion.assert_not_called()
+
+
+# --- Rejection re-run ---
+
+
+def _rejected_draft_suggestion() -> Suggestion:
+    return Suggestion(
+        id="sug_rejected",
+        coordinator_email="coord@lrp.com",
+        gmail_message_id="msg0",
+        gmail_thread_id="thread1",
+        loop_id="lop_1",
+        classification=EmailClassification.AVAILABILITY_RESPONSE,
+        action=SuggestedAction.DRAFT_EMAIL,
+        confidence=0.8,
+        summary="Drafted to recruiter",
+        action_data={"body": "Original body", "recipient_type": "recruiter"},
+        status=SuggestionStatus.REJECTED,
+    )
+
+
+class TestRejectionRerun:
+    @pytest.mark.asyncio
+    async def test_rejection_splices_prior_turn_and_followup(self):
+        agent, _ = _make_agent()
+
+        replacement = [
+            _suggestion_item(
+                action=SuggestedAction.ASK_COORDINATOR,
+                action_data={"question": "How should I handle this differently?"},
+            )
+        ]
+        agent._llm.complete = AsyncMock(
+            return_value=_llm_response(_suggestions_envelope(replacement))
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                rejected_suggestion=_rejected_draft_suggestion(),
+            )
+
+        messages = agent._llm.complete.await_args.kwargs["messages"]
+        roles = [m["role"] for m in messages]
+        assert roles == ["system", "user", "assistant", "user"]
+        # The rejected suggestion appears in the reconstructed assistant turn.
+        assert "draft_email" in messages[-2]["content"]
+        # The follow-up explicitly tells the agent it was rejected with no reason.
+        followup = messages[-1]["content"]
+        assert "rejected" in followup.lower()
+        assert "materially different" in followup.lower()
+        assert "no_action" in followup
+
+    @pytest.mark.asyncio
+    async def test_rejection_dedups_identical_resuggestion(self):
+        """Agent ignores the prompt and re-emits the exact same DRAFT_EMAIL —
+        the dedup fingerprint should drop it silently."""
+        agent, suggestion_service = _make_agent()
+
+        rejected = _rejected_draft_suggestion()
+        # Agent re-emits the rejected suggestion verbatim.
+        duplicate = _suggestion_item(
+            action=SuggestedAction.DRAFT_EMAIL,
+            action_data=rejected.action_data,
+        )
+        agent._llm.complete = AsyncMock(
+            return_value=_llm_response(_suggestions_envelope([duplicate]))
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(_event(), [_loop()], rejected_suggestion=rejected)
+
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejection_accepts_different_alternative(self):
+        """Agent proposes a materially different action — that suggestion is persisted."""
+        agent, suggestion_service = _make_agent()
+
+        rejected = _rejected_draft_suggestion()
+        alternative = [
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "Totally different body", "recipient_type": "client"},
+            )
+        ]
+        agent._llm.complete = AsyncMock(
+            return_value=_llm_response(_suggestions_envelope(alternative))
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(_event(), [_loop()], rejected_suggestion=rejected)
+
+        suggestion_service.create_suggestion.assert_called_once()

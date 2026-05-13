@@ -1455,8 +1455,17 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     return await _build_refreshed_overview(request, email)
 
 
+# Reject re-runs the agent for these action types — DRAFT_EMAIL and
+# ASK_COORDINATOR are the cases where a different next attempt is plausible.
+# ADVANCE_STAGE / NO_ACTION / EXPIRE_SUGGESTION rejections stay dead-ends.
+_RERUN_ON_REJECT_ACTIONS = frozenset({SuggestedAction.DRAFT_EMAIL, SuggestedAction.ASK_COORDINATOR})
+
+
 async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    """Dismiss a suggestion — resolve as REJECTED, discard draft if applicable."""
+    """Dismiss a suggestion — resolve as REJECTED, discard draft if applicable,
+    and (for DRAFT_EMAIL / ASK_COORDINATOR) enqueue a re-run so the agent can
+    propose a materially different alternative.
+    """
     from api.classifier.service import SuggestionService
 
     request = kwargs.get("request")
@@ -1476,6 +1485,31 @@ async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email:
                 await draft_svc.mark_discarded(draft.id)
 
     await suggestion_svc.resolve(suggestion_id, SuggestionStatus.REJECTED, email)
+
+    if (
+        suggestion is not None
+        and suggestion.action in _RERUN_ON_REJECT_ACTIONS
+        and suggestion.gmail_thread_id
+    ):
+        redis = get_redis(request)
+        if redis is not None:
+            try:
+                await redis.enqueue_job(
+                    "process_rejection_response",
+                    suggestion_id,
+                    email,
+                    suggestion.gmail_thread_id,
+                )
+                logger.info(
+                    "enqueued rejection re-run for suggestion %s (action=%s)",
+                    suggestion_id,
+                    suggestion.action,
+                )
+            except Exception:
+                # Best-effort — the rejection itself succeeded, swallow the enqueue error.
+                logger.exception(
+                    "failed to enqueue rejection re-run for suggestion %s", suggestion_id
+                )
 
     return await _build_refreshed_overview(request, email)
 
