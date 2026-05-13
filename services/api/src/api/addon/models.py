@@ -270,12 +270,35 @@ class ActionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
     navigations: list[PushCard | UpdateCard]
+    # When True, Gmail invalidates cached homepage / contextual cards so the
+    # corresponding triggers re-run on the next navigation. Required path:
+    # this field must sit inside the renderActions envelope (see
+    # RenderActions below); placing it on a bare {"action": {...}} response
+    # triggers a generic add-on error.
+    state_changed: bool | None = Field(default=None, alias="stateChanged")
 
 
-class CardResponse(BaseModel):
+class RenderActions(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
     action: ActionResponse
+
+
+class CardResponse(BaseModel):
+    """Top-level HTTP add-on response.
+
+    Two shapes are supported:
+      - Bare ``{"action": {...}}`` — used by homepage / contextual triggers.
+        This is the legacy form the codebase has emitted since day one.
+      - Wrapped ``{"renderActions": {"action": {...}}}`` — used by action
+        responses that need to set ``stateChanged=true``. Gmail enforces this
+        envelope when the action mutates state.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    action: ActionResponse | None = None
+    render_actions: RenderActions | None = Field(default=None, alias="renderActions")
 
 
 # ---------------------------------------------------------------------------

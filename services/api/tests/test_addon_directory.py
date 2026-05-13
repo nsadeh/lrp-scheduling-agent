@@ -666,7 +666,7 @@ class TestRecruiterSelectedHandler:
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
-        card = resp.json()["action"]["navigations"][0]["updateCard"]
+        card = resp.json()["renderActions"]["action"]["navigations"][0]["updateCard"]
         inputs = _extract_inputs(card)
         assert inputs["recruiter_name"] == "Sarah Chen"
         assert inputs["recruiter_email"] == "sarah@lrp.com"
@@ -688,7 +688,8 @@ class TestRecruiterSelectedHandler:
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
-        inputs = _extract_inputs(resp.json()["action"]["navigations"][0]["updateCard"])
+        card = resp.json()["renderActions"]["action"]["navigations"][0]["updateCard"]
+        inputs = _extract_inputs(card)
         assert inputs["recruiter_name"] == "Bob Ray"
         assert inputs["recruiter_email"] == "bob@lrp.com"
 
@@ -708,7 +709,8 @@ class TestRecruiterSelectedHandler:
             "authorizationEventObject": {"userIdToken": _FAKE_USER_ID_TOKEN},
         }
         resp = await client.post("/addon/action", json=event)
-        inputs = _extract_inputs(resp.json()["action"]["navigations"][0]["updateCard"])
+        card = resp.json()["renderActions"]["action"]["navigations"][0]["updateCard"]
+        inputs = _extract_inputs(card)
         assert inputs["recruiter_name"] == "Sarah"
         assert inputs["recruiter_email"] == "sarah@external.com"
 

@@ -76,8 +76,14 @@ MESSAGE_EVENT = {
 
 
 def _get_card(data: dict) -> dict:
-    """Extract the card from the response — homepage/on-message use pushCard."""
-    nav = data["action"]["navigations"][0]
+    """Extract the first card from the response.
+
+    Homepage and on-message triggers return the bare ``{"action": {...}}``
+    shape. Action responses are wrapped in ``{"renderActions": {"action":
+    {...}}}`` so we can set ``stateChanged`` — handle both transparently.
+    """
+    action = data.get("action") or data["renderActions"]["action"]
+    nav = action["navigations"][0]
     return nav.get("pushCard") or nav.get("updateCard")
 
 
@@ -127,8 +133,7 @@ class TestAction:
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
-        data = resp.json()
-        card = data["action"]["navigations"][0]["updateCard"]
+        card = _get_card(resp.json())
         assert card["header"]["title"] == "New Scheduling Loop"
 
     async def test_show_create_form_prefers_stored_contact_name(
@@ -171,7 +176,7 @@ class TestAction:
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
-        card = resp.json()["action"]["navigations"][0]["updateCard"]
+        card = _get_card(resp.json())
 
         inputs = {}
         for section in card["sections"]:
@@ -208,7 +213,7 @@ class TestAction:
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
-        card = resp.json()["action"]["navigations"][0]["updateCard"]
+        card = _get_card(resp.json())
         inputs = {}
         for section in card["sections"]:
             for widget in section["widgets"]:
@@ -230,6 +235,33 @@ class TestAction:
         }
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
+
+    async def test_action_response_uses_renderactions_with_state_changed(self, client: AsyncClient):
+        """Action responses must be wrapped in renderActions with
+        stateChanged=true so Gmail invalidates cached homepage / contextual
+        cards. Without renderActions, stateChanged is rejected by Gmail's
+        validator and the user sees an 'Add-on error' card; without
+        stateChanged, navigating back after an accept shows stale data and
+        coordinators double-execute the action."""
+        event = {
+            "commonEventObject": {
+                "hostApp": "GMAIL",
+                "platform": "WEB",
+                "invokedFunction": "nonexistent_function",
+            },
+            "authorizationEventObject": {
+                "userIdToken": _FAKE_USER_ID_TOKEN,
+            },
+        }
+        resp = await client.post("/addon/action", json=event)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "renderActions" in body, f"expected renderActions wrapper, got {body}"
+        assert body["renderActions"]["action"]["stateChanged"] is True
+        assert "navigations" in body["renderActions"]["action"]
+        # Bare top-level "action" must NOT be present on wrapped responses —
+        # Gmail rejects responses that include both shapes.
+        assert "action" not in body
 
 
 class TestRefresh:
