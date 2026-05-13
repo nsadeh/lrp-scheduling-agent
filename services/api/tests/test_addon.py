@@ -231,25 +231,6 @@ class TestAction:
         resp = await client.post("/addon/action", json=event)
         assert resp.status_code == 200
 
-    async def test_action_response_signals_state_changed(self, client: AsyncClient):
-        """Every /addon/action response must include `stateChanged: true` so
-        Google invalidates cached homepage / contextual cards. Without this,
-        navigating back after a suggestion accept shows the resolved item still
-        listed and coordinators double-execute the action."""
-        event = {
-            "commonEventObject": {
-                "hostApp": "GMAIL",
-                "platform": "WEB",
-                "invokedFunction": "nonexistent_function",
-            },
-            "authorizationEventObject": {
-                "userIdToken": _FAKE_USER_ID_TOKEN,
-            },
-        }
-        resp = await client.post("/addon/action", json=event)
-        assert resp.status_code == 200
-        assert resp.json()["action"]["stateChanged"] is True
-
 
 class TestRefresh:
     async def test_returns_self_closing_html(self, client: AsyncClient):

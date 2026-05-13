@@ -270,12 +270,6 @@ class ActionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
 
     navigations: list[PushCard | UpdateCard]
-    # When True, Google invalidates cached homepage / contextual cards so the
-    # corresponding triggers re-run on the next navigation. Set after actions
-    # that mutate state visible on the homepage (suggestion accept/reject,
-    # draft send/discard, etc.); without it, navigating back from the
-    # in-message view shows stale suggestions and coordinators double-execute.
-    state_changed: bool | None = Field(default=None, alias="stateChanged")
 
 
 class CardResponse(BaseModel):
