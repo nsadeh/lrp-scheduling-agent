@@ -92,8 +92,17 @@ def fetch_prompt(
             to iterate on prompts without affecting prod.
     """
     resolved_label = label or DEFAULT_PROMPT_LABEL
+
+    # Non-production labels skip the SDK's 60s prompt cache so a freshly
+    # published version is picked up on the very next call — critical for
+    # iterating on prompts in dev/staging. Production keeps the default
+    # cache so the SDK can serve from cache during a LangFuse outage.
+    get_prompt_kwargs: dict = {"label": resolved_label, "type": prompt_type}
+    if resolved_label != "production":
+        get_prompt_kwargs["cache_ttl_seconds"] = 0
+
     try:
-        prompt = client.get_prompt(name, label=resolved_label, type=prompt_type)
+        prompt = client.get_prompt(name, **get_prompt_kwargs)
     except Exception as exc:
         error_msg = str(exc).lower()
         if "not found" in error_msg:
