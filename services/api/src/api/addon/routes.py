@@ -598,6 +598,11 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     except GmailValidationError as exc:
         logger.warning("Gmail validation error in action %s: %s", fn, exc)
         card = build_error_card(str(exc))
+    # Tell Google to invalidate the cached homepage / contextual cards so that
+    # navigating back after a suggestion accept/reject doesn't show stale
+    # state. Without this, coordinators see the resolved suggestion still
+    # listed and click Accept again, double-executing the action.
+    card.action.state_changed = True
     return card.model_dump(by_alias=True, exclude_none=True)
 
 
