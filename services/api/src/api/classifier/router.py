@@ -71,6 +71,7 @@ class EmailRouter:
         event: EmailEvent,
         *,
         arq_pool: ArqRedis | None = None,
+        generation_token: str | None = None,
     ) -> None:
         msg = event.message
 
@@ -94,7 +95,13 @@ class EmailRouter:
             # Linked thread → Next Action Agent (inbound and outgoing).
             # Internal-only messages are kept here: recruiter→coordinator on a
             # live loop is signal, not noise.
-            await self._agent.act(event, linked_loops, arq_pool=arq_pool)
+            await self._agent.act(
+                event,
+                linked_loops,
+                arq_pool=arq_pool,
+                generation_token=generation_token,
+                generation_thread_id=msg.thread_id if generation_token else None,
+            )
             return
 
         # 3. Unlinked thread. Now the internal-only filter applies — random

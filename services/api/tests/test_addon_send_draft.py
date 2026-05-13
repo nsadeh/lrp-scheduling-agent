@@ -173,3 +173,110 @@ async def test_reply_still_sends_when_thread_fetch_fails():
     assert call["in_reply_to"] is None
     assert call["references"] is None
     assert call["body"] == "Please share availability."
+
+
+class TestPickThreadAnchor:
+    """_pick_thread_anchor decides which Message-ID we point In-Reply-To at."""
+
+    def test_no_messages_returns_none(self):
+        from api.addon.routes import _pick_thread_anchor
+
+        assert _pick_thread_anchor([], ["x@y.com"], is_forward=False) is None
+
+    def test_forward_anchors_on_latest_overall(self):
+        """Forwards introduce a new party who hasn't sent anything yet —
+        anchor on the latest message regardless of recipient match."""
+        from api.addon.routes import _pick_thread_anchor
+
+        older = _make_message(
+            msg_id="m_old",
+            from_email="alice@client.com",
+            message_id_header="<old@mail.gmail.com>",
+        )
+        older.date = datetime(2026, 4, 1, tzinfo=UTC)
+        latest = _make_message(
+            msg_id="m_new",
+            from_email="recruiter@lrp.com",
+            message_id_header="<new@mail.gmail.com>",
+        )
+        latest.date = datetime(2026, 4, 20, tzinfo=UTC)
+        anchor = _pick_thread_anchor([older, latest], ["bob@new-party.com"], is_forward=True)
+        assert anchor.message_id_header == "<new@mail.gmail.com>"
+
+    def test_reply_to_client_with_prior_send_anchors_on_client(self):
+        """Client recipient who has sent on this thread → anchor on their
+        latest send so their Gmail can thread by Message-ID match."""
+        from api.addon.routes import _pick_thread_anchor
+
+        client_msg = _make_message(
+            msg_id="m_client",
+            from_email="alice@client.com",
+            message_id_header="<client@mail.gmail.com>",
+        )
+        client_msg.date = datetime(2026, 4, 10, tzinfo=UTC)
+        recruiter_reply = _make_message(
+            msg_id="m_rec",
+            from_email="recruiter@lrp.com",
+            message_id_header="<recruiter@mail.gmail.com>",
+        )
+        recruiter_reply.date = datetime(2026, 4, 15, tzinfo=UTC)
+        anchor = _pick_thread_anchor(
+            [client_msg, recruiter_reply], ["alice@client.com"], is_forward=False
+        )
+        assert anchor.message_id_header == "<client@mail.gmail.com>"
+
+    def test_reply_to_recipient_not_in_thread_falls_back_to_latest(self):
+        """When the recipient hasn't sent anything on this thread (the
+        coord-forwarded-into-recruiter-only-thread scenario), fall back to
+        the latest message overall. Subject mirroring carries threading
+        on the recipient's side; this preserves prior behavior."""
+        from api.addon.routes import _pick_thread_anchor
+
+        coord_fwd = _make_message(
+            msg_id="m_fwd",
+            from_email="coord@lrp.com",
+            message_id_header="<fwd@mail.gmail.com>",
+        )
+        coord_fwd.date = datetime(2026, 4, 10, tzinfo=UTC)
+        recruiter_reply = _make_message(
+            msg_id="m_rec",
+            from_email="recruiter@lrp.com",
+            message_id_header="<recruiter@mail.gmail.com>",
+        )
+        recruiter_reply.date = datetime(2026, 4, 15, tzinfo=UTC)
+        # Client has never sent on this thread.
+        anchor = _pick_thread_anchor(
+            [coord_fwd, recruiter_reply], ["alice@client.com"], is_forward=False
+        )
+        assert anchor.message_id_header == "<recruiter@mail.gmail.com>"
+
+    def test_reply_picks_latest_match_when_multiple_from_recipient(self):
+        """If the recipient has sent more than once, pick their LATEST."""
+        from api.addon.routes import _pick_thread_anchor
+
+        first = _make_message(
+            msg_id="m_first",
+            from_email="alice@client.com",
+            message_id_header="<first@mail.gmail.com>",
+        )
+        first.date = datetime(2026, 4, 1, tzinfo=UTC)
+        second = _make_message(
+            msg_id="m_second",
+            from_email="alice@client.com",
+            message_id_header="<second@mail.gmail.com>",
+        )
+        second.date = datetime(2026, 4, 20, tzinfo=UTC)
+        # Intentionally not in chronological order:
+        anchor = _pick_thread_anchor([second, first], ["alice@client.com"], is_forward=False)
+        assert anchor.message_id_header == "<second@mail.gmail.com>"
+
+    def test_reply_recipient_match_is_case_insensitive(self):
+        from api.addon.routes import _pick_thread_anchor
+
+        client_msg = _make_message(
+            msg_id="m_client",
+            from_email="Alice@Client.com",
+            message_id_header="<client@mail.gmail.com>",
+        )
+        anchor = _pick_thread_anchor([client_msg], ["ALICE@CLIENT.COM"], is_forward=False)
+        assert anchor.message_id_header == "<client@mail.gmail.com>"

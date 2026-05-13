@@ -35,6 +35,7 @@ from api.classifier.formatters import (
     format_loops_xml,
     format_thread_history_xml,
 )
+from api.classifier.generation import is_current_generation
 from api.classifier.models import (
     ACTION_DATA_MODELS,
     ClassificationResult,
@@ -115,6 +116,8 @@ class NextActionAgent:
         coordinator_response: str | None = None,
         originating_suggestion: Suggestion | None = None,
         rejected_suggestion: Suggestion | None = None,
+        generation_token: str | None = None,
+        generation_thread_id: str | None = None,
     ) -> None:
         msg = event.message
 
@@ -144,6 +147,18 @@ class NextActionAgent:
                     originating_suggestion=originating_suggestion,
                     rejected_suggestion=rejected_suggestion,
                 )
+                # Checkpoint 1: another worker may have started a newer run on
+                # this thread while we were building context. Skip the LLM
+                # round-trip entirely if we've been superseded.
+                if not await is_current_generation(
+                    arq_pool, generation_thread_id, generation_token
+                ):
+                    logger.info(
+                        "next-action-agent superseded before LLM (thread=%s, token=%s)",
+                        generation_thread_id,
+                        generation_token,
+                    )
+                    return
                 valid_items, raw_responses = await self._act_with_messages(
                     prompt,
                     messages,
@@ -191,6 +206,19 @@ class NextActionAgent:
                 ),
                 reasoning="LLM call failed",
                 loop_id=linked_loops[0].id if linked_loops else None,
+            )
+            return
+
+        # Checkpoint 2: the LLM call may have taken seconds. Another worker
+        # could have started and finished in that window. Drop our (possibly
+        # stale) suggestions rather than writing them on top of newer work.
+        if not await is_current_generation(arq_pool, generation_thread_id, generation_token):
+            logger.info(
+                "next-action-agent superseded after LLM "
+                "(thread=%s, token=%s, valid_items=%d) — dropping",
+                generation_thread_id,
+                generation_token,
+                len(valid_items),
             )
             return
 

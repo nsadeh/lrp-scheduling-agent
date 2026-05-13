@@ -36,8 +36,26 @@ def _is_forward_draft(
     to_emails: list[str],
     thread_messages: list[Message] | None,
     trigger_message_id: str | None = None,
+    recipient_type: str | None = None,
 ) -> bool:
-    """A draft is a forward when the recipient wasn't on the triggering message."""
+    """A draft is a forward when we'd be putting prior conversation in front of
+    a party who wasn't on the trigger message.
+
+    Special case: ``recipient_type == "client"`` is NEVER treated as a forward
+    even when the client wasn't on the triggering message. The trigger may be
+    an internal recruiter reply that happens to be the latest message on the
+    thread; quoting that to the client would leak internal LRP conversation
+    (the exact bug this guard prevents). Client-bound drafts always go out as
+    clean replies built from the draft body alone — the agent is expected to
+    summarize whatever it needs from the recruiter reply in its own words.
+
+    Non-client recipient types (``recruiter``, ``client_manager``, ``internal``)
+    retain the trigger-based detection — those are LRP folks, and forwarding
+    upstream context is the correct behavior (e.g., forwarding a client
+    request to a recruiter who hasn't seen the thread).
+    """
+    if recipient_type == "client":
+        return False
     if not thread_messages or not to_emails:
         return False
 
@@ -180,7 +198,12 @@ class DraftService:
             )
             body = body[:MAX_BODY_LENGTH] + "\n\n[Draft truncated — please review]"
 
-        is_forward = _is_forward_draft(to_emails, thread_messages, suggestion.gmail_message_id)
+        is_forward = _is_forward_draft(
+            to_emails,
+            thread_messages,
+            suggestion.gmail_message_id,
+            recipient_type=recipient_type,
+        )
 
         draft_id = make_id("drf")
         async with self._pool.connection() as conn, conn.transaction():

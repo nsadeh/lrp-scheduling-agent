@@ -16,6 +16,7 @@ from arq import cron
 from arq.connections import RedisSettings
 from psycopg_pool import AsyncConnectionPool
 
+from api.classifier.generation import claim_generation
 from api.gmail.auth import TokenStore
 from api.gmail.client import GmailClient
 from api.gmail.exceptions import GmailNotFoundError, GmailScopeError, GmailTokenStaleError
@@ -385,6 +386,12 @@ async def run_next_action_agent(
     """
     gmail: GmailClient = ctx["gmail"]
     router = ctx["router"]
+    redis = ctx.get("redis")
+    # Claim the per-thread generation token at worker entry. If a later
+    # worker (coordinator-response or rejection-rerun) starts for the same
+    # thread while we're mid-flight, it'll overwrite the token and our
+    # next-action-agent checkpoint will abort cleanly.
+    gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
         if gmail_message_id:
@@ -413,7 +420,7 @@ async def run_next_action_agent(
             new_participants=new_participants,
             thread_messages=thread_messages,
         )
-        await router.on_email(event, arq_pool=ctx.get("redis"))
+        await router.on_email(event, arq_pool=redis, generation_token=gen_token)
         logger.info(
             "next action agent processed message %s (thread %s)",
             message.id,
@@ -449,6 +456,11 @@ async def process_coordinator_response(
     agent = ctx["next_action_agent"]
     suggestion_svc = ctx["suggestion_service"]
     loop_service = ctx["loop_service"]
+    redis = ctx.get("redis")
+    # Claim the per-thread generation token so a concurrent run_next_action_agent
+    # or process_rejection_response on this thread can supersede us (or be
+    # superseded by us).
+    gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
         # Fetch the originating ask_coordinator suggestion so the agent can
@@ -497,7 +509,9 @@ async def process_coordinator_response(
             linked_loops,
             coordinator_response=coordinator_response,
             originating_suggestion=originating,
-            arq_pool=ctx.get("redis"),
+            arq_pool=redis,
+            generation_token=gen_token,
+            generation_thread_id=gmail_thread_id,
         )
         logger.info(
             "coordinator response processed for suggestion %s (thread %s)",
@@ -542,6 +556,11 @@ async def process_rejection_response(
     agent = ctx["next_action_agent"]
     suggestion_svc = ctx["suggestion_service"]
     loop_service = ctx["loop_service"]
+    redis = ctx.get("redis")
+    # Claim the per-thread generation token. A concurrent accept-driven
+    # re-run on the same thread (process_coordinator_response or
+    # run_next_action_agent) will supersede us if it starts later.
+    gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
         rejected = await suggestion_svc.get_suggestion(rejected_suggestion_id)
@@ -594,7 +613,9 @@ async def process_rejection_response(
             event,
             [target_loop],
             rejected_suggestion=rejected,
-            arq_pool=ctx.get("redis"),
+            arq_pool=redis,
+            generation_token=gen_token,
+            generation_thread_id=gmail_thread_id,
         )
         logger.info(
             "rejection re-run completed for suggestion %s (thread %s)",

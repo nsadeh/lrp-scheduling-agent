@@ -260,6 +260,80 @@ class TestIsForwardDraft:
         )
         assert _is_forward_draft(["bob@b.com"], [trigger], "msg_new") is False
 
+    def test_client_recipient_never_forwards_even_when_not_on_trigger(self):
+        """Privacy guard: recipient_type='client' MUST short-circuit to False.
+
+        Scenario that motivated this: client → coord → coord forwards to
+        recruiter → recruiter replies → agent suggests drafting back to
+        client. The trigger is the recruiter's reply, which the client
+        isn't on. Without this guard, _is_forward_draft would return True
+        and the recruiter's reply would be quoted to the client (LEAK).
+        """
+        recruiter_reply = _thread_msg(
+            "recruiter@lrp.com",
+            ["coord@lrp.com"],
+            msg_id="msg_recruiter",
+        )
+        assert (
+            _is_forward_draft(
+                ["client@external.com"],
+                [recruiter_reply],
+                "msg_recruiter",
+                recipient_type="client",
+            )
+            is False
+        )
+
+    def test_client_recipient_returns_false_even_when_on_trigger(self):
+        """Consistency: client recipient is always reply, never forward."""
+        trigger = _thread_msg(
+            "alice@a.com",
+            ["client@external.com", "coord@lrp.com"],
+            msg_id="msg_new",
+        )
+        assert (
+            _is_forward_draft(
+                ["client@external.com"], [trigger], "msg_new", recipient_type="client"
+            )
+            is False
+        )
+
+    def test_recruiter_recipient_keeps_trigger_based_detection(self):
+        """Non-client recipient types retain existing behavior — forwarding
+        to internal LRP folks is safe and often correct."""
+        client_msg = _thread_msg(
+            "client@external.com",
+            ["coord@lrp.com"],
+            msg_id="msg_client",
+        )
+        # Recruiter not on the trigger → forward (preserves existing semantics).
+        assert (
+            _is_forward_draft(
+                ["recruiter@lrp.com"],
+                [client_msg],
+                "msg_client",
+                recipient_type="recruiter",
+            )
+            is True
+        )
+
+    def test_recipient_type_none_legacy_keeps_trigger_based_detection(self):
+        """recipient_type=None (legacy suggestions) → trigger-based detection."""
+        client_msg = _thread_msg(
+            "client@external.com",
+            ["coord@lrp.com"],
+            msg_id="msg_client",
+        )
+        assert (
+            _is_forward_draft(
+                ["new@elsewhere.com"],
+                [client_msg],
+                "msg_client",
+                recipient_type=None,
+            )
+            is True
+        )
+
 
 class _AsyncCtx:
     def __init__(self, value):

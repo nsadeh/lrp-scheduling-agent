@@ -1232,3 +1232,144 @@ class TestRejectionRerun:
             await agent.act(_event(), [_loop()], rejected_suggestion=rejected)
 
         suggestion_service.create_suggestion.assert_called_once()
+
+
+class TestGenerationCancellation:
+    """Per-thread generation tokens supersede in-flight agent runs.
+
+    Each worker handler claims a fresh token before calling agent.act().
+    The agent checks before the LLM round-trip and again before persisting
+    suggestions. If a newer worker has overwritten the token in Redis,
+    the older run logs and returns without writing.
+    """
+
+    def _redis_mock(self, current_token_per_get: list[str | None]):
+        """Build a redis mock whose .get() returns the next value in the list
+        on each call. Lets a test simulate the token flipping between
+        checkpoints."""
+        # iter exhausts after len(list); subsequent calls would StopIteration —
+        # tests should provide enough values for the calls they expect.
+        responses = iter(current_token_per_get)
+
+        async def _get(_key):
+            return next(responses)
+
+        redis = MagicMock()
+        redis.get = AsyncMock(side_effect=_get)
+        return redis
+
+    @pytest.mark.asyncio
+    async def test_aborts_before_llm_when_superseded(self):
+        """If the token in Redis doesn't match ours before the LLM call,
+        skip the round-trip entirely. No LLM call, no persist."""
+        agent, suggestion_service = _make_agent()
+        agent._llm.complete = AsyncMock()  # should never be called
+        redis = self._redis_mock(["different-token-already"])
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                arq_pool=redis,
+                generation_token="our-token",
+                generation_thread_id="thread1",
+            )
+
+        agent._llm.complete.assert_not_awaited()
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_aborts_before_persist_when_superseded_mid_llm(self):
+        """LLM call succeeds, but a newer worker overwrote the token while we
+        were waiting. Drop the (now-stale) suggestions; do not persist."""
+        agent, suggestion_service = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.ADVANCE_STAGE)
+        agent._llm.complete = AsyncMock(return_value=_llm_response(_suggestions_envelope([item])))
+        # Checkpoint 1 still sees our token → continue.
+        # Checkpoint 2 sees a different token → abort.
+        redis = self._redis_mock(["our-token", "superseded-by-newer-worker"])
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                arq_pool=redis,
+                generation_token="our-token",
+                generation_thread_id="thread1",
+            )
+
+        agent._llm.complete.assert_awaited_once()
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_runs_to_completion_when_token_stays_current(self):
+        """Token matches at both checkpoints → suggestions persisted."""
+        agent, suggestion_service = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.ADVANCE_STAGE)
+        agent._llm.complete = AsyncMock(return_value=_llm_response(_suggestions_envelope([item])))
+        redis = self._redis_mock(["our-token", "our-token"])
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                arq_pool=redis,
+                generation_token="our-token",
+                generation_thread_id="thread1",
+            )
+
+        suggestion_service.create_suggestion.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_redis_falls_open(self):
+        """When arq_pool is None (Redis unavailable or test path that doesn't
+        wire it), the checkpoints fail open and the run proceeds normally."""
+        agent, suggestion_service = _make_agent()
+        item = _suggestion_item(action=SuggestedAction.ADVANCE_STAGE)
+        agent._llm.complete = AsyncMock(return_value=_llm_response(_suggestions_envelope([item])))
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                arq_pool=None,
+                generation_token=None,
+                generation_thread_id=None,
+            )
+
+        suggestion_service.create_suggestion.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_token_missing_in_redis_treated_as_superseded(self):
+        """TTL expired (or someone cleared the key) → stored is None →
+        is_current_generation returns False → abort before LLM."""
+        agent, suggestion_service = _make_agent()
+        agent._llm.complete = AsyncMock()
+        redis = self._redis_mock([None])
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                arq_pool=redis,
+                generation_token="our-token",
+                generation_thread_id="thread1",
+            )
+
+        agent._llm.complete.assert_not_awaited()
+        suggestion_service.create_suggestion.assert_not_called()

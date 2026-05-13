@@ -46,6 +46,7 @@ from api.gmail.exceptions import (
     GmailValidationError,
 )
 from api.gmail.forward import build_forwarded_body, prefix_forward_subject
+from api.gmail.models import Message  # noqa: TC001 — used in _pick_thread_anchor signature
 from api.overview.cards import build_overview
 from api.overview.service import OverviewService
 from api.scheduling.cards import (
@@ -294,6 +295,35 @@ def parse_name_email(text: str) -> tuple[str, str] | None:
     if m is None:
         return None
     return m.group(1), m.group(2)
+
+
+def _pick_thread_anchor(
+    messages: list[Message], to_emails: list[str], *, is_forward: bool
+) -> Message | None:
+    """Pick the Message whose Message-ID we'll point In-Reply-To at on send.
+
+    Default: latest message overall.
+
+    For non-forward sends, when one of the recipients has previously sent on
+    this thread, prefer their latest message instead — that way the
+    recipient's Gmail can match the In-Reply-To against a Message-ID in their
+    own Sent folder and thread our reply cleanly. The most consequential case
+    is replying to a client after the conversation went internal (e.g.,
+    recruiter avails landed in our mailbox between the client's last send
+    and our reply): anchoring on the client's last message keeps their
+    thread intact.
+
+    Forwards always anchor on the latest overall — we're inserting a new
+    party who, by definition, didn't send a prior message on this thread.
+    """
+    if not messages:
+        return None
+    if not is_forward and to_emails:
+        recipient_set = {e.lower() for e in to_emails}
+        matches = [m for m in messages if m.from_.email.lower() in recipient_set]
+        if matches:
+            return max(matches, key=lambda m: m.date)
+    return max(messages, key=lambda m: m.date)
 
 
 def _normalize_gmail_id(raw_id: str | None) -> tuple[str | None, bool]:
@@ -1366,8 +1396,17 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     in_reply_to = None
     references = None
     if thread and thread.messages:
-        last_msg = thread.messages[-1]
-        in_reply_to = last_msg.message_id_header
+        # Anchor In-Reply-To on a message the recipient is most likely to
+        # have in their own mailbox. For non-forward sends, prefer the
+        # recipient's own last message on the thread when present — this is
+        # what makes a client see our reply on their original thread instead
+        # of as a brand-new conversation.
+        anchor_msg = _pick_thread_anchor(
+            thread.messages,
+            draft.to_emails,
+            is_forward=draft.is_forward,
+        )
+        in_reply_to = anchor_msg.message_id_header if anchor_msg else None
         ref_ids = [m.message_id_header for m in thread.messages if m.message_id_header]
         if ref_ids:
             references = " ".join(ref_ids)
