@@ -78,6 +78,32 @@ class TestFetchPrompt:
         with pytest.raises(LangFuseUnavailableError, match="Connection refused"):
             fetch_prompt(mock_client, "test-prompt")
 
+    def test_production_label_uses_default_cache(self):
+        """Production keeps the SDK's default 60s prompt cache for outage resilience."""
+        mock_client = MagicMock()
+        mock_prompt = MagicMock()
+        mock_prompt.is_fallback = False
+        mock_client.get_prompt.return_value = mock_prompt
+
+        fetch_prompt(mock_client, "test-prompt", label="production")
+
+        call_kwargs = mock_client.get_prompt.call_args.kwargs
+        assert "cache_ttl_seconds" not in call_kwargs
+
+    def test_non_production_label_disables_cache(self):
+        """Dev/staging labels skip the prompt cache so freshly-published versions
+        are picked up immediately."""
+        mock_client = MagicMock()
+        mock_prompt = MagicMock()
+        mock_prompt.is_fallback = False
+        mock_client.get_prompt.return_value = mock_prompt
+
+        fetch_prompt(mock_client, "test-prompt", label="development")
+
+        mock_client.get_prompt.assert_called_once_with(
+            "test-prompt", label="development", type="chat", cache_ttl_seconds=0
+        )
+
     def test_logs_warning_when_serving_fallback(self, caplog):
         mock_client = MagicMock()
         mock_prompt = MagicMock()

@@ -4,28 +4,38 @@ Processes both inbound and outgoing emails. Decides on next steps:
 - Advance the loop's state (ADVANCE_STAGE — auto-resolved)
 - Draft an email (DRAFT_EMAIL — generates draft for coordinator review)
 - Ask the coordinator a question (ASK_COORDINATOR)
+- Expire a stale pending suggestion (EXPIRE_SUGGESTION — auto-resolved)
 - No action (NO_ACTION)
 
 CREATE_LOOP and LINK_THREAD are blacklisted to prevent recursion.
+
+I/O contract (new prompt):
+- Input is four XML-formatted template variables: ``date``, ``thread_history``,
+  ``email``, ``loops``.
+- Output is a JSON array wrapped in ``<suggestions>…</suggestions>`` tags.
+- Retries (errors, coordinator responses) ride the LLM conversation history
+  rather than being threaded back through input fields.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from langfuse.model import ChatPromptClient
 from pydantic import ValidationError
 
-from api.classifier.endpoints import determine_next_action
+from api.ai.langfuse_client import fetch_prompt
+from api.ai.llm_service import DEFAULT_MODEL
 from api.classifier.formatters import (
-    format_email,
-    format_events,
-    format_linked_loops,
-    format_pending_suggestions,
-    format_thread_history,
+    format_email_xml,
+    format_loops_xml,
+    format_thread_history_xml,
 )
+from api.classifier.generation import is_current_generation
 from api.classifier.models import (
     ACTION_DATA_MODELS,
     ClassificationResult,
@@ -40,18 +50,16 @@ from api.classifier.resolvers import (
 from api.classifier.schemas import NextActionInput
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from arq.connections import ArqRedis
     from langfuse import Langfuse
 
-    from api.ai.llm_service import LLMService
+    from api.ai.llm_service import LLMResponse, LLMService
     from api.classifier.models import Suggestion
     from api.classifier.service import SuggestionService
     from api.drafts.service import DraftService
     from api.gmail.hooks import EmailEvent
     from api.gmail.models import Message
-    from api.scheduling.models import Coordinator, Loop
+    from api.scheduling.models import Loop
     from api.scheduling.service import LoopService
 
 logger = logging.getLogger(__name__)
@@ -61,28 +69,14 @@ _AGENT_ALLOWED_ACTIONS = frozenset(
         SuggestedAction.ADVANCE_STAGE,
         SuggestedAction.DRAFT_EMAIL,
         SuggestedAction.ASK_COORDINATOR,
+        SuggestedAction.EXPIRE_SUGGESTION,
+        SuggestedAction.UPDATE_ACTOR,
         SuggestedAction.NO_ACTION,
     }
 )
 
-
-def _resolve_coordinator_name(event: EmailEvent, coord: Coordinator | None) -> str:
-    if coord and coord.name:
-        return coord.name
-
-    msg = event.message
-    addr_email = event.coordinator_email
-    candidates: list[str | None] = []
-    if msg.from_.email == addr_email:
-        candidates.append(msg.from_.name)
-    for addr in [*msg.to, *msg.cc]:
-        if addr.email == addr_email:
-            candidates.append(addr.name)
-    for name in candidates:
-        if name:
-            return name
-
-    return addr_email.split("@", 1)[0]
+_SUGGESTIONS_RE = re.compile(r"<suggestions>(.*?)</suggestions>", re.DOTALL)
+_JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
 
 
 def _suggestion_fingerprint(loop_id: str | None, action: str, action_data: dict) -> str:
@@ -90,23 +84,19 @@ def _suggestion_fingerprint(loop_id: str | None, action: str, action_data: dict)
     return f"{loop_id or ''}|{action}|{json.dumps(action_data, sort_keys=True, default=str)}"
 
 
-def _format_per_loop_actors(
-    loops: list[Loop],
-    extract: Callable[[Loop], str | None],
-) -> str:
-    """Format a per-loop actor field.
+class NextActionAgentError(Exception):
+    """Raised when the agent cannot produce a usable response.
 
-    Single loop → plain name.  Multiple loops → "- lop_id: Name" per loop.
+    Carries ``raw_responses`` so the caller can write the unparsed LLM
+    output to the LangFuse span even when validation fails. Without this,
+    a parse failure (e.g., the model emits an out-of-enum classification
+    value) yields an empty trace output and we lose visibility into what
+    the model actually produced.
     """
-    if not loops:
-        return "Unknown"
-    if len(loops) == 1:
-        return extract(loops[0]) or "Unknown"
-    lines: list[str] = []
-    for lp in loops:
-        name = extract(lp) or "Unknown"
-        lines.append(f"- {lp.id}: {name}")
-    return "\n".join(lines)
+
+    def __init__(self, message: str, *, raw_responses: list[str] | None = None):
+        super().__init__(message)
+        self.raw_responses = list(raw_responses or [])
 
 
 class NextActionAgent:
@@ -135,6 +125,10 @@ class NextActionAgent:
         *,
         arq_pool: ArqRedis | None = None,
         coordinator_response: str | None = None,
+        originating_suggestion: Suggestion | None = None,
+        rejected_suggestion: Suggestion | None = None,
+        generation_token: str | None = None,
+        generation_thread_id: str | None = None,
     ) -> None:
         msg = event.message
 
@@ -142,15 +136,82 @@ class NextActionAgent:
             event,
             linked_loops,
             event.thread_messages,
-            coordinator_response=coordinator_response,
         )
 
         try:
-            result: ClassificationResult = await determine_next_action(
-                llm=self._llm,
-                langfuse=self._langfuse,
-                data=context_input,
-            )
+            prompt = fetch_prompt(self._langfuse, "next-action-agent")
+            with self._langfuse.start_as_current_observation(
+                name="next-action-agent",
+            ):
+                # Span's ``input`` is set inside _call_llm to the live messages
+                # list at the moment of each LLM round-trip — that captures
+                # retry follow-ups (error feedback, coordinator responses,
+                # rejection prompts) that wouldn't be visible if we just
+                # serialized the NextActionInput dataclass. The structured
+                # context lives in metadata for reference.
+                self._langfuse.update_current_span(
+                    metadata={
+                        "prompt_name": "next-action-agent",
+                        "prompt_version": prompt.version,
+                        "prompt_labels": prompt.labels,
+                        "context": context_input.model_dump(),
+                    }
+                )
+                messages = self._build_initial_messages(
+                    prompt,
+                    context_input,
+                    coordinator_response=coordinator_response,
+                    originating_suggestion=originating_suggestion,
+                    rejected_suggestion=rejected_suggestion,
+                )
+                # Checkpoint 1: another worker may have started a newer run on
+                # this thread while we were building context. Skip the LLM
+                # round-trip entirely if we've been superseded.
+                if not await is_current_generation(
+                    arq_pool, generation_thread_id, generation_token
+                ):
+                    logger.info(
+                        "next-action-agent superseded before LLM (thread=%s, token=%s)",
+                        generation_thread_id,
+                        generation_token,
+                    )
+                    return
+                try:
+                    valid_items, raw_responses = await self._act_with_messages(
+                        prompt,
+                        messages,
+                        linked_loops,
+                        existing_pending,
+                        allow_retry=True,
+                    )
+                except NextActionAgentError as exc:
+                    # The model produced something — we just couldn't use it
+                    # (schema mismatch, malformed JSON, etc.). Put the raw
+                    # content on the LangFuse span before the exception
+                    # escapes this with-block (the span closes on exit).
+                    # The outer except creates the manual-review fallback.
+                    self._langfuse.update_current_span(
+                        output={
+                            "raw_responses": exc.raw_responses,
+                            "parse_error": str(exc),
+                        }
+                    )
+                    raise
+                self._langfuse.update_current_span(
+                    output={
+                        "suggestions": [
+                            {
+                                "action": item.action,
+                                "target_loop_id": item.target_loop_id,
+                                "summary": item.summary,
+                                "action_data": item.action_data,
+                                "confidence": item.confidence,
+                            }
+                            for item, _ in valid_items
+                        ],
+                        "raw_responses": raw_responses,
+                    }
+                )
         except Exception:
             logger.exception(
                 "next action agent failed for message %s on thread %s",
@@ -163,7 +224,7 @@ class NextActionAgent:
                 gmail_thread_id=msg.thread_id,
                 item=SuggestionItem(
                     classification="follow_up_needed",
-                    action="ask_coordinator",
+                    action=SuggestedAction.ASK_COORDINATOR,
                     confidence=0.0,
                     summary="Action determination failed — please review this email manually.",
                     reasoning="LLM call failed",
@@ -179,59 +240,32 @@ class NextActionAgent:
             )
             return
 
-        # Apply guardrails with error-driven retry
-        guardrail_errors: list[str] = []
-        valid_items: list[tuple[SuggestionItem, Loop | None]] = []
-
-        for item in result.suggestions:
-            target_loop, loop_error = self._resolve_target_loop(item, linked_loops)
-
-            if loop_error:
-                guardrail_errors.append(loop_error)
-                continue
-
-            # If we defaulted to the single linked loop, pin its id on the item
-            # so guardrails (and persistence) see a populated target_loop_id.
-            if target_loop and not item.target_loop_id:
-                item = item.model_copy(update={"target_loop_id": target_loop.id})
-
-            item, error = self._apply_guardrails(item)
-            if error:
-                guardrail_errors.append(error)
-            else:
-                valid_items.append((item, target_loop))
-
-        if guardrail_errors and not valid_items:
-            error_msg = "; ".join(guardrail_errors)
+        # Checkpoint 2: the LLM call may have taken seconds. Another worker
+        # could have started and finished in that window. Drop our (possibly
+        # stale) suggestions rather than writing them on top of newer work.
+        if not await is_current_generation(arq_pool, generation_thread_id, generation_token):
             logger.info(
-                "all agent suggestions failed guardrails, retrying with error: %s",
-                error_msg,
+                "next-action-agent superseded after LLM "
+                "(thread=%s, token=%s, valid_items=%d) — dropping",
+                generation_thread_id,
+                generation_token,
+                len(valid_items),
             )
-            retry_input = context_input.model_copy(update={"error": error_msg})
-            try:
-                result = await determine_next_action(
-                    llm=self._llm,
-                    langfuse=self._langfuse,
-                    data=retry_input,
-                )
-            except Exception:
-                logger.exception("next action agent retry failed for thread %s", msg.thread_id)
-                return
-
-            valid_items = []
-            for item in result.suggestions:
-                target_loop, loop_error = self._resolve_target_loop(item, linked_loops)
-                if loop_error:
-                    continue
-                if target_loop and not item.target_loop_id:
-                    item = item.model_copy(update={"target_loop_id": target_loop.id})
-                item, error = self._apply_guardrails(item)
-                if not error:
-                    valid_items.append((item, target_loop))
+            return
 
         seen_fingerprints: set[str] = {
             _suggestion_fingerprint(s.loop_id, s.action, s.action_data) for s in existing_pending
         }
+        # The just-rejected suggestion isn't in pending (it's REJECTED), but we
+        # must not let the agent re-emit it verbatim after a rejection re-run.
+        if rejected_suggestion is not None:
+            seen_fingerprints.add(
+                _suggestion_fingerprint(
+                    rejected_suggestion.loop_id,
+                    rejected_suggestion.action,
+                    rejected_suggestion.action_data,
+                )
+            )
 
         for item, target_loop in valid_items:
             loop_id = target_loop.id if target_loop else None
@@ -250,7 +284,7 @@ class NextActionAgent:
                 gmail_message_id=msg.id,
                 gmail_thread_id=msg.thread_id,
                 item=item,
-                reasoning=result.reasoning,
+                reasoning=item.reasoning,
                 loop_id=loop_id,
             )
 
@@ -291,80 +325,323 @@ class NextActionAgent:
                 except Exception:
                     logger.exception("draft creation failed for suggestion %s", suggestion.id)
 
+    # ------------------------------------------------------------------
+    # Conversation pipeline
+    # ------------------------------------------------------------------
+
+    async def _act_with_messages(
+        self,
+        prompt: Any,
+        messages: list[dict[str, str]],
+        linked_loops: list[Loop],
+        existing_pending: list[Suggestion],
+        *,
+        allow_retry: bool,
+        prior_responses: list[str] | None = None,
+    ) -> tuple[list[tuple[SuggestionItem, Loop | None]], list[str]]:
+        """Run one LLM round-trip and validate the result.
+
+        On batch/per-item errors, optionally append the assistant reply plus a
+        user follow-up describing the errors and recurse once with
+        ``allow_retry=False``.
+
+        Returns ``(valid_items, raw_responses)`` where ``raw_responses`` is the
+        full list of assistant payloads across the initial call and any retry —
+        captured on the span output so LangFuse traces show what the model
+        produced even if guardrails dropped items.
+        """
+        prior_responses = prior_responses or []
+        response = await self._call_llm(prompt, messages)
+        responses = [*prior_responses, response.content]
+        try:
+            result = self._parse_response(response.content)
+        except NextActionAgentError as exc:
+            if allow_retry:
+                logger.warning("next-action-agent parse failed (%s) — retrying with follow-up", exc)
+                follow_up = (
+                    "Your previous response could not be parsed. "
+                    f"Error: {exc}\n\n"
+                    "Please respond with a valid <suggestions>[...]</suggestions> "
+                    "JSON array."
+                )
+                next_messages = [
+                    *messages,
+                    {"role": "assistant", "content": response.content},
+                    {"role": "user", "content": follow_up},
+                ]
+                return await self._act_with_messages(
+                    prompt,
+                    next_messages,
+                    linked_loops,
+                    existing_pending,
+                    allow_retry=False,
+                    prior_responses=responses,
+                )
+            # Final failure on the retry attempt — attach the accumulated
+            # responses so the caller can put them on the LangFuse span
+            # before falling through to the manual-review fallback. The bare
+            # ``raise`` would discard the responses list (and the trace).
+            raise NextActionAgentError(str(exc), raw_responses=responses) from exc
+
+        valid_items, errors = self._validate_batch(
+            result.suggestions, linked_loops, existing_pending
+        )
+
+        if errors and allow_retry:
+            logger.info(
+                "next-action-agent batch errors (%d) — retrying with follow-up", len(errors)
+            )
+            follow_up = _build_error_followup(errors)
+            next_messages = [
+                *messages,
+                {"role": "assistant", "content": response.content},
+                {"role": "user", "content": follow_up},
+            ]
+            return await self._act_with_messages(
+                prompt,
+                next_messages,
+                linked_loops,
+                existing_pending,
+                allow_retry=False,
+                prior_responses=responses,
+            )
+
+        if errors:
+            logger.warning(
+                "next-action-agent retry still produced %d error(s) — keeping %d valid item(s)",
+                len(errors),
+                len(valid_items),
+            )
+
+        return valid_items, responses
+
+    async def _call_llm(self, prompt: Any, messages: list[dict[str, str]]) -> LLMResponse:
+        """Dispatch the conversation to the LLM service.
+
+        Model config is sourced from the prompt's LangFuse config so prompt-
+        version-pinned settings win.
+
+        Updates the current LangFuse span's ``input`` to the messages list
+        we're about to send. Retries append assistant + user-feedback turns
+        to ``messages`` and recurse through this function, so the final span
+        input reflects the complete conversation the model saw — including
+        error follow-ups, coordinator responses, and rejection feedback.
+        Without this update the trace shows our internal ``NextActionInput``
+        dataclass rather than the actual prompt + retry history.
+        """
+        config: dict = prompt.config or {}
+        model = config.get("model", DEFAULT_MODEL)
+        temperature = config.get("temperature", 0.0)
+        max_tokens = config.get("max_tokens", 4096)
+
+        self._langfuse.update_current_span(input=messages)
+
+        return await self._llm.complete(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def _build_initial_messages(
+        self,
+        prompt: Any,
+        context_input: NextActionInput,
+        *,
+        coordinator_response: str | None,
+        originating_suggestion: Suggestion | None,
+        rejected_suggestion: Suggestion | None = None,
+    ) -> list[dict[str, str]]:
+        """Compile the prompt + (optionally) splice in the prior turn."""
+        input_dict = context_input.model_dump()
+
+        if isinstance(prompt, ChatPromptClient):
+            compiled = prompt.compile(**input_dict)
+            messages: list[dict[str, str]] = [dict(m) for m in compiled]
+        else:
+            compiled_str = prompt.compile(**input_dict)
+            messages = [
+                {"role": "system", "content": compiled_str},
+                {"role": "user", "content": json.dumps(input_dict)},
+            ]
+
+        if coordinator_response is not None and originating_suggestion is not None:
+            # Splice the prior turn into the conversation so the LLM sees the
+            # question it had asked and the coordinator's answer.
+            assistant_content = _reconstruct_prior_assistant(originating_suggestion)
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The coordinator responded with the following:\n" f"{coordinator_response}"
+                    ),
+                }
+            )
+        elif rejected_suggestion is not None:
+            # The coordinator dismissed the prior suggestion. We have no "why"
+            # signal — just the fact of rejection. Tell the model to try a
+            # materially different alternative or prefer no_action.
+            assistant_content = _reconstruct_prior_assistant(rejected_suggestion)
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "user", "content": _REJECTION_FOLLOWUP_TEXT})
+
+        return messages
+
+    # ------------------------------------------------------------------
+    # Parsing
+    # ------------------------------------------------------------------
+
+    def _parse_response(self, content: str) -> ClassificationResult:
+        """Extract the <suggestions> JSON array from the LLM response."""
+        text = content.strip()
+        # Strip surrounding markdown fences, if any.
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if len(lines) >= 2 and lines[-1].strip() == "```":
+                text = "\n".join(lines[1:-1]).strip()
+
+        match = _SUGGESTIONS_RE.search(text)
+        if match:
+            inner = match.group(1).strip()
+        else:
+            # Fallback: pull the first JSON array we can find.
+            array_match = _JSON_ARRAY_RE.search(text)
+            if not array_match:
+                raise NextActionAgentError(
+                    "response did not contain a <suggestions>…</suggestions> envelope or "
+                    "a JSON array"
+                )
+            inner = array_match.group(0)
+
+        try:
+            data = json.loads(inner)
+        except json.JSONDecodeError as exc:
+            raise NextActionAgentError(f"suggestions JSON failed to parse: {exc}") from exc
+
+        if not isinstance(data, list):
+            raise NextActionAgentError("suggestions payload must be a JSON array")
+
+        suggestions: list[SuggestionItem] = []
+        for raw in data:
+            try:
+                suggestions.append(SuggestionItem.model_validate(raw))
+            except ValidationError as exc:
+                raise NextActionAgentError(
+                    f"suggestion item failed schema validation: {exc}"
+                ) from exc
+
+        return ClassificationResult(suggestions=suggestions)
+
+    # ------------------------------------------------------------------
+    # Context building
+    # ------------------------------------------------------------------
+
     async def _build_context(
         self,
         event: EmailEvent,
         linked_loops: list[Loop],
         thread_messages: list[Message] | None = None,
-        *,
-        coordinator_response: str | None = None,
     ) -> tuple[NextActionInput, list[Suggestion]]:
         msg = event.message
 
         if thread_messages:
-            thread_history_text = format_thread_history(thread_messages, msg.id)
+            thread_history_xml = format_thread_history_xml(
+                thread_messages, msg.id, event.coordinator_email
+            )
         else:
-            thread_history_text = "No prior messages in this thread."
+            thread_history_xml = "<!-- No prior messages in this thread -->"
 
-        coord = await self._loops.get_coordinator_by_email(event.coordinator_email)
-        coordinator_name = _resolve_coordinator_name(event, coord)
         date_str = datetime.now(UTC).date().isoformat()
 
-        events = []
-        if linked_loops:
-            events = await self._loops.get_events(linked_loops[0].id)
-
-        candidate_name = _format_per_loop_actors(
-            linked_loops, lambda lp: lp.candidate.name if lp.candidate else None
-        )
-        recruiter_name = _format_per_loop_actors(
-            linked_loops, lambda lp: lp.recruiter.name if lp.recruiter else None
-        )
-
-        # Client/company are shared across loops on a thread — take the first non-null.
-        client_name = "Unknown"
-        client_company = "Unknown"
-        for lp in linked_loops:
-            if lp.client_contact:
-                if lp.client_contact.name:
-                    client_name = lp.client_contact.name
-                if lp.client_contact.company:
-                    client_company = lp.client_contact.company
-                break
-
         all_pending: list[Suggestion] = []
+        pending_by_loop: dict[str, list[Suggestion]] = {}
         for lp in linked_loops:
-            all_pending.extend(await self._suggestions.get_pending_for_loop(lp.id))
+            loop_pending = await self._suggestions.get_pending_for_loop(lp.id)
+            pending_by_loop[lp.id] = loop_pending
+            all_pending.extend(loop_pending)
 
-        return NextActionInput(
-            coordinator_name=coordinator_name,
-            coordinator_email=event.coordinator_email,
-            date=date_str,
-            candidate_name=candidate_name,
-            recruiter_name=recruiter_name,
-            client_name=client_name,
-            client_company=client_company,
-            direction=event.direction.value,
-            email=format_email(msg, event.direction.value, event.message_type.value),
-            thread_history=thread_history_text,
-            loop_state=format_linked_loops(linked_loops),
-            events=format_events(events),
-            error="N/A",
-            pending_suggestions=format_pending_suggestions(all_pending),
-            coordinator_response=coordinator_response or "No active questions.",
-        ), all_pending
+        return (
+            NextActionInput(
+                date=date_str,
+                thread_history=thread_history_xml,
+                email=format_email_xml(msg, event.direction.value),
+                loops=format_loops_xml(linked_loops, pending_by_loop),
+            ),
+            all_pending,
+        )
+
+    # ------------------------------------------------------------------
+    # Guardrails
+    # ------------------------------------------------------------------
+
+    def _validate_batch(
+        self,
+        suggestions: list[SuggestionItem],
+        linked_loops: list[Loop],
+        existing_pending: list[Suggestion],
+    ) -> tuple[list[tuple[SuggestionItem, Loop | None]], list[str]]:
+        """Per-item validation + batch-level guardrails.
+
+        Returns (valid_items, errors). Valid items may still be returned
+        alongside errors; the caller decides whether to retry.
+        """
+        errors: list[str] = []
+        valid: list[tuple[SuggestionItem, Loop | None]] = []
+
+        pending_ids = {s.id for s in existing_pending}
+
+        for item in suggestions:
+            target_loop, loop_error = self._resolve_target_loop(item, linked_loops)
+            if loop_error:
+                errors.append(loop_error)
+                continue
+            if target_loop and not item.target_loop_id:
+                item = item.model_copy(update={"target_loop_id": target_loop.id})
+
+            item, item_error = self._apply_guardrails(item, pending_ids)
+            if item_error:
+                errors.append(item_error)
+                continue
+
+            valid.append((item, target_loop))
+
+        # Batch-level: recruiter draft cap.
+        recruiter_drafts = sum(
+            1
+            for it, _ in valid
+            if it.action == SuggestedAction.DRAFT_EMAIL
+            and it.action_data.get("recipient_type") == "recruiter"
+        )
+        known_recruiters = len({lp.recruiter_id for lp in linked_loops if lp.recruiter_id})
+        if recruiter_drafts > known_recruiters:
+            errors.append(
+                f"Too many recruiter draft emails ({recruiter_drafts}) for "
+                f"{known_recruiters} known recruiter(s) on this thread — combine updates "
+                "so each recruiter receives a single email covering all of their candidates."
+            )
+
+        # Batch-level: only one client draft per generation.
+        client_drafts = sum(
+            1
+            for it, _ in valid
+            if it.action == SuggestedAction.DRAFT_EMAIL
+            and it.action_data.get("recipient_type") == "client"
+        )
+        if client_drafts > 1:
+            errors.append(
+                "Multiple client draft emails were proposed — combine them into a single "
+                "client-facing email for this generation."
+            )
+
+        return valid, errors
 
     def _resolve_target_loop(
         self,
         item: SuggestionItem,
         linked_loops: list[Loop],
     ) -> tuple[Loop | None, str | None]:
-        """Resolve the target loop for a suggestion. Returns (loop, error).
-
-        The agent only operates on linked threads, so target_loop_id is required
-        for every action. The guardrail layer enforces that — this just maps the
-        ID to a Loop instance.
-        """
+        """Resolve the target loop for a suggestion. Returns (loop, error)."""
         loop_ids = [lp.id for lp in linked_loops]
 
         if item.target_loop_id:
@@ -376,9 +653,6 @@ class NextActionAgent:
                 f"Available loop IDs: {', '.join(loop_ids)}"
             )
 
-        # No target_loop_id — fine only if exactly one loop is linked AND we
-        # default to that loop. The required-target_loop_id guardrail then
-        # tags the suggestion with the resolved id at persistence time.
         if len(linked_loops) == 1:
             return linked_loops[0], None
 
@@ -390,38 +664,84 @@ class NextActionAgent:
     def _apply_guardrails(
         self,
         item: SuggestionItem,
+        pending_ids: set[str],
     ) -> tuple[SuggestionItem, str | None]:
-        """Apply guardrails. Returns (item, error_message). error_message is None if valid."""
-        # 1. Action allow-list
+        """Per-item guardrails. Returns (item, error_message)."""
         if item.action not in _AGENT_ALLOWED_ACTIONS:
-            return (
-                item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
+            allowed = ", ".join(sorted(a.value for a in _AGENT_ALLOWED_ACTIONS))
+            return item, (
                 f"Action '{item.action}' is not allowed for the next action agent — "
-                f"only advance_stage, draft_email, ask_coordinator, and no_action are allowed",
+                f"allowed actions: {allowed}"
             )
 
-        # 2. action_data shape match
         model_cls = ACTION_DATA_MODELS.get(item.action)
         if model_cls is None:
-            return (
-                item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
-                f"action '{item.action}' has no action_data schema",
-            )
+            return item, f"action '{item.action}' has no action_data schema"
         try:
             model_cls.model_validate(item.action_data)
         except ValidationError as e:
-            return (
-                item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
-                f"action_data for '{item.action}' is invalid: {e}",
+            return item, f"action_data for '{item.action}' is invalid: {e}"
+
+        if not item.target_loop_id:
+            return item, (
+                f"action '{item.action}' requires target_loop_id "
+                "(the agent always acts on a linked loop)"
             )
 
-        # 3. target_loop_id required for all agent actions (the agent only
-        #    operates on linked threads, so every suggestion is *about* a loop)
-        if not item.target_loop_id:
-            return (
-                item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
-                f"action '{item.action}' requires target_loop_id "
-                f"(the agent always acts on a linked loop)",
-            )
+        if item.action == SuggestedAction.EXPIRE_SUGGESTION:
+            target_sug_id = item.action_data.get("suggestion_id")
+            if target_sug_id not in pending_ids:
+                return item, (
+                    f"expire_suggestion target '{target_sug_id}' is not a known pending "
+                    "suggestion on this thread."
+                )
 
         return item, None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+_REJECTION_FOLLOWUP_TEXT = (
+    "The coordinator rejected the previous suggestion. "
+    "We do NOT know why they rejected it.\n\n"
+    "Propose a materially different alternative — for example: a different "
+    "recipient, a different action type, or substantively different content. "
+    "Do NOT repeat the rejected suggestion with cosmetic changes.\n\n"
+    "If no materially different alternative is appropriate, emit no_action. "
+    "It is better to do nothing than to propose another likely-bad option."
+)
+
+
+def _build_error_followup(errors: list[str]) -> str:
+    bullets = "\n".join(f"- {e}" for e in errors)
+    return (
+        "Your previous suggestions resulted in the following errors:\n"
+        f"{bullets}\n\n"
+        "Please produce a corrected <suggestions>[...]</suggestions> array."
+    )
+
+
+def _reconstruct_prior_assistant(suggestion: Suggestion) -> str:
+    """Re-serialize a resolved suggestion as the prior assistant turn.
+
+    Good enough for the coordinator-response flow: the model sees that it had
+    asked the question. We don't try to reconstruct sibling suggestions from
+    the same generation — keeping things simple and stateless.
+    """
+    payload: dict[str, Any] = {
+        "classification": suggestion.classification.value
+        if hasattr(suggestion.classification, "value")
+        else suggestion.classification,
+        "action": suggestion.action.value
+        if hasattr(suggestion.action, "value")
+        else suggestion.action,
+        "confidence": suggestion.confidence,
+        "summary": suggestion.summary,
+        "reasoning": suggestion.reasoning or "",
+        "target_loop_id": suggestion.loop_id,
+        "action_data": suggestion.action_data or {},
+    }
+    return f"<suggestions>{json.dumps([payload])}</suggestions>"

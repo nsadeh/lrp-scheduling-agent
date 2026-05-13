@@ -284,6 +284,37 @@ class LinkThreadResolver:
 
 
 # ---------------------------------------------------------------------------
+# EXPIRE_SUGGESTION
+# ---------------------------------------------------------------------------
+
+
+class ExpireSuggestionResolver:
+    """Mark a stale pending suggestion as expired.
+
+    Reads the target suggestion id from ``action_data["suggestion_id"]`` and
+    flips it to ``EXPIRED``. The expire suggestion itself is then marked
+    ``AUTO_APPLIED`` by ``try_auto_resolve``. If the target is no longer
+    pending (already accepted, rejected, etc.), the underlying SQL is a no-op.
+    """
+
+    async def resolve(self, suggestion: Suggestion, ctx: ResolverContext) -> None:
+        target_id = (suggestion.action_data or {}).get("suggestion_id")
+        if not target_id:
+            logger.warning(
+                "EXPIRE_SUGGESTION %s missing action_data.suggestion_id — skipping",
+                suggestion.id,
+            )
+            return
+
+        await ctx.suggestions.expire_by_id(target_id, resolved_by="agent")
+        logger.info(
+            "auto-expired suggestion %s via %s",
+            target_id,
+            suggestion.id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -300,7 +331,15 @@ def build_agent_registry() -> dict[SuggestedAction, Resolver]:
     """Auto-resolvers for the NextActionAgent (linked threads)."""
     return {
         SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver(),
+        SuggestedAction.EXPIRE_SUGGESTION: ExpireSuggestionResolver(),
     }
+
+
+# Single source of truth: which agent-side actions auto-resolve (and thus
+# never surface to the coordinator for manual accept/reject). Derived from
+# build_agent_registry() at import time so adding a new resolver auto-updates
+# any code that needs the negative (e.g., "what's manually resolvable").
+AGENT_AUTO_RESOLVE_ACTIONS: frozenset[SuggestedAction] = frozenset(build_agent_registry().keys())
 
 
 def build_registry() -> dict[SuggestedAction, Resolver]:

@@ -38,6 +38,8 @@ class SuggestedAction(StrEnum):
     LINK_THREAD = "link_thread"
     DRAFT_EMAIL = "draft_email"
     ASK_COORDINATOR = "ask_coordinator"
+    EXPIRE_SUGGESTION = "expire_suggestion"
+    UPDATE_ACTOR = "update_actor"
     NO_ACTION = "no_action"
 
 
@@ -76,6 +78,31 @@ class NoActionData(BaseModel):
     """Action data for NO_ACTION — empty by design."""
 
 
+class ExpireSuggestionData(BaseModel):
+    """Action data for EXPIRE_SUGGESTION — the pending suggestion to mark expired."""
+
+    suggestion_id: str
+
+
+class UpdateActorData(BaseModel):
+    """Action data for UPDATE_ACTOR — the agent asks the coordinator to set/replace
+    a loop's recruiter, client_manager, or client_contact.
+
+    Non-auto-resolvable: surfaces in the UI as a card with an autocomplete
+    (for internal roles) or plain inputs (for client_contact), so the
+    coordinator picks the new actor by hand. Variant of ASK_COORDINATOR.
+
+    ``role`` is the only agent-emitted field. ``pending_pick`` is UI state
+    written by the addon's autocomplete onChange handler — it stages a
+    directory selection so the card can re-render with the inputs
+    pre-filled, requiring the coordinator to click Save before the change
+    commits. The agent never sets pending_pick.
+    """
+
+    role: Literal["recruiter", "client_manager", "client_contact"]
+    pending_pick: dict[str, str] | None = None
+
+
 class LinkThreadData(BaseModel):
     """Action data for LINK_THREAD — candidate/client identity for guardrail validation."""
 
@@ -112,6 +139,8 @@ ACTION_DATA_MODELS: dict[SuggestedAction, type[BaseModel]] = {
     SuggestedAction.NO_ACTION: NoActionData,
     SuggestedAction.LINK_THREAD: LinkThreadData,
     SuggestedAction.CREATE_LOOP: CreateLoopExtraction,
+    SuggestedAction.EXPIRE_SUGGESTION: ExpireSuggestionData,
+    SuggestedAction.UPDATE_ACTOR: UpdateActorData,
 }
 
 

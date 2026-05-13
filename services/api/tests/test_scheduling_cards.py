@@ -3,6 +3,7 @@
 from api.scheduling.cards import (
     build_contextual_unlinked,
     build_create_loop_form,
+    build_loop_caught_up_card,
     build_loop_pending_card,
     set_action_url,
 )
@@ -117,3 +118,48 @@ class TestLoopPendingCard:
         assert len(card["sections"]) == 1
         widget_kinds = {next(iter(w.keys())) for w in card["sections"][0]["widgets"]}
         assert widget_kinds == {"textParagraph", "buttonList"}
+
+
+class TestLoopCaughtUpCard:
+    def test_header_is_all_caught_up_not_generating(self):
+        # Regression: the in-message sidebar used to show "Loop created /
+        # Generating suggestions…" indefinitely whenever a linked loop had
+        # no pending suggestions, even after the agent had finished. The
+        # caught-up card replaces that copy when row history exists.
+        data = _card_json(build_loop_caught_up_card("thread_xyz"))
+        card = data["action"]["navigations"][0]["updateCard"]
+        assert card["header"]["title"] == "All caught up"
+        assert "Generating" not in card["header"].get("subtitle", "")
+
+    def test_has_refresh_button_with_reload(self):
+        data = _card_json(build_loop_caught_up_card("thread_xyz"))
+        card = data["action"]["navigations"][0]["updateCard"]
+        buttons = [
+            b
+            for s in card["sections"]
+            for w in s["widgets"]
+            if "buttonList" in w
+            for b in w["buttonList"]["buttons"]
+        ]
+        assert any("Refresh" in b["text"] for b in buttons)
+        refresh = next(b for b in buttons if "Refresh" in b["text"])
+        link = refresh["onClick"]["openLink"]
+        # Same OVERLAY + RELOAD affordance as the pending card — a new
+        # inbound on the thread can still produce fresh suggestions.
+        assert link["url"].endswith("/addon/refresh")
+        assert link["openAs"] == "OVERLAY"
+        assert link["onClose"] == "RELOAD"
+
+    def test_body_does_not_imply_in_flight_work(self):
+        # The whole point of this card vs. the pending one — body copy must
+        # not claim the AI is currently analyzing the thread.
+        data = _card_json(build_loop_caught_up_card("thread_xyz"))
+        card = data["action"]["navigations"][0]["updateCard"]
+        body_text = " ".join(
+            w["textParagraph"]["text"]
+            for s in card["sections"]
+            for w in s["widgets"]
+            if "textParagraph" in w
+        )
+        assert "analyzing" not in body_text.lower()
+        assert "generating" not in body_text.lower()

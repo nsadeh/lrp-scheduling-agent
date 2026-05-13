@@ -76,6 +76,30 @@ UPDATE agent_suggestions
 SET status = 'expired', resolved_at = now()
 WHERE status = 'pending' AND created_at < :cutoff;
 
+-- name: expire_suggestion!
+-- Mark a single pending suggestion as expired. No-ops if not pending.
+UPDATE agent_suggestions
+SET status = 'expired', resolved_at = now(), resolved_by = :resolved_by
+WHERE id = :id AND status = 'pending';
+
+-- name: has_suggestion_for_thread^
+-- Cheap existence check: any suggestion row for this thread, any status.
+-- Used by the in-message sidebar to distinguish "agent has run on this
+-- thread (show 'all caught up')" from "agent hasn't run yet (show
+-- 'generating')". A single indexed lookup; we don't care which row matches.
+SELECT 1
+FROM agent_suggestions
+WHERE gmail_thread_id = :gmail_thread_id
+LIMIT 1;
+
+-- name: update_action_data!
+-- Replace the action_data JSONB blob on a suggestion. Used by the addon to
+-- stash UI-driven state (currently UPDATE_ACTOR's pending_pick from the
+-- autocomplete onChange handler) before the coordinator commits via Save.
+UPDATE agent_suggestions
+SET action_data = :action_data
+WHERE id = :id;
+
 -- name: get_pending_suggestions_with_context
 -- Denormalized query for the overview card: suggestions + loop context + draft context.
 -- Returns everything the UI needs in a single round-trip (no N+1).

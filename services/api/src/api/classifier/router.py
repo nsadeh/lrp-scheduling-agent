@@ -27,9 +27,27 @@ logger = logging.getLogger(__name__)
 INTERNAL_DOMAIN = "longridgepartners.com"
 
 
-def _is_internal_only(msg: Message) -> bool:
-    all_addresses = [msg.from_.email, *(a.email for a in msg.to), *(a.email for a in msg.cc)]
-    return all(addr.lower().endswith(f"@{INTERNAL_DOMAIN}") for addr in all_addresses)
+def _message_addresses(msg: Message) -> list[str]:
+    return [msg.from_.email, *(a.email for a in msg.to), *(a.email for a in msg.cc)]
+
+
+def _is_internal_only(msg: Message, thread_messages: list[Message] | None = None) -> bool:
+    """True iff every participant across the thread is at the internal domain.
+
+    We check the *thread* — not just the trigger message — because of cases like:
+      1. Client requests an interview (external sender).
+      2. Coordinator forwards the request to the recruiter (internal-only).
+      3. Recruiter replies with avails (internal-only trigger message).
+    The recruiter's reply on its own looks internal-only, but the thread is
+    clearly scheduling-related because the client is upstream. Looking at all
+    thread participants keeps step 3 eligible for loop creation.
+    """
+    messages = thread_messages if thread_messages else [msg]
+    for m in messages:
+        for addr in _message_addresses(m):
+            if not addr.lower().endswith(f"@{INTERNAL_DOMAIN}"):
+                return False
+    return True
 
 
 class EmailRouter:
@@ -53,6 +71,7 @@ class EmailRouter:
         event: EmailEvent,
         *,
         arq_pool: ArqRedis | None = None,
+        generation_token: str | None = None,
     ) -> None:
         msg = event.message
 
@@ -65,28 +84,46 @@ class EmailRouter:
             )
             return
 
-        # 2. Internal-only messages
-        if _is_internal_only(msg):
+        # 2. Check thread linkage. We need this BEFORE the internal-only filter
+        # because internal LRP-to-LRP traffic (recruiter sending avails to the
+        # coordinator, internal updates, etc.) is the substance of the work on
+        # a linked thread — dropping it would blind the agent to the very
+        # messages that drive a loop forward.
+        linked_loops = await self._loops.find_loops_by_thread(msg.thread_id)
+
+        if linked_loops:
+            # Linked thread → Next Action Agent (inbound and outgoing).
+            # Internal-only messages are kept here: recruiter→coordinator on a
+            # live loop is signal, not noise.
+            await self._agent.act(
+                event,
+                linked_loops,
+                arq_pool=arq_pool,
+                generation_token=generation_token,
+                generation_thread_id=msg.thread_id if generation_token else None,
+            )
+            return
+
+        # 3. Unlinked thread. Now the internal-only filter applies — random
+        # LRP-to-LRP chatter shouldn't try to spawn a new scheduling loop.
+        # Check the *thread* participants, not just the trigger message, so
+        # internal-only replies on a thread originally started by an external
+        # party (e.g., coordinator forwarded a client request to a recruiter,
+        # recruiter is now replying) still reach the classifier.
+        if _is_internal_only(msg, event.thread_messages):
             logger.debug(
-                "skipping internal-only email on thread %s (all participants @%s)",
+                "skipping internal-only thread %s (all participants across " "the thread are @%s)",
                 msg.thread_id,
                 INTERNAL_DOMAIN,
             )
             return
 
-        # 3. Check thread linkage
-        linked_loops = await self._loops.find_loops_by_thread(msg.thread_id)
+        # Only inbound messages on unlinked threads can create a new loop.
+        if event.direction == MessageDirection.OUTGOING:
+            logger.debug(
+                "skipping outgoing email on unlinked thread %s",
+                msg.thread_id,
+            )
+            return
 
-        if linked_loops:
-            # Linked thread → Next Action Agent (inbound and outgoing)
-            await self._agent.act(event, linked_loops, arq_pool=arq_pool)
-        else:
-            # Unlinked thread — only process inbound
-            if event.direction == MessageDirection.OUTGOING:
-                logger.debug(
-                    "skipping outgoing email on unlinked thread %s",
-                    msg.thread_id,
-                )
-                return
-
-            await self._classifier.classify(event, arq_pool=arq_pool)
+        await self._classifier.classify(event, arq_pool=arq_pool)

@@ -16,6 +16,7 @@ from arq import cron
 from arq.connections import RedisSettings
 from psycopg_pool import AsyncConnectionPool
 
+from api.classifier.generation import claim_generation
 from api.gmail.auth import TokenStore
 from api.gmail.client import GmailClient
 from api.gmail.exceptions import GmailNotFoundError, GmailScopeError, GmailTokenStaleError
@@ -385,6 +386,12 @@ async def run_next_action_agent(
     """
     gmail: GmailClient = ctx["gmail"]
     router = ctx["router"]
+    redis = ctx.get("redis")
+    # Claim the per-thread generation token at worker entry. If a later
+    # worker (coordinator-response or rejection-rerun) starts for the same
+    # thread while we're mid-flight, it'll overwrite the token and our
+    # next-action-agent checkpoint will abort cleanly.
+    gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
         if gmail_message_id:
@@ -413,7 +420,7 @@ async def run_next_action_agent(
             new_participants=new_participants,
             thread_messages=thread_messages,
         )
-        await router.on_email(event, arq_pool=ctx.get("redis"))
+        await router.on_email(event, arq_pool=redis, generation_token=gen_token)
         logger.info(
             "next action agent processed message %s (thread %s)",
             message.id,
@@ -449,8 +456,18 @@ async def process_coordinator_response(
     agent = ctx["next_action_agent"]
     suggestion_svc = ctx["suggestion_service"]
     loop_service = ctx["loop_service"]
+    redis = ctx.get("redis")
+    # Claim the per-thread generation token so a concurrent run_next_action_agent
+    # or process_rejection_response on this thread can supersede us (or be
+    # superseded by us).
+    gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
+        # Fetch the originating ask_coordinator suggestion so the agent can
+        # splice it into the LLM conversation history as the prior assistant
+        # turn. We read by id after the addon has already marked it ACCEPTED.
+        originating = await suggestion_svc.get_suggestion(suggestion_id)
+
         thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
         if not thread.messages:
             logger.warning("empty thread %s — cannot process coordinator response", gmail_thread_id)
@@ -491,7 +508,10 @@ async def process_coordinator_response(
             event,
             linked_loops,
             coordinator_response=coordinator_response,
-            arq_pool=ctx.get("redis"),
+            originating_suggestion=originating,
+            arq_pool=redis,
+            generation_token=gen_token,
+            generation_thread_id=gmail_thread_id,
         )
         logger.info(
             "coordinator response processed for suggestion %s (thread %s)",
@@ -517,10 +537,114 @@ async def process_coordinator_response(
         await suggestion_svc.unresolve(suggestion_id, f"Processing failed: {exc}")
 
 
+async def process_rejection_response(
+    ctx: dict,
+    rejected_suggestion_id: str,
+    coordinator_email: str,
+    gmail_thread_id: str,
+) -> None:
+    """Re-run the NextActionAgent after a coordinator rejects a suggestion.
+
+    No "why" was captured — the agent has to guess at a materially different
+    alternative or fall back to no_action. Scope (DRAFT_EMAIL / ASK_COORDINATOR
+    only) is enforced upstream by ``_handle_reject_suggestion``.
+
+    Unlike ``process_coordinator_response``, failures do NOT un-resolve the
+    rejection. Rejection is final from the coordinator's perspective.
+    """
+    gmail: GmailClient = ctx["gmail"]
+    agent = ctx["next_action_agent"]
+    suggestion_svc = ctx["suggestion_service"]
+    loop_service = ctx["loop_service"]
+    redis = ctx.get("redis")
+    # Claim the per-thread generation token. A concurrent accept-driven
+    # re-run on the same thread (process_coordinator_response or
+    # run_next_action_agent) will supersede us if it starts later.
+    gen_token = await claim_generation(redis, gmail_thread_id)
+
+    try:
+        rejected = await suggestion_svc.get_suggestion(rejected_suggestion_id)
+        if rejected is None:
+            logger.warning(
+                "rejected suggestion %s not found — skipping re-run", rejected_suggestion_id
+            )
+            return
+
+        thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
+        if not thread.messages:
+            logger.warning(
+                "empty thread %s — cannot run rejection re-run for suggestion %s",
+                gmail_thread_id,
+                rejected_suggestion_id,
+            )
+            return
+
+        message = thread.messages[-1]
+
+        direction = classify_direction(message, coordinator_email)
+        prior_messages = [
+            m for m in thread.messages if m.id != message.id and m.date < message.date
+        ]
+        message_type, new_participants = classify_message_type(message, prior_messages)
+
+        event = EmailEvent(
+            message=message,
+            coordinator_email=coordinator_email,
+            direction=direction,
+            message_type=message_type,
+            new_participants=new_participants,
+            thread_messages=thread.messages,
+        )
+
+        linked_loops = await loop_service.find_loops_by_thread(gmail_thread_id)
+        target_loop = next(
+            (lp for lp in linked_loops if lp.id == rejected.loop_id),
+            None,
+        )
+        if target_loop is None:
+            logger.warning(
+                "no matching loop for rejected suggestion %s (loop_id=%s) — skipping re-run",
+                rejected_suggestion_id,
+                rejected.loop_id,
+            )
+            return
+
+        await agent.act(
+            event,
+            [target_loop],
+            rejected_suggestion=rejected,
+            arq_pool=redis,
+            generation_token=gen_token,
+            generation_thread_id=gmail_thread_id,
+        )
+        logger.info(
+            "rejection re-run completed for suggestion %s (thread %s)",
+            rejected_suggestion_id,
+            gmail_thread_id,
+        )
+    except GmailTokenStaleError:
+        logger.warning(
+            "stale token for %s — rejection re-run skipped (suggestion %s)",
+            coordinator_email,
+            rejected_suggestion_id,
+        )
+    except Exception:
+        logger.exception(
+            "rejection re-run failed for suggestion %s (thread %s)",
+            rejected_suggestion_id,
+            gmail_thread_id,
+        )
+
+
 class WorkerSettings:
     """arq worker configuration."""
 
-    functions = [process_gmail_push, run_next_action_agent, process_coordinator_response]  # noqa: RUF012
+    functions = [  # noqa: RUF012
+        process_gmail_push,
+        run_next_action_agent,
+        process_coordinator_response,
+        process_rejection_response,
+    ]
     cron_jobs = [  # noqa: RUF012
         cron(poll_gmail_history, second=0),  # every 60s
         cron(renew_gmail_watches, hour={0, 6, 12, 18}, minute=0, second=0),

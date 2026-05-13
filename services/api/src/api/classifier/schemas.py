@@ -28,20 +28,12 @@ class NextActionInput(BaseModel):
     """Template variables for the next-action-agent prompt.
 
     Used for emails (inbound or outgoing) on threads already linked to a loop.
+    All four fields are XML-formatted strings — the prompt parses them as
+    structured input. Conversational retries (errors, coordinator answers)
+    are handled via the LLM message history, not as input fields.
     """
 
-    coordinator_name: str
-    coordinator_email: str
     date: str
-    candidate_name: str
-    recruiter_name: str
-    client_name: str
-    client_company: str
-    direction: str
-    email: str
     thread_history: str
-    loop_state: str
-    events: str
-    error: str
-    pending_suggestions: str = "No current pending suggestions."
-    coordinator_response: str = "No active questions."
+    email: str
+    loops: str

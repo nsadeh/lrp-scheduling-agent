@@ -75,6 +75,17 @@ class SuggestionService:
             )
             return [_row_to_suggestion(r) for r in rows]
 
+    async def has_any_suggestions_for_thread(self, gmail_thread_id: str) -> bool:
+        """True iff any suggestion row exists for this thread, any status.
+
+        Heuristic for "has the agent run on this thread at least once?" — if
+        yes, the in-message sidebar shows "All caught up" instead of
+        "Generating suggestions…" when there's nothing pending.
+        """
+        async with self._pool.connection() as conn:
+            row = await queries.has_suggestion_for_thread(conn, gmail_thread_id=gmail_thread_id)
+            return row is not None
+
     async def get_pending_for_coordinator(self, coordinator_email: str) -> list[Suggestion]:
         async with self._pool.connection() as conn:
             rows = await _collect(
@@ -111,6 +122,25 @@ class SuggestionService:
         """Expire pending suggestions older than cutoff."""
         async with self._pool.connection() as conn, conn.transaction():
             await queries.expire_old_suggestions(conn, cutoff=cutoff)
+
+    async def expire_by_id(self, suggestion_id: str, resolved_by: str = "agent") -> None:
+        """Expire a single pending suggestion by id. No-op if not pending."""
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.expire_suggestion(conn, id=suggestion_id, resolved_by=resolved_by)
+
+    async def update_action_data(self, suggestion_id: str, action_data: dict) -> None:
+        """Replace a suggestion's action_data JSONB blob.
+
+        Used by the addon to stash UI-driven state (UPDATE_ACTOR's
+        ``pending_pick`` from the autocomplete onChange handler) so the card
+        can re-render with the staged values pre-filled in the inputs. The
+        coordinator must explicitly click Save to commit — autocomplete
+        selection alone never commits.
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_action_data(
+                conn, id=suggestion_id, action_data=json.dumps(action_data)
+            )
 
 
 def _row_to_suggestion(row: tuple) -> Suggestion:

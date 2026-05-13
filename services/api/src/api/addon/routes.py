@@ -46,6 +46,7 @@ from api.gmail.exceptions import (
     GmailValidationError,
 )
 from api.gmail.forward import build_forwarded_body, prefix_forward_subject
+from api.gmail.models import Message  # noqa: TC001 — used in _pick_thread_anchor signature
 from api.overview.cards import build_overview
 from api.overview.service import OverviewService
 from api.scheduling.cards import (
@@ -53,6 +54,7 @@ from api.scheduling.cards import (
     build_contextual_unlinked,
     build_create_loop_form,
     build_error_card,
+    build_loop_caught_up_card,
     build_loop_pending_card,
 )
 from api.scheduling.models import StageState
@@ -295,6 +297,35 @@ def parse_name_email(text: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
+def _pick_thread_anchor(
+    messages: list[Message], to_emails: list[str], *, is_forward: bool
+) -> Message | None:
+    """Pick the Message whose Message-ID we'll point In-Reply-To at on send.
+
+    Default: latest message overall.
+
+    For non-forward sends, when one of the recipients has previously sent on
+    this thread, prefer their latest message instead — that way the
+    recipient's Gmail can match the In-Reply-To against a Message-ID in their
+    own Sent folder and thread our reply cleanly. The most consequential case
+    is replying to a client after the conversation went internal (e.g.,
+    recruiter avails landed in our mailbox between the client's last send
+    and our reply): anchoring on the client's last message keeps their
+    thread intact.
+
+    Forwards always anchor on the latest overall — we're inserting a new
+    party who, by definition, didn't send a prior message on this thread.
+    """
+    if not messages:
+        return None
+    if not is_forward and to_emails:
+        recipient_set = {e.lower() for e in to_emails}
+        matches = [m for m in messages if m.from_.email.lower() in recipient_set]
+        if matches:
+            return max(matches, key=lambda m: m.date)
+    return max(messages, key=lambda m: m.date)
+
+
 def _normalize_gmail_id(raw_id: str | None) -> tuple[str | None, bool]:
     """Convert Google contextual-trigger IDs to Gmail API hex format.
 
@@ -486,6 +517,10 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
         # No suggestions for this thread — check if it's linked to a loop
         svc = get_scheduling(request)
         loop = await svc.find_loop_by_thread(thread_id)
+        # Track the thread_id that produced a loop match — the Gmail-API
+        # fallback below may rewrite it, and the suggestion-existence check
+        # must run against the same id the loop was found under.
+        resolved_thread_id = thread_id
         logger.info(
             "on-message: thread_id=%s, linked_loop=%s",
             thread_id,
@@ -505,9 +540,23 @@ async def addon_on_message(body: AddonRequest, request: Request) -> dict:
                     card = build_overview(groups, base_url=base_url)
                     return _as_push(card).model_dump(by_alias=True, exclude_none=True)
                 loop = await svc.find_loop_by_thread(api_thread_id)
+                if loop:
+                    resolved_thread_id = api_thread_id
 
         if loop:
-            card = build_loop_pending_card(thread_id, message_id=message_id)
+            # Pick between "Generating…" and "All caught up" by checking
+            # whether the agent has produced any suggestion rows for this
+            # thread at all (any status). If yes, the agent has run and
+            # there's just nothing pending right now — don't pretend work
+            # is in flight.
+            from api.classifier.service import SuggestionService
+
+            suggestion_svc = SuggestionService(db_pool=svc._pool)
+            has_history = await suggestion_svc.has_any_suggestions_for_thread(resolved_thread_id)
+            if has_history:
+                card = build_loop_caught_up_card(resolved_thread_id, message_id=message_id)
+            else:
+                card = build_loop_pending_card(resolved_thread_id, message_id=message_id)
         else:
             card = build_contextual_unlinked(thread_id, message_id=message_id)
 
@@ -867,26 +916,38 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
 async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     """onChangeAction handler for recruiter directory autocomplete.
 
-    Two callers, distinguished by whether ``draft_id`` is in the action
-    parameters:
+    Three callers, distinguished by which extra params come along:
+
+    - **UPDATE_ACTOR path** (``update_actor_role`` present): the coordinator
+      picked from the autocomplete on an UPDATE_ACTOR card. STAGE the pick
+      on the suggestion's ``action_data.pending_pick`` and refresh — the
+      card re-renders with the inputs pre-filled, and the coordinator must
+      click Save to actually commit. Autocomplete selection never commits.
 
     - **JIT path** (``draft_id`` present): the coordinator picked a recruiter
-      from the autocomplete on a DRAFT_EMAIL card. Commit the contact to the
-      loop immediately and refresh the overview so the JIT inputs disappear
-      and Send enables. Without this, the onChange would re-render the
-      standalone create-loop form by mistake — the bug screenshot showed.
+      from the autocomplete on a DRAFT_EMAIL card. Stash on draft pending
+      data so the JIT inputs collapse to a "selected" badge but nothing
+      commits until Send.
 
-    - **Create-loop form path** (no ``draft_id``): the coordinator picked a
-      recruiter inside the standalone create-loop form. Split
-      ``"Name <email>"`` into the two fields and re-render the form,
-      preserving every other field's typed value via ``prefill_*``.
+    - **Create-loop form path** (neither): the coordinator picked inside the
+      standalone create-loop form. Split ``"Name <email>"`` into the two
+      fields and re-render the form with prefills.
     """
     request = kwargs.get("request")
     suggestion_id = _get_param(body, "suggestion_id")
     draft_id = _get_param(body, "draft_id")
+    update_actor_role = _get_param(body, "update_actor_role")
 
     def _field(name: str) -> str | None:
         return _get_form_value(body, name)
+
+    # UPDATE_ACTOR origin — stage the pick rather than commit. Misclicks in
+    # the autocomplete dropdown were committing directly to the loop with no
+    # way to undo; this routes through the standard Save-button commit step.
+    if suggestion_id and update_actor_role:
+        return await _stash_update_actor_pick(
+            body, svc, email, request, suggestion_id, update_actor_role
+        )
 
     if draft_id and suggestion_id:
         # JIT path — stash the pick on draft.pending_jit_data instead of
@@ -1338,8 +1399,17 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     in_reply_to = None
     references = None
     if thread and thread.messages:
-        last_msg = thread.messages[-1]
-        in_reply_to = last_msg.message_id_header
+        # Anchor In-Reply-To on a message the recipient is most likely to
+        # have in their own mailbox. For non-forward sends, prefer the
+        # recipient's own last message on the thread when present — this is
+        # what makes a client see our reply on their original thread instead
+        # of as a brand-new conversation.
+        anchor_msg = _pick_thread_anchor(
+            thread.messages,
+            draft.to_emails,
+            is_forward=draft.is_forward,
+        )
+        in_reply_to = anchor_msg.message_id_header if anchor_msg else None
         ref_ids = [m.message_id_header for m in thread.messages if m.message_id_header]
         if ref_ids:
             references = " ".join(ref_ids)
@@ -1456,7 +1526,16 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
 
 
 async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    """Dismiss a suggestion — resolve as REJECTED, discard draft if applicable."""
+    """Dismiss a suggestion — resolve as REJECTED, discard draft if applicable,
+    and (for any manually-resolved action) enqueue a re-run so the agent can
+    propose a materially different alternative.
+
+    Eligibility is expressed as "not auto-resolved" rather than an explicit
+    allow-list: auto-resolved actions (ADVANCE_STAGE, EXPIRE_SUGGESTION) never
+    surface to the coordinator anyway, so this is mostly a defensive check,
+    but it stays correct if a new manually-resolvable action type is added.
+    """
+    from api.classifier.resolvers import AGENT_AUTO_RESOLVE_ACTIONS
     from api.classifier.service import SuggestionService
 
     request = kwargs.get("request")
@@ -1476,6 +1555,31 @@ async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email:
                 await draft_svc.mark_discarded(draft.id)
 
     await suggestion_svc.resolve(suggestion_id, SuggestionStatus.REJECTED, email)
+
+    if (
+        suggestion is not None
+        and suggestion.action not in AGENT_AUTO_RESOLVE_ACTIONS
+        and suggestion.gmail_thread_id
+    ):
+        redis = get_redis(request)
+        if redis is not None:
+            try:
+                await redis.enqueue_job(
+                    "process_rejection_response",
+                    suggestion_id,
+                    email,
+                    suggestion.gmail_thread_id,
+                )
+                logger.info(
+                    "enqueued rejection re-run for suggestion %s (action=%s)",
+                    suggestion_id,
+                    suggestion.action,
+                )
+            except Exception:
+                # Best-effort — the rejection itself succeeded, swallow the enqueue error.
+                logger.exception(
+                    "failed to enqueue rejection re-run for suggestion %s", suggestion_id
+                )
 
     return await _build_refreshed_overview(request, email)
 
@@ -1581,6 +1685,160 @@ async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, emai
     return await _build_refreshed_overview(request, email)
 
 
+_UPDATE_ACTOR_ROLES = frozenset({"recruiter", "client_manager", "client_contact"})
+
+
+async def _stash_update_actor_pick(
+    body: AddonRequest,
+    svc: LoopService,
+    email: str,
+    request,
+    suggestion_id: str,
+    update_actor_role: str,
+):
+    """Autocomplete onChange handler for UPDATE_ACTOR cards.
+
+    Stages the directory selection by writing it to the suggestion's
+    ``action_data.pending_pick``. The card builder reads pending_pick on
+    re-render and pre-fills the autocomplete inputs with the staged values,
+    so the coordinator sees what they picked but the change is NOT
+    committed until they click Save (which routes to _handle_update_actor).
+
+    Idempotent: re-picking from the autocomplete overwrites pending_pick.
+    Mid-typed input that doesn't parse as "Name <email>" is a no-op refresh
+    — same gating as the JIT path uses.
+    """
+    from api.classifier.service import SuggestionService
+
+    name_field = f"update_actor_name_{suggestion_id}"
+    email_field = f"update_actor_email_{suggestion_id}"
+    raw_name = _get_form_value(body, name_field) or ""
+    raw_email = _get_form_value(body, email_field) or ""
+    parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
+    if parsed is None:
+        return await _build_refreshed_overview(request, email)
+    new_name, new_email = parsed
+    new_email = new_email.strip()
+    if not new_email:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+    if suggestion is None:
+        return await _build_refreshed_overview(request, email)
+
+    new_action_data = dict(suggestion.action_data or {})
+    new_action_data["role"] = update_actor_role  # idempotent — already set by the agent
+    new_action_data["pending_pick"] = {"name": new_name, "email": new_email}
+    await suggestion_svc.update_action_data(suggestion_id, new_action_data)
+    logger.info(
+        "staged update_actor pick for suggestion %s (role=%s, email=%s)",
+        suggestion_id,
+        update_actor_role,
+        new_email,
+    )
+    return await _build_refreshed_overview(request, email)
+
+
+async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Handle UPDATE_ACTOR suggestion submission — point the loop at a new actor.
+
+    Mirrors ASK_COORDINATOR's shape (resolve → ACCEPTED → enqueue agent
+    re-run) but the "answer" is structured: the coordinator picked a
+    Workspace user (recruiter/CM) or typed a client contact name+email.
+
+    After updating the loop's FK, we enqueue ``run_next_action_agent`` so
+    the agent's next pass sees the new actor in the loop XML and can
+    naturally suggest a follow-up draft (e.g., emailing the newly-added
+    recruiter for availability).
+    """
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    suggestion_id = _get_param(body, "suggestion_id")
+    role = _get_param(body, "update_actor_role")
+    if not suggestion_id or not request or role not in _UPDATE_ACTOR_ROLES:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+    if not suggestion or not suggestion.loop_id:
+        return await _build_refreshed_overview(request, email)
+
+    def _f(name: str) -> str:
+        return (_get_form_value(body, f"{name}_{suggestion_id}") or "").strip()
+
+    raw_name = _f("update_actor_name")
+    raw_email = _f("update_actor_email")
+    # Either field may carry the directory-autocomplete "Name <email>" combo
+    # — split defensively the same way the create-loop form does.
+    parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
+    if parsed is not None:
+        actor_name, actor_email = parsed
+    else:
+        actor_name, actor_email = raw_name, raw_email
+    actor_email = actor_email.strip()
+    if not actor_email:
+        return await _build_refreshed_overview(request, email)
+
+    try:
+        if role == "client_contact":
+            company = _f("update_actor_company")
+            contact = await svc.find_or_create_client_contact(
+                name=actor_name or actor_email,
+                email=actor_email,
+                company=company or None,
+            )
+            await svc.set_client_contact(suggestion.loop_id, contact.id, email)
+        else:
+            contact = await svc.find_or_create_contact(
+                name=actor_name or actor_email,
+                email=actor_email,
+                role=role,
+            )
+            if role == "recruiter":
+                await svc.set_recruiter(suggestion.loop_id, contact.id, email)
+            else:
+                await svc.set_client_manager(suggestion.loop_id, contact.id, email)
+    except Exception:
+        logger.exception(
+            "failed to update actor (role=%s, loop=%s, suggestion=%s)",
+            role,
+            suggestion.loop_id,
+            suggestion_id,
+        )
+        return await _build_refreshed_overview(request, email)
+
+    await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
+
+    # The new actor is now on the loop. Re-run the agent so it can suggest
+    # follow-ups (e.g., a draft email to the just-added recruiter) with the
+    # updated loop state in scope.
+    if suggestion.gmail_thread_id:
+        redis = get_redis(request)
+        if redis is not None:
+            try:
+                await redis.enqueue_job(
+                    "run_next_action_agent",
+                    email,
+                    None,  # gmail_message_id — let worker pick the latest from the thread
+                    suggestion.gmail_thread_id,
+                )
+                logger.info(
+                    "enqueued next-action re-run after update_actor (role=%s, loop=%s)",
+                    role,
+                    suggestion.loop_id,
+                )
+            except Exception:
+                # Best-effort — the loop update succeeded; swallow the enqueue error.
+                logger.exception(
+                    "failed to enqueue next-action re-run after update_actor " "(suggestion %s)",
+                    suggestion_id,
+                )
+
+    return await _build_refreshed_overview(request, email)
+
+
 _ACTION_HANDLERS = {
     # Loop creation (manual path)
     "show_create_form": _handle_show_create_form,
@@ -1597,6 +1855,8 @@ _ACTION_HANDLERS = {
     "show_suggestions_tab": _handle_show_suggestions_tab,
     # JIT candidate rename (when classifier auto-created with placeholder)
     "update_candidate_name": _handle_update_candidate_name,
+    # UPDATE_ACTOR — coordinator sets/replaces a loop's recruiter/CM/client_contact
+    "update_actor": _handle_update_actor,
     # JIT pending-pick management (recruiter / client / CM staged on draft)
     "clear_jit": _handle_clear_jit,
 }
