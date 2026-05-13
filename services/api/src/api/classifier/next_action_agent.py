@@ -142,13 +142,19 @@ class NextActionAgent:
             prompt = fetch_prompt(self._langfuse, "next-action-agent")
             with self._langfuse.start_as_current_observation(
                 name="next-action-agent",
-                input=context_input.model_dump(),
             ):
+                # Span's ``input`` is set inside _call_llm to the live messages
+                # list at the moment of each LLM round-trip — that captures
+                # retry follow-ups (error feedback, coordinator responses,
+                # rejection prompts) that wouldn't be visible if we just
+                # serialized the NextActionInput dataclass. The structured
+                # context lives in metadata for reference.
                 self._langfuse.update_current_span(
                     metadata={
                         "prompt_name": "next-action-agent",
                         "prompt_version": prompt.version,
                         "prompt_labels": prompt.labels,
+                        "context": context_input.model_dump(),
                     }
                 )
                 messages = self._build_initial_messages(
@@ -414,11 +420,21 @@ class NextActionAgent:
 
         Model config is sourced from the prompt's LangFuse config so prompt-
         version-pinned settings win.
+
+        Updates the current LangFuse span's ``input`` to the messages list
+        we're about to send. Retries append assistant + user-feedback turns
+        to ``messages`` and recurse through this function, so the final span
+        input reflects the complete conversation the model saw — including
+        error follow-ups, coordinator responses, and rejection feedback.
+        Without this update the trace shows our internal ``NextActionInput``
+        dataclass rather than the actual prompt + retry history.
         """
         config: dict = prompt.config or {}
         model = config.get("model", DEFAULT_MODEL)
         temperature = config.get("temperature", 0.0)
         max_tokens = config.get("max_tokens", 4096)
+
+        self._langfuse.update_current_span(input=messages)
 
         return await self._llm.complete(
             messages=messages,
