@@ -1342,7 +1342,7 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     # recruiter or client_contact, the draft card renders inline inputs
     # (jit_recruiter_*, jit_client_*). If they're populated, attach the
     # contact to the loop and patch the draft's recipients before sending.
-    if suggestion_id and not draft.to_emails:
+    if suggestion_id and (not draft.to_emails or draft.pending_jit_data):
         draft = await _apply_jit_contacts(
             body=body,
             request=request,
@@ -1832,7 +1832,7 @@ async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str,
             except Exception:
                 # Best-effort — the loop update succeeded; swallow the enqueue error.
                 logger.exception(
-                    "failed to enqueue next-action re-run after update_actor " "(suggestion %s)",
+                    "failed to enqueue next-action re-run after update_actor (suggestion %s)",
                     suggestion_id,
                 )
 
