@@ -474,6 +474,71 @@ class TestErrorHandling:
         assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
         assert call_kwargs["item"].confidence == 0.0
 
+    @pytest.mark.asyncio
+    async def test_parse_failure_writes_raw_responses_to_langfuse(self):
+        """When both the initial LLM call and the retry produce un-parseable
+        content (e.g., classification not in the enum), the agent must put
+        the raw response strings on the LangFuse span output before the
+        manual-review fallback fires. Without this, the trace shows an
+        empty output and we can't see what the model actually produced.
+        """
+        agent, suggestion_service = _make_agent()
+        # Both responses are valid JSON but the classification is invalid —
+        # mirrors the real failure case the user reported.
+        bad_envelope = (
+            "<suggestions>[{"
+            '"classification": "information",'  # not in the enum
+            '"action": "ask_coordinator",'
+            '"confidence": 0.5,'
+            '"summary": "x",'
+            '"reasoning": "x",'
+            '"target_loop_id": "lop_1",'
+            '"action_data": {"question": "x"}'
+            "}]</suggestions>"
+        )
+        agent._llm.complete = AsyncMock(
+            side_effect=[
+                _llm_response(bad_envelope),
+                _llm_response(bad_envelope),  # retry also fails
+            ]
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(_event(), [_loop()])
+
+        # Find the span update that carries raw_responses + parse_error.
+        update_calls = agent._langfuse.update_current_span.call_args_list
+        failure_update = next(
+            (call for call in update_calls if "parse_error" in (call.kwargs.get("output") or {})),
+            None,
+        )
+        assert failure_update is not None, (
+            "expected update_current_span(output={...'parse_error'...}) "
+            "before the fallback was created"
+        )
+        output = failure_update.kwargs["output"]
+        assert output["raw_responses"] == [bad_envelope, bad_envelope]
+        parse_error = output["parse_error"].lower()
+        assert "validation" in parse_error or "schema" in parse_error
+
+        # Manual-review fallback still fires (no regression on that behavior).
+        suggestion_service.create_suggestion.assert_called_once()
+        call_kwargs = suggestion_service.create_suggestion.call_args.kwargs
+        assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
+        assert call_kwargs["item"].confidence == 0.0
+
+    def test_next_action_agent_error_carries_raw_responses(self):
+        """Plain unit assertion that the exception preserves raw_responses."""
+        from api.classifier.next_action_agent import NextActionAgentError
+
+        exc = NextActionAgentError("nope", raw_responses=["a", "b"])
+        assert exc.raw_responses == ["a", "b"]
+        # Default empty when not provided — keeps the no-payload call sites valid.
+        assert NextActionAgentError("nope").raw_responses == []
+
 
 # --- Coordinator name resolution ---
 

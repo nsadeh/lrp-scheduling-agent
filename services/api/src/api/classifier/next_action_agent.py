@@ -85,7 +85,18 @@ def _suggestion_fingerprint(loop_id: str | None, action: str, action_data: dict)
 
 
 class NextActionAgentError(Exception):
-    """Raised when the agent cannot produce a usable response."""
+    """Raised when the agent cannot produce a usable response.
+
+    Carries ``raw_responses`` so the caller can write the unparsed LLM
+    output to the LangFuse span even when validation fails. Without this,
+    a parse failure (e.g., the model emits an out-of-enum classification
+    value) yields an empty trace output and we lose visibility into what
+    the model actually produced.
+    """
+
+    def __init__(self, message: str, *, raw_responses: list[str] | None = None):
+        super().__init__(message)
+        self.raw_responses = list(raw_responses or [])
 
 
 class NextActionAgent:
@@ -159,13 +170,27 @@ class NextActionAgent:
                         generation_token,
                     )
                     return
-                valid_items, raw_responses = await self._act_with_messages(
-                    prompt,
-                    messages,
-                    linked_loops,
-                    existing_pending,
-                    allow_retry=True,
-                )
+                try:
+                    valid_items, raw_responses = await self._act_with_messages(
+                        prompt,
+                        messages,
+                        linked_loops,
+                        existing_pending,
+                        allow_retry=True,
+                    )
+                except NextActionAgentError as exc:
+                    # The model produced something — we just couldn't use it
+                    # (schema mismatch, malformed JSON, etc.). Put the raw
+                    # content on the LangFuse span before the exception
+                    # escapes this with-block (the span closes on exit).
+                    # The outer except creates the manual-review fallback.
+                    self._langfuse.update_current_span(
+                        output={
+                            "raw_responses": exc.raw_responses,
+                            "parse_error": str(exc),
+                        }
+                    )
+                    raise
                 self._langfuse.update_current_span(
                     output={
                         "suggestions": [
@@ -346,7 +371,11 @@ class NextActionAgent:
                     allow_retry=False,
                     prior_responses=responses,
                 )
-            raise
+            # Final failure on the retry attempt — attach the accumulated
+            # responses so the caller can put them on the LangFuse span
+            # before falling through to the manual-review fallback. The bare
+            # ``raise`` would discard the responses list (and the trace).
+            raise NextActionAgentError(str(exc), raw_responses=responses) from exc
 
         valid_items, errors = self._validate_batch(
             result.suggestions, linked_loops, existing_pending
