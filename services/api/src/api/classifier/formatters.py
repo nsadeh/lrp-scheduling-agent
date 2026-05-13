@@ -11,6 +11,7 @@ a configurable character limit (~4 chars/token as a rough proxy).
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from xml.sax.saxutils import escape as _xml_escape
 
 if TYPE_CHECKING:
     from api.classifier.models import Suggestion
@@ -223,6 +224,161 @@ def format_pending_suggestions(suggestions: list[Suggestion]) -> str:
         lines.append(line)
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# XML formatters — feed the next-action-agent prompt's structured inputs
+# ---------------------------------------------------------------------------
+
+
+def _escape(value: str | None) -> str:
+    """XML-escape a possibly-null string."""
+    return _xml_escape(value or "")
+
+
+def _format_address(name: str | None, email: str) -> str:
+    """Render an address as 'Name email' (matching the prompt's expected shape)."""
+    if name:
+        return f"{name} {email}"
+    return email
+
+
+_DIRECTION_LABELS = {
+    "incoming": "inbound",
+    "outgoing": "outbound",
+}
+
+
+def format_email_xml(message: Message, direction: str) -> str:
+    """Render a single message as an <email> XML block.
+
+    Direction is normalised to ``inbound`` / ``outbound`` to match the prompt's
+    vocabulary (the internal enum uses ``incoming`` / ``outgoing``).
+    """
+    direction_label = _DIRECTION_LABELS.get(direction, direction)
+    from_str = _format_address(message.from_.name, message.from_.email)
+    to_str = ", ".join(_format_address(a.name, a.email) for a in message.to)
+    cc_str = ", ".join(_format_address(a.name, a.email) for a in message.cc)
+
+    lines = [
+        f"<email direction='{_escape(direction_label)}'>",
+        f"  <timestamp>{_escape(message.date.isoformat())}</timestamp>",
+        f"  <from>{_escape(from_str)}</from>",
+        f"  <to>{_escape(to_str)}</to>",
+    ]
+    if cc_str:
+        lines.append(f"  <cc>{_escape(cc_str)}</cc>")
+    lines.append(f"  <subject>{_escape(message.subject)}</subject>")
+    lines.append(f"  <body>{_escape(message.body_text.strip())}</body>")
+    lines.append("</email>")
+    return "\n".join(lines)
+
+
+def format_thread_history_xml(
+    messages: list[Message],
+    current_message_id: str,
+    coordinator_email: str,
+    char_budget: int = DEFAULT_THREAD_CHAR_BUDGET,
+) -> str:
+    """Render thread history as concatenated <email> blocks, oldest first.
+
+    Excludes the trigger message (provided separately as ``{{email}}``).
+    Direction is per-message: outbound when sent by the coordinator's mailbox,
+    inbound otherwise. Truncates from the oldest end to stay within the
+    char budget; emits an XML comment marker when truncation occurs.
+    """
+    prior = [m for m in messages if m.id != current_message_id]
+    prior.sort(key=lambda m: m.date)  # oldest first
+
+    if not prior:
+        return "<!-- No prior messages in this thread -->"
+
+    # Render newest first so we can keep the most recent N within budget,
+    # then reverse to emit oldest-first.
+    rendered_newest_first: list[str] = []
+    total_chars = 0
+    truncated_count = 0
+
+    for msg in reversed(prior):
+        direction = "outbound" if msg.from_.email == coordinator_email else "inbound"
+        block = format_email_xml(msg, direction)
+        if total_chars + len(block) > char_budget and rendered_newest_first:
+            truncated_count = len(prior) - len(rendered_newest_first)
+            break
+        rendered_newest_first.append(block)
+        total_chars += len(block) + 1  # newline between blocks
+
+    parts: list[str] = []
+    if truncated_count > 0:
+        parts.append(f"<!-- {truncated_count} earlier message(s) truncated -->")
+    parts.extend(reversed(rendered_newest_first))
+    return "\n".join(parts)
+
+
+def _format_actor(prefix_tag: str, value: str | None) -> str:
+    """Render a single actor tag, defaulting to 'Unknown' when null."""
+    return f"<{prefix_tag}>{_escape(value or 'Unknown')}</{prefix_tag}>"
+
+
+def _format_client_contact(loop: Loop) -> str:
+    cc = loop.client_contact
+    if cc is None:
+        return "<client-contact>Unknown</client-contact>"
+    name = cc.name or cc.email
+    company = cc.company or ""
+    label = f"{name}, {company}".rstrip(", ").strip()
+    return f"<client-contact>{_escape(label or 'Unknown')}</client-contact>"
+
+
+def _format_pending_suggestions_xml(pending: list[Suggestion]) -> str:
+    if not pending:
+        return "<pending-suggestions>No current suggestions</pending-suggestions>"
+    children: list[str] = []
+    for sug in pending:
+        summary = sug.summary or ""
+        children.append(
+            f"    <suggestion id='{_escape(sug.id)}' action='{_escape(sug.action)}'>"
+            f"{_escape(summary)}</suggestion>"
+        )
+    inner = "\n".join(children)
+    return f"<pending-suggestions>\n{inner}\n  </pending-suggestions>"
+
+
+def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
+    """Render a single loop as a <loop> XML block."""
+    coordinator_name = loop.coordinator.name if loop.coordinator else None
+    recruiter_name = loop.recruiter.name if loop.recruiter else None
+    candidate_name = loop.candidate.name if loop.candidate else None
+    cm_name = loop.client_manager.name if loop.client_manager else None
+
+    pending_block = _format_pending_suggestions_xml(pending_for_loop)
+    # Indent the pending block by two spaces so it aligns with siblings.
+    pending_block_indented = "\n".join("  " + line for line in pending_block.split("\n"))
+
+    lines = [
+        f"<loop id='{_escape(loop.id)}'>",
+        f"  <stage>{_escape(loop.state.value)}</stage>",
+        "  <actors>",
+        f"    {_format_actor('coordinator', coordinator_name)}",
+        f"    {_format_client_contact(loop)}",
+        f"    {_format_actor('client-manager', cm_name)}",
+        f"    {_format_actor('recruiter', recruiter_name)}",
+        f"    {_format_actor('candidate', candidate_name)}",
+        "  </actors>",
+        pending_block_indented,
+        "</loop>",
+    ]
+    return "\n".join(lines)
+
+
+def format_loops_xml(
+    loops: list[Loop],
+    pending_by_loop: dict[str, list[Suggestion]],
+) -> str:
+    """Render all loops linked to the thread as concatenated <loop> blocks."""
+    if not loops:
+        return "<!-- No loops linked to this thread -->"
+    return "\n".join(format_loop_xml(lp, pending_by_loop.get(lp.id, [])) for lp in loops)
 
 
 def _action_data_highlights(action: str, action_data: dict) -> str:

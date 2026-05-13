@@ -1,5 +1,6 @@
 """Tests for the two-stage classification pipeline: Router, LoopClassifier, NextActionAgent."""
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -187,6 +188,51 @@ def _make_agent():
     return agent, suggestion_service
 
 
+def _llm_response(content: str):
+    """Stub for the LLMResponse return value from LLMService.complete()."""
+    resp = MagicMock()
+    resp.content = content
+    resp.model = "test-model"
+    resp.provider = "test"
+    resp.latency_ms = 1.0
+    return resp
+
+
+def _suggestions_envelope(items: list[SuggestionItem]) -> str:
+    """Re-serialize SuggestionItems into the prompt's <suggestions>[...]</suggestions> envelope."""
+    payload = [item.model_dump(mode="json") for item in items]
+    return f"<suggestions>{json.dumps(payload)}</suggestions>"
+
+
+class _FakeTextPrompt:
+    """Stands in for a LangFuse TextPromptClient — falls through the non-chat
+    branch in ``NextActionAgent._build_initial_messages`` so tests don't have
+    to model the chat compile contract.
+    """
+
+    from typing import ClassVar
+
+    version = 1
+    labels: ClassVar[tuple[str, ...]] = ("test",)
+    config: ClassVar[dict] = {
+        "model": "test-model",
+        "temperature": 0.0,
+        "max_tokens": 1024,
+    }
+
+    def compile(self, **_kwargs):
+        return "compiled prompt"
+
+
+def _patch_agent_llm(agent, content: str):
+    """Patch the agent's prompt fetch + LLM call to return ``content``."""
+    agent._llm.complete = AsyncMock(return_value=_llm_response(content))
+    return patch(
+        "api.classifier.next_action_agent.fetch_prompt",
+        return_value=_FakeTextPrompt(),
+    )
+
+
 # --- Router tests ---
 
 
@@ -305,16 +351,14 @@ class TestAgentGuardrails:
     def test_create_loop_blacklisted(self):
         agent, _ = _make_agent()
         item = _suggestion_item(action=SuggestedAction.CREATE_LOOP)
-        result, error = agent._apply_guardrails(item)
-        assert result.action == SuggestedAction.NO_ACTION
+        _result, error = agent._apply_guardrails(item, set())
         assert error is not None
         assert "not allowed" in error
 
     def test_link_thread_blacklisted(self):
         agent, _ = _make_agent()
         item = _suggestion_item(action=SuggestedAction.LINK_THREAD)
-        result, error = agent._apply_guardrails(item)
-        assert result.action == SuggestedAction.NO_ACTION
+        _result, error = agent._apply_guardrails(item, set())
         assert error is not None
 
     def test_advance_stage_passes(self):
@@ -323,22 +367,21 @@ class TestAgentGuardrails:
             action=SuggestedAction.ADVANCE_STAGE,
             target_stage=StageState.AWAITING_CLIENT,
         )
-        result, error = agent._apply_guardrails(item)
+        result, error = agent._apply_guardrails(item, set())
         assert result.action == SuggestedAction.ADVANCE_STAGE
         assert error is None
 
     def test_draft_email_passes(self):
         agent, _ = _make_agent()
         item = _suggestion_item(action=SuggestedAction.DRAFT_EMAIL)
-        result, error = agent._apply_guardrails(item)
+        result, error = agent._apply_guardrails(item, set())
         assert result.action == SuggestedAction.DRAFT_EMAIL
         assert error is None
 
     def test_missing_target_loop_id_fails(self):
         agent, _ = _make_agent()
         item = _suggestion_item(action=SuggestedAction.DRAFT_EMAIL, target_loop_id=None)
-        result, error = agent._apply_guardrails(item)
-        assert result.action == SuggestedAction.NO_ACTION
+        _result, error = agent._apply_guardrails(item, set())
         assert error is not None
         assert "target_loop_id" in error
 
@@ -348,10 +391,29 @@ class TestAgentGuardrails:
             action=SuggestedAction.ADVANCE_STAGE,
             action_data={},  # missing target_stage
         )
-        result, error = agent._apply_guardrails(item)
-        assert result.action == SuggestedAction.NO_ACTION
+        _result, error = agent._apply_guardrails(item, set())
         assert error is not None
         assert "action_data" in error
+
+    def test_expire_suggestion_unknown_id_fails(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.EXPIRE_SUGGESTION,
+            action_data={"suggestion_id": "sug_unknown"},
+        )
+        _result, error = agent._apply_guardrails(item, {"sug_other"})
+        assert error is not None
+        assert "expire_suggestion" in error
+
+    def test_expire_suggestion_known_id_passes(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.EXPIRE_SUGGESTION,
+            action_data={"suggestion_id": "sug_stale"},
+        )
+        result, error = agent._apply_guardrails(item, {"sug_stale"})
+        assert error is None
+        assert result.action == SuggestedAction.EXPIRE_SUGGESTION
 
 
 # --- Error handling ---
@@ -378,11 +440,11 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_agent_llm_failure_creates_needs_attention(self):
         agent, suggestion_service = _make_agent()
+        agent._llm.complete = AsyncMock(side_effect=Exception("LLM down"))
 
         with patch(
-            "api.classifier.next_action_agent.determine_next_action",
-            new_callable=AsyncMock,
-            side_effect=Exception("LLM down"),
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
         ):
             event = _event()
             await agent.act(event, [_loop()])
@@ -586,20 +648,14 @@ class TestDeduplication:
         )
         suggestion_service.get_pending_for_loop.return_value = [existing]
 
-        result = _classification_result(
-            items=[
-                _suggestion_item(
-                    action=SuggestedAction.ADVANCE_STAGE,
-                    target_stage=StageState.AWAITING_CLIENT,
-                )
-            ]
-        )
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.ADVANCE_STAGE,
+                target_stage=StageState.AWAITING_CLIENT,
+            )
+        ]
 
-        with patch(
-            "api.classifier.next_action_agent.determine_next_action",
-            new_callable=AsyncMock,
-            return_value=result,
-        ):
+        with _patch_agent_llm(agent, _suggestions_envelope(items)):
             await agent.act(_event(), [_loop()])
 
         suggestion_service.create_suggestion.assert_not_called()
@@ -612,13 +668,8 @@ class TestDeduplication:
             action=SuggestedAction.DRAFT_EMAIL,
             action_data={"body": "Hi there", "recipient_type": "recruiter"},
         )
-        result = _classification_result(items=[item, item])
 
-        with patch(
-            "api.classifier.next_action_agent.determine_next_action",
-            new_callable=AsyncMock,
-            return_value=result,
-        ):
+        with _patch_agent_llm(agent, _suggestions_envelope([item, item])):
             await agent.act(_event(), [_loop()])
 
         assert suggestion_service.create_suggestion.call_count == 1
@@ -632,21 +683,322 @@ class TestDeduplication:
         )
         suggestion_service.get_pending_for_loop.return_value = [existing]
 
-        result = _classification_result(
-            items=[
-                _suggestion_item(
-                    action=SuggestedAction.ADVANCE_STAGE,
-                    target_stage=StageState.SCHEDULED,
-                    action_data={"target_stage": "scheduled"},
-                )
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.ADVANCE_STAGE,
+                target_stage=StageState.SCHEDULED,
+                action_data={"target_stage": "scheduled"},
+            )
+        ]
+
+        with _patch_agent_llm(agent, _suggestions_envelope(items)):
+            await agent.act(_event(), [_loop()])
+
+        suggestion_service.create_suggestion.assert_called_once()
+
+
+# --- XML formatters ---
+
+
+class TestXMLFormatters:
+    def test_email_xml_escapes_special_chars(self):
+        from api.classifier.formatters import format_email_xml
+
+        msg = Message(
+            id="msg1",
+            thread_id="thread1",
+            subject="Re: Q1 & Q2 <urgent>",
+            **{"from": EmailAddress(name="A & B", email="a@example.com")},
+            to=[EmailAddress(email="coord@lrp.com")],
+            date=datetime(2026, 5, 5, 11, 30, tzinfo=UTC),
+            body_text="Body with <tag> & ampersand",
+        )
+        xml = format_email_xml(msg, "incoming")
+        assert "<email direction='inbound'>" in xml
+        assert "&amp;" in xml
+        assert "&lt;tag&gt;" in xml
+        assert "<from>A &amp; B a@example.com</from>" in xml
+        # No raw '<' or '>' in interpolated values
+        assert "<tag>" not in xml.replace("<email", "").replace("</email>", "")
+
+    def test_email_xml_omits_empty_cc(self):
+        from api.classifier.formatters import format_email_xml
+
+        msg = Message(
+            id="msg1",
+            thread_id="thread1",
+            subject="Hi",
+            **{"from": EmailAddress(email="a@example.com")},
+            to=[EmailAddress(email="b@example.com")],
+            cc=[],
+            date=datetime(2026, 5, 5, 11, 30, tzinfo=UTC),
+            body_text="Hello",
+        )
+        xml = format_email_xml(msg, "outgoing")
+        assert "<cc>" not in xml
+        assert "<email direction='outbound'>" in xml
+
+    def test_thread_history_oldest_first(self):
+        from api.classifier.formatters import format_thread_history_xml
+
+        msgs = [
+            Message(
+                id=f"msg{i}",
+                thread_id="thread1",
+                subject="Re: Hi",
+                **{"from": EmailAddress(email="a@example.com")},
+                to=[EmailAddress(email="coord@lrp.com")],
+                date=datetime(2026, 5, i, 9, 0, tzinfo=UTC),
+                body_text=f"Body {i}",
+            )
+            for i in (3, 5, 7)
+        ]
+        xml = format_thread_history_xml(
+            msgs, current_message_id="msg7", coordinator_email="coord@lrp.com"
+        )
+        # Oldest body should appear before the newer one.
+        assert xml.index("Body 3") < xml.index("Body 5")
+        # Excludes the current message.
+        assert "Body 7" not in xml
+
+    def test_loop_xml_renders_actors_and_pending(self):
+        from api.classifier.formatters import format_loop_xml
+
+        loop = _loop()
+        pending = [
+            Suggestion(
+                id="sug_old",
+                coordinator_email="coord@lrp.com",
+                gmail_message_id="msg0",
+                gmail_thread_id="thread1",
+                loop_id=loop.id,
+                classification=EmailClassification.AVAILABILITY_RESPONSE,
+                action=SuggestedAction.DRAFT_EMAIL,
+                confidence=0.8,
+                summary="Stale draft summary",
+                action_data={"body": "...", "recipient_type": "recruiter"},
+                status=SuggestionStatus.PENDING,
+            )
+        ]
+        xml = format_loop_xml(loop, pending)
+        assert f"<loop id='{loop.id}'>" in xml
+        assert "<stage>awaiting_candidate</stage>" in xml
+        assert "<candidate>John Smith</candidate>" in xml
+        assert "<recruiter>Bob</recruiter>" in xml
+        assert "<client-contact>Jane, HF Co</client-contact>" in xml
+        assert "sug_old" in xml
+        assert "Stale draft summary" in xml
+
+
+# --- Batch guardrails ---
+
+
+def _two_loop_thread() -> list[Loop]:
+    """Two loops on the same thread with two distinct recruiters."""
+    return [
+        Loop(
+            id=f"lop_{i}",
+            coordinator_id="crd_1",
+            client_contact_id="cli_1",
+            recruiter_id=f"con_{i}",
+            candidate_id=f"can_{i}",
+            title=f"Loop {i}",
+            state=StageState.AWAITING_CANDIDATE,
+            created_at=datetime(2026, 4, 10, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 14, tzinfo=UTC),
+            candidate=Candidate(
+                id=f"can_{i}",
+                name=f"Candidate {i}",
+                created_at=datetime(2026, 4, 10, tzinfo=UTC),
+            ),
+            recruiter=Contact(
+                id=f"con_{i}",
+                name=f"Recruiter {i}",
+                email=f"rec{i}@lrp.com",
+                role="recruiter",
+                created_at=datetime(2026, 4, 10, tzinfo=UTC),
+            ),
+        )
+        for i in (1, 2)
+    ]
+
+
+class TestBatchGuardrails:
+    def test_recruiter_draft_count_exceeds_known_recruiters(self):
+        agent, _ = _make_agent()
+        loops = [_loop()]  # one recruiter on the thread
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "A", "recipient_type": "recruiter"},
+            ),
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "B", "recipient_type": "recruiter"},
+            ),
+        ]
+        _, errors = agent._validate_batch(items, loops, [])
+        assert any("recruiter draft emails" in e for e in errors)
+
+    def test_recruiter_drafts_match_recruiter_count(self):
+        agent, _ = _make_agent()
+        loops = _two_loop_thread()
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                target_loop_id="lop_1",
+                action_data={"body": "A", "recipient_type": "recruiter"},
+            ),
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                target_loop_id="lop_2",
+                action_data={"body": "B", "recipient_type": "recruiter"},
+            ),
+        ]
+        _, errors = agent._validate_batch(items, loops, [])
+        assert not [e for e in errors if "recruiter draft" in e]
+
+    def test_multiple_client_drafts_rejected(self):
+        agent, _ = _make_agent()
+        loops = _two_loop_thread()
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                target_loop_id="lop_1",
+                action_data={"body": "A", "recipient_type": "client"},
+            ),
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                target_loop_id="lop_2",
+                action_data={"body": "B", "recipient_type": "client"},
+            ),
+        ]
+        _, errors = agent._validate_batch(items, loops, [])
+        assert any("client draft emails" in e for e in errors)
+
+
+# --- Conversation retry ---
+
+
+class TestConversationRetry:
+    @pytest.mark.asyncio
+    async def test_batch_error_triggers_followup_with_history(self):
+        agent, suggestion_service = _make_agent()
+        loops = [_loop()]
+
+        # First call: two recruiter drafts (violates batch guardrail).
+        bad_items = [
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "A", "recipient_type": "recruiter"},
+            ),
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "B", "recipient_type": "recruiter"},
+            ),
+        ]
+        # Retry call: one recruiter draft (valid).
+        good_items = [
+            _suggestion_item(
+                action=SuggestedAction.DRAFT_EMAIL,
+                action_data={"body": "Combined", "recipient_type": "recruiter"},
+            ),
+        ]
+
+        responses = [
+            _llm_response(_suggestions_envelope(bad_items)),
+            _llm_response(_suggestions_envelope(good_items)),
+        ]
+        agent._llm.complete = AsyncMock(side_effect=responses)
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(_event(), loops)
+
+        # Two LLM calls: original + retry.
+        assert agent._llm.complete.await_count == 2
+
+        # Second call's messages must include the original + assistant turn + error follow-up.
+        retry_messages = agent._llm.complete.await_args_list[1].kwargs["messages"]
+        roles = [m["role"] for m in retry_messages]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert "errors" in retry_messages[-1]["content"].lower()
+
+        suggestion_service.create_suggestion.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_response_splices_prior_turn(self):
+        agent, _suggestion_service = _make_agent()
+
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.ADVANCE_STAGE,
+                target_stage=StageState.AWAITING_CLIENT,
+            )
+        ]
+        agent._llm.complete = AsyncMock(return_value=_llm_response(_suggestions_envelope(items)))
+
+        originating = Suggestion(
+            id="sug_q",
+            coordinator_email="coord@lrp.com",
+            gmail_message_id="msg0",
+            gmail_thread_id="thread1",
+            loop_id="lop_1",
+            classification=EmailClassification.FOLLOW_UP_NEEDED,
+            action=SuggestedAction.ASK_COORDINATOR,
+            confidence=0.7,
+            summary="Need decision",
+            action_data={"question": "Pick a time slot?"},
+            status=SuggestionStatus.ACCEPTED,
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(
+                _event(),
+                [_loop()],
+                coordinator_response="Pick 3pm",
+                originating_suggestion=originating,
+            )
+
+        messages = agent._llm.complete.await_args.kwargs["messages"]
+        roles = [m["role"] for m in messages]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert "Pick 3pm" in messages[-1]["content"]
+        assert "ask_coordinator" in messages[-2]["content"]
+
+
+# --- Expire suggestion via act() ---
+
+
+class TestExpireSuggestionFlow:
+    @pytest.mark.asyncio
+    async def test_expire_suggestion_drops_unknown_target(self):
+        agent, suggestion_service = _make_agent()
+
+        items = [
+            _suggestion_item(
+                action=SuggestedAction.EXPIRE_SUGGESTION,
+                action_data={"suggestion_id": "sug_never_existed"},
+            )
+        ]
+        # No pending suggestions on the loop — and we don't allow retry to make the failure stick.
+        agent._llm.complete = AsyncMock(
+            side_effect=[
+                _llm_response(_suggestions_envelope(items)),
+                # Retry produces the same invalid response.
+                _llm_response(_suggestions_envelope(items)),
             ]
         )
 
         with patch(
-            "api.classifier.next_action_agent.determine_next_action",
-            new_callable=AsyncMock,
-            return_value=result,
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
         ):
             await agent.act(_event(), [_loop()])
 
-        suggestion_service.create_suggestion.assert_called_once()
+        suggestion_service.create_suggestion.assert_not_called()

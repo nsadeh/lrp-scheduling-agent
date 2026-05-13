@@ -76,6 +76,12 @@ UPDATE agent_suggestions
 SET status = 'expired', resolved_at = now()
 WHERE status = 'pending' AND created_at < :cutoff;
 
+-- name: expire_suggestion!
+-- Mark a single pending suggestion as expired. No-ops if not pending.
+UPDATE agent_suggestions
+SET status = 'expired', resolved_at = now(), resolved_by = :resolved_by
+WHERE id = :id AND status = 'pending';
+
 -- name: get_pending_suggestions_with_context
 -- Denormalized query for the overview card: suggestions + loop context + draft context.
 -- Returns everything the UI needs in a single round-trip (no N+1).

@@ -451,6 +451,11 @@ async def process_coordinator_response(
     loop_service = ctx["loop_service"]
 
     try:
+        # Fetch the originating ask_coordinator suggestion so the agent can
+        # splice it into the LLM conversation history as the prior assistant
+        # turn. We read by id after the addon has already marked it ACCEPTED.
+        originating = await suggestion_svc.get_suggestion(suggestion_id)
+
         thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
         if not thread.messages:
             logger.warning("empty thread %s — cannot process coordinator response", gmail_thread_id)
@@ -491,6 +496,7 @@ async def process_coordinator_response(
             event,
             linked_loops,
             coordinator_response=coordinator_response,
+            originating_suggestion=originating,
             arq_pool=ctx.get("redis"),
         )
         logger.info(

@@ -284,6 +284,37 @@ class LinkThreadResolver:
 
 
 # ---------------------------------------------------------------------------
+# EXPIRE_SUGGESTION
+# ---------------------------------------------------------------------------
+
+
+class ExpireSuggestionResolver:
+    """Mark a stale pending suggestion as expired.
+
+    Reads the target suggestion id from ``action_data["suggestion_id"]`` and
+    flips it to ``EXPIRED``. The expire suggestion itself is then marked
+    ``AUTO_APPLIED`` by ``try_auto_resolve``. If the target is no longer
+    pending (already accepted, rejected, etc.), the underlying SQL is a no-op.
+    """
+
+    async def resolve(self, suggestion: Suggestion, ctx: ResolverContext) -> None:
+        target_id = (suggestion.action_data or {}).get("suggestion_id")
+        if not target_id:
+            logger.warning(
+                "EXPIRE_SUGGESTION %s missing action_data.suggestion_id — skipping",
+                suggestion.id,
+            )
+            return
+
+        await ctx.suggestions.expire_by_id(target_id, resolved_by="agent")
+        logger.info(
+            "auto-expired suggestion %s via %s",
+            target_id,
+            suggestion.id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -300,6 +331,7 @@ def build_agent_registry() -> dict[SuggestedAction, Resolver]:
     """Auto-resolvers for the NextActionAgent (linked threads)."""
     return {
         SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver(),
+        SuggestedAction.EXPIRE_SUGGESTION: ExpireSuggestionResolver(),
     }
 
 

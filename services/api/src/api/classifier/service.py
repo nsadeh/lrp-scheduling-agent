@@ -112,6 +112,11 @@ class SuggestionService:
         async with self._pool.connection() as conn, conn.transaction():
             await queries.expire_old_suggestions(conn, cutoff=cutoff)
 
+    async def expire_by_id(self, suggestion_id: str, resolved_by: str = "agent") -> None:
+        """Expire a single pending suggestion by id. No-op if not pending."""
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.expire_suggestion(conn, id=suggestion_id, resolved_by=resolved_by)
+
 
 def _row_to_suggestion(row: tuple) -> Suggestion:
     """Tuple shape (15 cols):

@@ -38,6 +38,7 @@ class SuggestedAction(StrEnum):
     LINK_THREAD = "link_thread"
     DRAFT_EMAIL = "draft_email"
     ASK_COORDINATOR = "ask_coordinator"
+    EXPIRE_SUGGESTION = "expire_suggestion"
     NO_ACTION = "no_action"
 
 
@@ -76,6 +77,12 @@ class NoActionData(BaseModel):
     """Action data for NO_ACTION — empty by design."""
 
 
+class ExpireSuggestionData(BaseModel):
+    """Action data for EXPIRE_SUGGESTION — the pending suggestion to mark expired."""
+
+    suggestion_id: str
+
+
 class LinkThreadData(BaseModel):
     """Action data for LINK_THREAD — candidate/client identity for guardrail validation."""
 
@@ -112,6 +119,7 @@ ACTION_DATA_MODELS: dict[SuggestedAction, type[BaseModel]] = {
     SuggestedAction.NO_ACTION: NoActionData,
     SuggestedAction.LINK_THREAD: LinkThreadData,
     SuggestedAction.CREATE_LOOP: CreateLoopExtraction,
+    SuggestedAction.EXPIRE_SUGGESTION: ExpireSuggestionData,
 }
 
 
