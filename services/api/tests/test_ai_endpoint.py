@@ -25,6 +25,9 @@ class SampleOutput(BaseModel):
 def _make_chat_prompt(config: dict | None = None):
     """Create a mock ChatPromptClient that compiles to a message list."""
     prompt = MagicMock(spec=ChatPromptClient)
+    prompt.name = "scheduling-classify-email"
+    prompt.version = 1
+    prompt.labels = ["production"]
     prompt.config = config or {
         "model": "claude-sonnet-4-20250514",
         "temperature": 0.1,
@@ -295,7 +298,7 @@ class TestLLMEndpointCall:
             data=SampleInput(subject="Test", body="Test"),
         )
 
-        mock_langfuse.update_current_span.assert_called_once_with(
+        mock_langfuse.update_current_span.assert_called_with(
             output={"classification": "scheduling", "confidence": 0.95},
         )
 
@@ -316,6 +319,6 @@ class TestLLMEndpointCall:
             data=SampleInput(subject="Test", body="Test"),
         )
 
-        mock_langfuse.update_current_span.assert_called_once_with(
+        mock_langfuse.update_current_span.assert_called_with(
             output={"classification": "other", "confidence": 0.7},
         )
