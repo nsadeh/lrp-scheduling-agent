@@ -415,6 +415,26 @@ class TestAgentGuardrails:
         assert error is None
         assert result.action == SuggestedAction.EXPIRE_SUGGESTION
 
+    def test_update_actor_valid_role_passes(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.UPDATE_ACTOR,
+            action_data={"role": "recruiter"},
+        )
+        result, error = agent._apply_guardrails(item, set())
+        assert error is None
+        assert result.action == SuggestedAction.UPDATE_ACTOR
+
+    def test_update_actor_invalid_role_fails(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.UPDATE_ACTOR,
+            action_data={"role": "wizard"},  # not in the Literal
+        )
+        _result, error = agent._apply_guardrails(item, set())
+        assert error is not None
+        assert "action_data" in error
+
 
 # --- Error handling ---
 
@@ -821,6 +841,29 @@ class TestXMLFormatters:
         assert xml.index("Body 3") < xml.index("Body 5")
         # Excludes the current message.
         assert "Body 7" not in xml
+
+    def test_pending_update_actor_renders_role(self):
+        from api.classifier.formatters import format_loop_xml
+
+        loop = _loop()
+        pending = [
+            Suggestion(
+                id="sug_upd",
+                coordinator_email="coord@lrp.com",
+                gmail_message_id="msg0",
+                gmail_thread_id="thread1",
+                loop_id=loop.id,
+                classification=EmailClassification.FOLLOW_UP_NEEDED,
+                action=SuggestedAction.UPDATE_ACTOR,
+                confidence=0.7,
+                summary="The recruiter on file looks wrong",
+                action_data={"role": "recruiter"},
+                status=SuggestionStatus.PENDING,
+            ),
+        ]
+        xml = format_loop_xml(loop, pending)
+        assert "sug_upd" in xml
+        assert "<role>recruiter</role>" in xml
 
     def test_loop_xml_renders_actors_and_pending(self):
         from api.classifier.formatters import format_loop_xml

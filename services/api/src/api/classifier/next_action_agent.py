@@ -69,6 +69,7 @@ _AGENT_ALLOWED_ACTIONS = frozenset(
         SuggestedAction.DRAFT_EMAIL,
         SuggestedAction.ASK_COORDINATOR,
         SuggestedAction.EXPIRE_SUGGESTION,
+        SuggestedAction.UPDATE_ACTOR,
         SuggestedAction.NO_ACTION,
     }
 )
@@ -594,10 +595,10 @@ class NextActionAgent:
     ) -> tuple[SuggestionItem, str | None]:
         """Per-item guardrails. Returns (item, error_message)."""
         if item.action not in _AGENT_ALLOWED_ACTIONS:
+            allowed = ", ".join(sorted(a.value for a in _AGENT_ALLOWED_ACTIONS))
             return item, (
                 f"Action '{item.action}' is not allowed for the next action agent — "
-                "only advance_stage, draft_email, ask_coordinator, expire_suggestion, "
-                "and no_action are allowed"
+                f"allowed actions: {allowed}"
             )
 
         model_cls = ACTION_DATA_MODELS.get(item.action)

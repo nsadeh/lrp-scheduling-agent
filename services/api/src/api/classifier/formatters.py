@@ -355,6 +355,11 @@ def _format_pending_suggestion_body(sug: Suggestion) -> str:
             f"      <summary>{_escape(summary)}</summary>\n"
             f"      <question>{_escape(question)}</question>"
         )
+    if sug.action == "update_actor":
+        role = (data.get("role") or "").strip()
+        return (
+            f"      <summary>{_escape(summary)}</summary>\n" f"      <role>{_escape(role)}</role>"
+        )
     # Fallback for any future pending action types — keep the body terse.
     return f"      <summary>{_escape(summary)}</summary>"
 

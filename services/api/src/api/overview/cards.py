@@ -563,6 +563,116 @@ def _build_link_thread_suggestion(view: SuggestionView) -> list[Widget]:
 
 
 # ---------------------------------------------------------------------------
+# UPDATE_ACTOR — variant of ASK_COORDINATOR
+# ---------------------------------------------------------------------------
+
+
+_ROLE_LABELS: dict[str, str] = {
+    "recruiter": "Recruiter",
+    "client_manager": "Client Manager",
+    "client_contact": "Client Contact",
+}
+
+
+def _current_actor_for_role(view: SuggestionView, role: str) -> tuple[str | None, str | None]:
+    """Return (name, email) of the loop's current actor in the given role, or
+    (None, None) if the role is empty."""
+    if role == "recruiter":
+        return view.recruiter_name, view.recruiter_email
+    if role == "client_manager":
+        return view.client_manager_name, view.client_manager_email
+    if role == "client_contact":
+        return view.client_contact_name, view.client_contact_email
+    return None, None
+
+
+def _build_update_actor_suggestion(view: SuggestionView) -> list[Widget]:
+    """UPDATE_ACTOR — agent asks the coordinator to set/replace a role on the
+    loop. Variant of ASK_COORDINATOR with a structured form instead of free
+    text.
+
+    - If the role is currently filled, show ``Currently: Name <email>`` so the
+      coordinator can make a conscious override decision.
+    - If empty, omit the "Currently" line entirely.
+    - Internal roles (recruiter, client_manager) get Workspace-directory
+      autocomplete; client_contact gets plain inputs (external, no directory).
+    """
+    sug = view.suggestion
+    sid = sug.id
+    data = sug.action_data or {}
+    role = (data.get("role") or "").strip()
+    role_label = _ROLE_LABELS.get(role, role or "actor")
+
+    widgets: list[Widget] = [_text(f"<b>🔄 Update {role_label}</b>")]
+
+    summary = sug.summary or ""
+    if summary:
+        widgets.append(_text(_escape_html_for_widget(summary)))
+
+    # Show the current actor when the role is filled, so the coordinator can
+    # decide whether to override. When empty, render nothing here.
+    current_name, current_email = _current_actor_for_role(view, role)
+    if current_email:
+        display = f"{current_name} &lt;{current_email}&gt;" if current_name else current_email
+        widgets.append(_text(f"<i>Currently: {display}</i>"))
+
+    if role in ("recruiter", "client_manager"):
+        name_field = f"update_actor_name_{sid}"
+        email_field = f"update_actor_email_{sid}"
+        widgets.extend(
+            build_recruiter_inputs(
+                action_url=get_action_url(),
+                directory_search_url=directory_search_url(),
+                name_field=name_field,
+                email_field=email_field,
+                on_change_extra_params={
+                    "suggestion_id": sid,
+                    "update_actor_role": role,
+                },
+            )
+        )
+        required = [email_field]
+    elif role == "client_contact":
+        name_field = f"update_actor_name_{sid}"
+        email_field = f"update_actor_email_{sid}"
+        company_field = f"update_actor_company_{sid}"
+        widgets.extend(
+            build_client_inputs(
+                name_field=name_field,
+                email_field=email_field,
+                company_field=company_field,
+            )
+        )
+        required = [email_field]
+    else:
+        # Unknown role — render error message and fall back to dismiss-only.
+        widgets.append(_text(f"<i>Unrecognised role <code>{role}</code> — please dismiss.</i>"))
+        widgets.append(_buttons(_dismiss_button(sid)))
+        return widgets
+
+    widgets.append(
+        _buttons(
+            Button(
+                text="Save",
+                on_click=_action(
+                    "update_actor",
+                    required_widgets=required,
+                    suggestion_id=sid,
+                    update_actor_role=role,
+                ),
+            ),
+            _dismiss_button(sid),
+        )
+    )
+    return widgets
+
+
+def _escape_html_for_widget(text: str) -> str:
+    """Card text supports a small HTML subset — escape angle brackets in summary."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -576,6 +686,7 @@ _SUGGESTION_BUILDERS = {
     SuggestedAction.ADVANCE_STAGE: _build_advance_suggestion,
     SuggestedAction.LINK_THREAD: _build_link_thread_suggestion,
     SuggestedAction.ASK_COORDINATOR: _build_ask_suggestion,
+    SuggestedAction.UPDATE_ACTOR: _build_update_actor_suggestion,
 }
 
 

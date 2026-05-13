@@ -1615,6 +1615,108 @@ async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, emai
     return await _build_refreshed_overview(request, email)
 
 
+_UPDATE_ACTOR_ROLES = frozenset({"recruiter", "client_manager", "client_contact"})
+
+
+async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str, **kwargs):
+    """Handle UPDATE_ACTOR suggestion submission — point the loop at a new actor.
+
+    Mirrors ASK_COORDINATOR's shape (resolve → ACCEPTED → enqueue agent
+    re-run) but the "answer" is structured: the coordinator picked a
+    Workspace user (recruiter/CM) or typed a client contact name+email.
+
+    After updating the loop's FK, we enqueue ``run_next_action_agent`` so
+    the agent's next pass sees the new actor in the loop XML and can
+    naturally suggest a follow-up draft (e.g., emailing the newly-added
+    recruiter for availability).
+    """
+    from api.classifier.service import SuggestionService
+
+    request = kwargs.get("request")
+    suggestion_id = _get_param(body, "suggestion_id")
+    role = _get_param(body, "update_actor_role")
+    if not suggestion_id or not request or role not in _UPDATE_ACTOR_ROLES:
+        return await _build_refreshed_overview(request, email)
+
+    suggestion_svc = SuggestionService(db_pool=svc._pool)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+    if not suggestion or not suggestion.loop_id:
+        return await _build_refreshed_overview(request, email)
+
+    def _f(name: str) -> str:
+        return (_get_form_value(body, f"{name}_{suggestion_id}") or "").strip()
+
+    raw_name = _f("update_actor_name")
+    raw_email = _f("update_actor_email")
+    # Either field may carry the directory-autocomplete "Name <email>" combo
+    # — split defensively the same way the create-loop form does.
+    parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
+    if parsed is not None:
+        actor_name, actor_email = parsed
+    else:
+        actor_name, actor_email = raw_name, raw_email
+    actor_email = actor_email.strip()
+    if not actor_email:
+        return await _build_refreshed_overview(request, email)
+
+    try:
+        if role == "client_contact":
+            company = _f("update_actor_company")
+            contact = await svc.find_or_create_client_contact(
+                name=actor_name or actor_email,
+                email=actor_email,
+                company=company or None,
+            )
+            await svc.set_client_contact(suggestion.loop_id, contact.id, email)
+        else:
+            contact = await svc.find_or_create_contact(
+                name=actor_name or actor_email,
+                email=actor_email,
+                role=role,
+            )
+            if role == "recruiter":
+                await svc.set_recruiter(suggestion.loop_id, contact.id, email)
+            else:
+                await svc.set_client_manager(suggestion.loop_id, contact.id, email)
+    except Exception:
+        logger.exception(
+            "failed to update actor (role=%s, loop=%s, suggestion=%s)",
+            role,
+            suggestion.loop_id,
+            suggestion_id,
+        )
+        return await _build_refreshed_overview(request, email)
+
+    await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
+
+    # The new actor is now on the loop. Re-run the agent so it can suggest
+    # follow-ups (e.g., a draft email to the just-added recruiter) with the
+    # updated loop state in scope.
+    if suggestion.gmail_thread_id:
+        redis = get_redis(request)
+        if redis is not None:
+            try:
+                await redis.enqueue_job(
+                    "run_next_action_agent",
+                    email,
+                    None,  # gmail_message_id — let worker pick the latest from the thread
+                    suggestion.gmail_thread_id,
+                )
+                logger.info(
+                    "enqueued next-action re-run after update_actor (role=%s, loop=%s)",
+                    role,
+                    suggestion.loop_id,
+                )
+            except Exception:
+                # Best-effort — the loop update succeeded; swallow the enqueue error.
+                logger.exception(
+                    "failed to enqueue next-action re-run after update_actor " "(suggestion %s)",
+                    suggestion_id,
+                )
+
+    return await _build_refreshed_overview(request, email)
+
+
 _ACTION_HANDLERS = {
     # Loop creation (manual path)
     "show_create_form": _handle_show_create_form,
@@ -1631,6 +1733,8 @@ _ACTION_HANDLERS = {
     "show_suggestions_tab": _handle_show_suggestions_tab,
     # JIT candidate rename (when classifier auto-created with placeholder)
     "update_candidate_name": _handle_update_candidate_name,
+    # UPDATE_ACTOR — coordinator sets/replaces a loop's recruiter/CM/client_contact
+    "update_actor": _handle_update_actor,
     # JIT pending-pick management (recruiter / client / CM staged on draft)
     "clear_jit": _handle_clear_jit,
 }

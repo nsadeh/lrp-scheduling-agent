@@ -17,9 +17,16 @@ from api.overview.cards import (
     _build_draft_suggestion,
     _build_link_thread_suggestion,
     _build_suggestion_widgets,
+    _build_update_actor_suggestion,
     build_overview,
 )
 from api.overview.models import LoopSuggestionGroup, SuggestionView
+from api.scheduling.cards import set_action_url
+
+# Configure the action URL once so directory autocomplete actions render
+# during card-builder tests (otherwise `directory_search_url()` returns "" and
+# the autocomplete widgets fall back to plain TextInputs).
+set_action_url("https://test.example.com/addon/action")
 
 
 def _suggestion(
@@ -207,7 +214,88 @@ class TestSuggestionDispatcher:
             SuggestedAction.ASK_COORDINATOR,
             SuggestedAction.LINK_THREAD,
             SuggestedAction.CREATE_LOOP,
+            SuggestedAction.UPDATE_ACTOR,
         ]:
-            view = _view(action=action)
+            extra = (
+                {"action_data": {"role": "recruiter"}}
+                if action == SuggestedAction.UPDATE_ACTOR
+                else {}
+            )
+            view = _view(action=action, **extra)
             widgets = _build_suggestion_widgets(view)
             assert len(widgets) > 0, f"No widgets for {action}"
+
+
+class TestUpdateActorSuggestionBuilder:
+    def test_shows_current_recruiter_when_role_is_filled(self):
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="Recruiter looks wrong — confirm",
+            action_data={"role": "recruiter"},
+        )
+        view.recruiter_name = "Rachel Kim"
+        view.recruiter_email = "rachel@lrp.com"
+        widgets = _build_update_actor_suggestion(view)
+        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
+        assert "Update Recruiter" in text
+        assert "Currently: Rachel Kim" in text
+        assert "rachel@lrp.com" in text
+        # Internal role → uses directory autocomplete
+        assert "auto_complete_action" in text or "autoCompleteAction" in text
+        # Form input names are suggestion-suffixed
+        assert "update_actor_name_sug_1" in text
+        assert "update_actor_email_sug_1" in text
+        # Save button wired to update_actor handler
+        assert "update_actor" in text
+
+    def test_omits_currently_line_when_role_is_empty(self):
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="No recruiter on this loop — please add one",
+            action_data={"role": "recruiter"},
+        )
+        # recruiter_name / recruiter_email left None by default
+        widgets = _build_update_actor_suggestion(view)
+        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
+        assert "Currently" not in text
+
+    def test_client_contact_uses_plain_inputs_not_directory(self):
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="Wrong client contact",
+            action_data={"role": "client_contact"},
+        )
+        view.client_contact_name = "Original Person"
+        view.client_contact_email = "orig@hf.com"
+        widgets = _build_update_actor_suggestion(view)
+        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
+        assert "Update Client Contact" in text
+        assert "Currently: Original Person" in text
+        # External role → NO directory autocomplete on the inputs
+        assert "directory/search" not in text
+        # Company input is included for client contacts
+        assert "update_actor_company_sug_1" in text
+
+    def test_client_manager_role_uses_directory_autocomplete(self):
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="Add CM for CC line",
+            action_data={"role": "client_manager"},
+        )
+        widgets = _build_update_actor_suggestion(view)
+        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
+        assert "Update Client Manager" in text
+        # Internal role → directory autocomplete present
+        assert "auto_complete_action" in text or "autoCompleteAction" in text
+
+    def test_unknown_role_renders_dismiss_only(self):
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="???",
+            action_data={"role": "nonsense"},
+        )
+        widgets = _build_update_actor_suggestion(view)
+        text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
+        # Defensive: doesn't render input widgets or the Save button.
+        assert "Save" not in text
+        assert "update_actor_email_" not in text
