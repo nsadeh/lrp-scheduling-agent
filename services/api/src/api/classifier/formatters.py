@@ -330,15 +330,45 @@ def _format_client_contact(loop: Loop) -> str:
     return f"<client-contact>{_escape(label or 'Unknown')}</client-contact>"
 
 
+def _format_pending_suggestion_body(sug: Suggestion) -> str:
+    """Render a pending suggestion's action_data so the agent can recognize
+    duplicates and target the right one for expire_suggestion.
+
+    Only draft_email and ask_coordinator end up pending in practice — the other
+    action types auto-resolve via the resolver registry. We format those two
+    explicitly and fall back to the summary for anything else.
+    """
+    summary = sug.summary or ""
+    data = sug.action_data or {}
+
+    if sug.action == "draft_email":
+        recipient = data.get("recipient_type", "")
+        body = (data.get("body") or "").strip()
+        return (
+            f"      <summary>{_escape(summary)}</summary>\n"
+            f"      <recipient-type>{_escape(recipient)}</recipient-type>\n"
+            f"      <body>{_escape(body)}</body>"
+        )
+    if sug.action == "ask_coordinator":
+        question = (data.get("question") or "").strip()
+        return (
+            f"      <summary>{_escape(summary)}</summary>\n"
+            f"      <question>{_escape(question)}</question>"
+        )
+    # Fallback for any future pending action types — keep the body terse.
+    return f"      <summary>{_escape(summary)}</summary>"
+
+
 def _format_pending_suggestions_xml(pending: list[Suggestion]) -> str:
     if not pending:
         return "<pending-suggestions>No current suggestions</pending-suggestions>"
     children: list[str] = []
     for sug in pending:
-        summary = sug.summary or ""
+        body = _format_pending_suggestion_body(sug)
         children.append(
-            f"    <suggestion id='{_escape(sug.id)}' action='{_escape(sug.action)}'>"
-            f"{_escape(summary)}</suggestion>"
+            f"    <suggestion id='{_escape(sug.id)}' action='{_escape(sug.action)}'>\n"
+            f"{body}\n"
+            f"    </suggestion>"
         )
     inner = "\n".join(children)
     return f"<pending-suggestions>\n{inner}\n  </pending-suggestions>"

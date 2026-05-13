@@ -65,28 +65,36 @@ class EmailRouter:
             )
             return
 
-        # 2. Internal-only messages
+        # 2. Check thread linkage. We need this BEFORE the internal-only filter
+        # because internal LRP-to-LRP traffic (recruiter sending avails to the
+        # coordinator, internal updates, etc.) is the substance of the work on
+        # a linked thread — dropping it would blind the agent to the very
+        # messages that drive a loop forward.
+        linked_loops = await self._loops.find_loops_by_thread(msg.thread_id)
+
+        if linked_loops:
+            # Linked thread → Next Action Agent (inbound and outgoing).
+            # Internal-only messages are kept here: recruiter→coordinator on a
+            # live loop is signal, not noise.
+            await self._agent.act(event, linked_loops, arq_pool=arq_pool)
+            return
+
+        # 3. Unlinked thread. Now the internal-only filter applies — random
+        # LRP-to-LRP chatter shouldn't try to spawn a new scheduling loop.
         if _is_internal_only(msg):
             logger.debug(
-                "skipping internal-only email on thread %s (all participants @%s)",
+                "skipping internal-only email on unlinked thread %s (all participants @%s)",
                 msg.thread_id,
                 INTERNAL_DOMAIN,
             )
             return
 
-        # 3. Check thread linkage
-        linked_loops = await self._loops.find_loops_by_thread(msg.thread_id)
+        # Only inbound messages on unlinked threads can create a new loop.
+        if event.direction == MessageDirection.OUTGOING:
+            logger.debug(
+                "skipping outgoing email on unlinked thread %s",
+                msg.thread_id,
+            )
+            return
 
-        if linked_loops:
-            # Linked thread → Next Action Agent (inbound and outgoing)
-            await self._agent.act(event, linked_loops, arq_pool=arq_pool)
-        else:
-            # Unlinked thread — only process inbound
-            if event.direction == MessageDirection.OUTGOING:
-                logger.debug(
-                    "skipping outgoing email on unlinked thread %s",
-                    msg.thread_id,
-                )
-                return
-
-            await self._classifier.classify(event, arq_pool=arq_pool)
+        await self._classifier.classify(event, arq_pool=arq_pool)

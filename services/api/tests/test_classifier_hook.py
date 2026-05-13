@@ -568,8 +568,11 @@ class TestIsInternalOnly:
 
 class TestInternalOnlyFilter:
     @pytest.mark.asyncio
-    async def test_all_internal_skips_classification(self):
+    async def test_internal_only_skips_classification_on_unlinked_thread(self):
+        """Pure LRP-to-LRP chatter on an unlinked thread shouldn't try to
+        spawn a new scheduling loop — that's just noise."""
         router, classifier, agent, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
         event = EmailEvent(
             message=_internal_msg(cc_emails=("carol@longridgepartners.com",)),
             coordinator_email="alice@longridgepartners.com",
@@ -580,7 +583,6 @@ class TestInternalOnlyFilter:
         await router.on_email(event)
         classifier.classify.assert_not_called()
         agent.act.assert_not_called()
-        loop_service.find_loops_by_thread.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mixed_participants_routes_normally(self):
@@ -598,8 +600,11 @@ class TestInternalOnlyFilter:
         classifier.classify.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_internal_only_skips_even_on_linked_thread(self):
+    async def test_internal_only_on_linked_thread_routes_to_agent(self):
+        """Recruiter→coordinator on a live loop is the substance of the work —
+        internal LRP-to-LRP traffic on linked threads MUST reach the agent."""
         router, classifier, agent, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = [_loop()]
         event = EmailEvent(
             message=_internal_msg(),
             coordinator_email="alice@longridgepartners.com",
@@ -609,8 +614,7 @@ class TestInternalOnlyFilter:
         )
         await router.on_email(event)
         classifier.classify.assert_not_called()
-        agent.act.assert_not_called()
-        loop_service.find_loops_by_thread.assert_not_called()
+        agent.act.assert_called_once()
 
 
 # --- Deduplication ---
@@ -767,7 +771,7 @@ class TestXMLFormatters:
         loop = _loop()
         pending = [
             Suggestion(
-                id="sug_old",
+                id="sug_draft",
                 coordinator_email="coord@lrp.com",
                 gmail_message_id="msg0",
                 gmail_thread_id="thread1",
@@ -776,9 +780,25 @@ class TestXMLFormatters:
                 action=SuggestedAction.DRAFT_EMAIL,
                 confidence=0.8,
                 summary="Stale draft summary",
-                action_data={"body": "...", "recipient_type": "recruiter"},
+                action_data={
+                    "body": "Hey Rachel, can you send Jordan's avails?",
+                    "recipient_type": "recruiter",
+                },
                 status=SuggestionStatus.PENDING,
-            )
+            ),
+            Suggestion(
+                id="sug_ask",
+                coordinator_email="coord@lrp.com",
+                gmail_message_id="msg0",
+                gmail_thread_id="thread1",
+                loop_id=loop.id,
+                classification=EmailClassification.FOLLOW_UP_NEEDED,
+                action=SuggestedAction.ASK_COORDINATOR,
+                confidence=0.7,
+                summary="Need a tiebreaker",
+                action_data={"question": "Should we wait for Jordan or use Drew?"},
+                status=SuggestionStatus.PENDING,
+            ),
         ]
         xml = format_loop_xml(loop, pending)
         assert f"<loop id='{loop.id}'>" in xml
@@ -786,8 +806,14 @@ class TestXMLFormatters:
         assert "<candidate>John Smith</candidate>" in xml
         assert "<recruiter>Bob</recruiter>" in xml
         assert "<client-contact>Jane, HF Co</client-contact>" in xml
-        assert "sug_old" in xml
+        # DRAFT_EMAIL renders body + recipient_type for dedup-by-content + targeting.
+        assert "sug_draft" in xml
         assert "Stale draft summary" in xml
+        assert "<recipient-type>recruiter</recipient-type>" in xml
+        assert "Hey Rachel" in xml
+        # ASK_COORDINATOR renders the question.
+        assert "sug_ask" in xml
+        assert "<question>Should we wait for Jordan or use Drew?</question>" in xml
 
 
 # --- Batch guardrails ---
