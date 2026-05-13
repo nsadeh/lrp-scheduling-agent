@@ -222,7 +222,9 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
         ),
         disabled=send_disabled,
     )
-    widgets.append(_buttons(_dismiss_button(sug.id), send_button))
+    # Convention across all suggestion cards: accept path on the left,
+    # reject/dismiss on the right. Send (or Forward) is the accept here.
+    widgets.append(_buttons(send_button, _dismiss_button(sug.id)))
     return widgets
 
 
