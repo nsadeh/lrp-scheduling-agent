@@ -867,26 +867,35 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
 async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     """onChangeAction handler for recruiter directory autocomplete.
 
-    Two callers, distinguished by whether ``draft_id`` is in the action
-    parameters:
+    Three callers, distinguished by which extra params come along:
+
+    - **UPDATE_ACTOR path** (``update_actor_role`` present): the coordinator
+      picked from the autocomplete on an UPDATE_ACTOR card. Delegate to
+      ``_handle_update_actor`` — autocomplete-selection IS the commit for
+      this card. (For mid-type values that don't parse as "Name <email>",
+      ``_handle_update_actor`` no-ops and refreshes.)
 
     - **JIT path** (``draft_id`` present): the coordinator picked a recruiter
-      from the autocomplete on a DRAFT_EMAIL card. Commit the contact to the
-      loop immediately and refresh the overview so the JIT inputs disappear
-      and Send enables. Without this, the onChange would re-render the
-      standalone create-loop form by mistake — the bug screenshot showed.
+      from the autocomplete on a DRAFT_EMAIL card. Stash on draft pending
+      data so the JIT inputs collapse to a "selected" badge but nothing
+      commits until Send.
 
-    - **Create-loop form path** (no ``draft_id``): the coordinator picked a
-      recruiter inside the standalone create-loop form. Split
-      ``"Name <email>"`` into the two fields and re-render the form,
-      preserving every other field's typed value via ``prefill_*``.
+    - **Create-loop form path** (neither): the coordinator picked inside the
+      standalone create-loop form. Split ``"Name <email>"`` into the two
+      fields and re-render the form with prefills.
     """
     request = kwargs.get("request")
     suggestion_id = _get_param(body, "suggestion_id")
     draft_id = _get_param(body, "draft_id")
+    update_actor_role = _get_param(body, "update_actor_role")
 
     def _field(name: str) -> str | None:
         return _get_form_value(body, name)
+
+    # UPDATE_ACTOR origin — checked FIRST so we don't fall through to the
+    # create-loop form rebuild (which silently wipes the overview).
+    if suggestion_id and update_actor_role:
+        return await _handle_update_actor(body, svc, email, **kwargs)
 
     if draft_id and suggestion_id:
         # JIT path — stash the pick on draft.pending_jit_data instead of
