@@ -1274,7 +1274,7 @@ async def _apply_jit_contacts(
     from api.drafts.service import resolve_recipients
 
     suggestion_svc = SuggestionService(db_pool=svc._pool)
-    suggestion = await suggestion_svc.get(suggestion_id)
+    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
     recipient_type = (suggestion.action_data or {}).get("recipient_type") if suggestion else None
 
     loop = await svc.get_loop(draft.loop_id)
