@@ -27,9 +27,27 @@ logger = logging.getLogger(__name__)
 INTERNAL_DOMAIN = "longridgepartners.com"
 
 
-def _is_internal_only(msg: Message) -> bool:
-    all_addresses = [msg.from_.email, *(a.email for a in msg.to), *(a.email for a in msg.cc)]
-    return all(addr.lower().endswith(f"@{INTERNAL_DOMAIN}") for addr in all_addresses)
+def _message_addresses(msg: Message) -> list[str]:
+    return [msg.from_.email, *(a.email for a in msg.to), *(a.email for a in msg.cc)]
+
+
+def _is_internal_only(msg: Message, thread_messages: list[Message] | None = None) -> bool:
+    """True iff every participant across the thread is at the internal domain.
+
+    We check the *thread* — not just the trigger message — because of cases like:
+      1. Client requests an interview (external sender).
+      2. Coordinator forwards the request to the recruiter (internal-only).
+      3. Recruiter replies with avails (internal-only trigger message).
+    The recruiter's reply on its own looks internal-only, but the thread is
+    clearly scheduling-related because the client is upstream. Looking at all
+    thread participants keeps step 3 eligible for loop creation.
+    """
+    messages = thread_messages if thread_messages else [msg]
+    for m in messages:
+        for addr in _message_addresses(m):
+            if not addr.lower().endswith(f"@{INTERNAL_DOMAIN}"):
+                return False
+    return True
 
 
 class EmailRouter:
@@ -81,9 +99,13 @@ class EmailRouter:
 
         # 3. Unlinked thread. Now the internal-only filter applies — random
         # LRP-to-LRP chatter shouldn't try to spawn a new scheduling loop.
-        if _is_internal_only(msg):
+        # Check the *thread* participants, not just the trigger message, so
+        # internal-only replies on a thread originally started by an external
+        # party (e.g., coordinator forwarded a client request to a recruiter,
+        # recruiter is now replying) still reach the classifier.
+        if _is_internal_only(msg, event.thread_messages):
             logger.debug(
-                "skipping internal-only email on unlinked thread %s (all participants @%s)",
+                "skipping internal-only thread %s (all participants across " "the thread are @%s)",
                 msg.thread_id,
                 INTERNAL_DOMAIN,
             )

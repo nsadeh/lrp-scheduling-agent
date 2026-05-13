@@ -565,6 +565,29 @@ class TestIsInternalOnly:
         msg = _internal_msg(to_emails=(), cc_emails=())
         assert _is_internal_only(msg) is True
 
+    def test_thread_with_external_upstream_is_not_internal_only(self):
+        """If any message in the thread had an external participant, the
+        thread isn't internal-only even when the trigger message is all-LRP."""
+        external_inbound = Message(
+            id="msg0",
+            thread_id="thread1",
+            subject="Interview request",
+            **{"from": EmailAddress(email="client@external.com")},
+            to=[EmailAddress(email="coord@longridgepartners.com")],
+            date=datetime(2026, 4, 14, 9, 0, tzinfo=UTC),
+            body_text="Can you schedule a chat?",
+        )
+        internal_forward = _internal_msg()
+        internal_reply = _internal_msg(
+            from_email="recruiter@longridgepartners.com",
+            to_emails=("coord@longridgepartners.com",),
+        )
+        thread = [external_inbound, internal_forward, internal_reply]
+        # Internal-only check on the *trigger* (most recent) message: true alone…
+        assert _is_internal_only(internal_reply) is True
+        # …but false once we consider the whole thread.
+        assert _is_internal_only(internal_reply, thread) is False
+
 
 class TestInternalOnlyFilter:
     @pytest.mark.asyncio
@@ -615,6 +638,40 @@ class TestInternalOnlyFilter:
         await router.on_email(event)
         classifier.classify.assert_not_called()
         agent.act.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_forwarded_client_request_then_internal_reply_classifies(self):
+        """Coordinator forwarded a client's request to a recruiter; the
+        recruiter's internal-only reply should still spawn loop classification
+        because the thread participants include an external client upstream."""
+        router, classifier, _, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
+
+        external_inbound = Message(
+            id="msg0",
+            thread_id="thread1",
+            subject="Interview request",
+            **{"from": EmailAddress(email="client@external.com")},
+            to=[EmailAddress(email="alice@longridgepartners.com")],
+            date=datetime(2026, 4, 14, 9, 0, tzinfo=UTC),
+            body_text="Can you schedule?",
+        )
+        coord_forward = _internal_msg()  # alice -> bob
+        recruiter_reply = _internal_msg(
+            from_email="bob@longridgepartners.com",
+            to_emails=("alice@longridgepartners.com",),
+        )
+
+        event = EmailEvent(
+            message=recruiter_reply,
+            coordinator_email="alice@longridgepartners.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.REPLY,
+            new_participants=[],
+            thread_messages=[external_inbound, coord_forward, recruiter_reply],
+        )
+        await router.on_email(event)
+        classifier.classify.assert_called_once()
 
 
 # --- Deduplication ---

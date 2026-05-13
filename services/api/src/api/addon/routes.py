@@ -1455,17 +1455,17 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     return await _build_refreshed_overview(request, email)
 
 
-# Reject re-runs the agent for these action types — DRAFT_EMAIL and
-# ASK_COORDINATOR are the cases where a different next attempt is plausible.
-# ADVANCE_STAGE / NO_ACTION / EXPIRE_SUGGESTION rejections stay dead-ends.
-_RERUN_ON_REJECT_ACTIONS = frozenset({SuggestedAction.DRAFT_EMAIL, SuggestedAction.ASK_COORDINATOR})
-
-
 async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
     """Dismiss a suggestion — resolve as REJECTED, discard draft if applicable,
-    and (for DRAFT_EMAIL / ASK_COORDINATOR) enqueue a re-run so the agent can
+    and (for any manually-resolved action) enqueue a re-run so the agent can
     propose a materially different alternative.
+
+    Eligibility is expressed as "not auto-resolved" rather than an explicit
+    allow-list: auto-resolved actions (ADVANCE_STAGE, EXPIRE_SUGGESTION) never
+    surface to the coordinator anyway, so this is mostly a defensive check,
+    but it stays correct if a new manually-resolvable action type is added.
     """
+    from api.classifier.resolvers import AGENT_AUTO_RESOLVE_ACTIONS
     from api.classifier.service import SuggestionService
 
     request = kwargs.get("request")
@@ -1488,7 +1488,7 @@ async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email:
 
     if (
         suggestion is not None
-        and suggestion.action in _RERUN_ON_REJECT_ACTIONS
+        and suggestion.action not in AGENT_AUTO_RESOLVE_ACTIONS
         and suggestion.gmail_thread_id
     ):
         redis = get_redis(request)

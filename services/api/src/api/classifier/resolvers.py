@@ -335,6 +335,13 @@ def build_agent_registry() -> dict[SuggestedAction, Resolver]:
     }
 
 
+# Single source of truth: which agent-side actions auto-resolve (and thus
+# never surface to the coordinator for manual accept/reject). Derived from
+# build_agent_registry() at import time so adding a new resolver auto-updates
+# any code that needs the negative (e.g., "what's manually resolvable").
+AGENT_AUTO_RESOLVE_ACTIONS: frozenset[SuggestedAction] = frozenset(build_agent_registry().keys())
+
+
 def build_registry() -> dict[SuggestedAction, Resolver]:
     """Combined registry — kept for backward compatibility."""
     return {**build_classifier_registry(), **build_agent_registry()}
