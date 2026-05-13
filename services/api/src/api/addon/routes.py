@@ -20,7 +20,6 @@ from api.addon.models import (
     AddonRequest,
     CardResponse,
     PushCard,
-    RenderActions,
     SuggestionItem,
     Suggestions,
     SuggestionsResponse,
@@ -599,22 +598,7 @@ async def addon_action(body: AddonRequest, request: Request) -> dict:
     except GmailValidationError as exc:
         logger.warning("Gmail validation error in action %s: %s", fn, exc)
         card = build_error_card(str(exc))
-    # Wrap in the renderActions envelope so we can set stateChanged=true,
-    # which tells Gmail to invalidate the cached homepage / contextual cards
-    # on next navigation. Without this, navigating back after a suggestion
-    # accept shows the resolved item still listed and coordinators double-
-    # execute. stateChanged is only honored inside renderActions — placing
-    # it on a bare {"action": {...}} response trips Gmail's validator and
-    # surfaces a generic "Add-on error" card to the user.
-    wrapped = CardResponse(
-        render_actions=RenderActions(
-            action=ActionResponse(
-                navigations=card.action.navigations,
-                state_changed=True,
-            )
-        )
-    )
-    return wrapped.model_dump(by_alias=True, exclude_none=True)
+    return card.model_dump(by_alias=True, exclude_none=True)
 
 
 @addon_router.post("/directory/search")

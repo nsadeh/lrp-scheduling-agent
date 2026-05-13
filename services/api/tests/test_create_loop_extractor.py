@@ -184,7 +184,7 @@ class TestShowCreateFormExtractor:
             resp = await client.post("/addon/action", json=_show_create_form_event())
 
         assert resp.status_code == 200
-        card = resp.json()["renderActions"]["action"]["navigations"][0]["updateCard"]
+        card = resp.json()["action"]["navigations"][0]["updateCard"]
         inputs = _form_inputs(card)
 
         # Extractor fields present
@@ -208,7 +208,7 @@ class TestShowCreateFormExtractor:
             resp = await client.post("/addon/action", json=_show_create_form_event())
 
         assert resp.status_code == 200
-        card = resp.json()["renderActions"]["action"]["navigations"][0]["updateCard"]
+        card = resp.json()["action"]["navigations"][0]["updateCard"]
         inputs = _form_inputs(card)
         # Deterministic prefill still works
         assert inputs["client_email"] == "jane@acme.com"
@@ -232,7 +232,7 @@ class TestShowCreateFormExtractor:
             )
 
         assert resp.status_code == 200
-        card = resp.json()["renderActions"]["action"]["navigations"][0]["updateCard"]
+        card = resp.json()["action"]["navigations"][0]["updateCard"]
         inputs = _form_inputs(card)
         assert inputs["candidate_name"] == "Classifier Claire"
         assert inputs["client_email"] == "classifier@acme.com"
