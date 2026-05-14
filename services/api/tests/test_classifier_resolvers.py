@@ -1,4 +1,4 @@
-"""Tests for the auto-resolver registry — CreateLoop, AdvanceStage, LinkThread."""
+"""Tests for the auto-resolver registry — CreateLoop, AdvanceStage, LinkThread, NoAction."""
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +15,10 @@ from api.classifier.resolvers import (
     AdvanceStageResolver,
     CreateLoopResolver,
     LinkThreadResolver,
+    NoActionResolver,
     ResolverContext,
+    build_agent_registry,
+    build_classifier_registry,
     build_registry,
     try_auto_resolve,
 )
@@ -208,13 +211,38 @@ class TestLinkThreadResolver:
         loop_service.link_thread.assert_not_called()
 
 
+class TestNoActionResolver:
+    @pytest.mark.asyncio
+    async def test_resolve_is_a_noop(self):
+        loop_service = MagicMock()
+        loop_service.advance_state = AsyncMock()
+        loop_service.create_loop = AsyncMock()
+        loop_service.link_thread = AsyncMock()
+        suggestion_service = MagicMock()
+        suggestion_service.expire_by_id = AsyncMock()
+
+        suggestion = _suggestion(SuggestedAction.NO_ACTION)
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+        await NoActionResolver().resolve(suggestion, ctx)
+
+        loop_service.advance_state.assert_not_called()
+        loop_service.create_loop.assert_not_called()
+        loop_service.link_thread.assert_not_called()
+        suggestion_service.expire_by_id.assert_not_called()
+
+
 class TestRegistry:
-    def test_combined_registry_has_three_actions(self):
+    def test_combined_registry_has_expected_actions(self):
         registry = build_registry()
         assert SuggestedAction.CREATE_LOOP in registry
         assert SuggestedAction.ADVANCE_STAGE in registry
         assert SuggestedAction.LINK_THREAD in registry
+        assert SuggestedAction.NO_ACTION in registry
         assert SuggestedAction.DRAFT_EMAIL not in registry
+
+    def test_no_action_registered_in_both_registries(self):
+        assert SuggestedAction.NO_ACTION in build_classifier_registry()
+        assert SuggestedAction.NO_ACTION in build_agent_registry()
 
 
 class TestTryAutoResolve:
@@ -240,8 +268,24 @@ class TestTryAutoResolve:
         assert kwargs["status"] == SuggestionStatus.AUTO_APPLIED
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_action_not_registered(self):
+    async def test_no_action_is_marked_auto_applied(self):
+        suggestion_service = MagicMock()
+        suggestion_service.resolve = AsyncMock()
         suggestion = _suggestion(SuggestedAction.NO_ACTION)
+        ctx = _ctx(MagicMock(), suggestion_service)
+
+        applied = await try_auto_resolve(suggestion, ctx, build_agent_registry())
+
+        assert applied is True
+        suggestion_service.resolve.assert_awaited_once()
+        call = suggestion_service.resolve.await_args
+        assert call.args[0] == "sug_1"
+        assert call.kwargs["status"] == SuggestionStatus.AUTO_APPLIED
+        assert call.kwargs["resolved_by"] == "agent"
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_action_not_registered(self):
+        suggestion = _suggestion(SuggestedAction.DRAFT_EMAIL)
         ctx = _ctx(MagicMock(), MagicMock())
         applied = await try_auto_resolve(suggestion, ctx, build_registry())
         assert applied is False
