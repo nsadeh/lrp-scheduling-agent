@@ -51,8 +51,7 @@ def parse_suggestions_envelope(content: str) -> ClassificationResult:
         array_match = JSON_ARRAY_RE.search(text)
         if not array_match:
             raise SuggestionsParseError(
-                "response did not contain a <suggestions>…</suggestions> envelope "
-                "or a JSON array"
+                "response did not contain a <suggestions>…</suggestions> envelope or a JSON array"
             )
         inner = array_match.group(0)
 
