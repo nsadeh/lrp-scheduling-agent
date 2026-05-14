@@ -1,13 +1,15 @@
 """Auto-resolver registry — actions applied without coordinator approval.
 
-Some actions (CREATE_LOOP, ADVANCE_STAGE, LINK_THREAD) are mechanical —
-there is no judgment for the coordinator to add. The matching resolver
-applies them in the background and marks the suggestion AUTO_APPLIED so the
-overview UI never surfaces it.
+Some actions (CREATE_LOOP, ADVANCE_STAGE, LINK_THREAD, EXPIRE_SUGGESTION,
+NO_ACTION) are mechanical or carry no work the coordinator should review.
+The matching resolver applies them in the background and marks the
+suggestion AUTO_APPLIED so the overview UI never surfaces it.
 
 Two registries serve the two-stage pipeline:
-- build_classifier_registry(): CREATE_LOOP, LINK_THREAD (for LoopClassifier)
-- build_agent_registry(): ADVANCE_STAGE (for NextActionAgent)
+- build_classifier_registry(): CREATE_LOOP, LINK_THREAD, NO_ACTION
+  (for LoopClassifier)
+- build_agent_registry(): ADVANCE_STAGE, EXPIRE_SUGGESTION, NO_ACTION
+  (for NextActionAgent)
 
 After CREATE_LOOP/LINK_THREAD auto-resolve, enqueue_next_action() fires
 the NextActionAgent on the now-linked thread — this prevents the recursion
@@ -315,6 +317,25 @@ class ExpireSuggestionResolver:
 
 
 # ---------------------------------------------------------------------------
+# NO_ACTION
+# ---------------------------------------------------------------------------
+
+
+class NoActionResolver:
+    """No-op resolver for NO_ACTION.
+
+    NO_ACTION means the LLM explicitly decided to do nothing — typically a
+    rejection follow-up where no materially different alternative exists.
+    The row is persisted for the debug-UI timeline (reasoning intact) but
+    marked terminal at creation so it never lingers in pending_ids and
+    prompt the agent to emit a wasteful expire_suggestion on the next turn.
+    """
+
+    async def resolve(self, suggestion: Suggestion, ctx: ResolverContext) -> None:
+        return
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -324,6 +345,7 @@ def build_classifier_registry() -> dict[SuggestedAction, Resolver]:
     return {
         SuggestedAction.CREATE_LOOP: CreateLoopResolver(),
         SuggestedAction.LINK_THREAD: LinkThreadResolver(),
+        SuggestedAction.NO_ACTION: NoActionResolver(),
     }
 
 
@@ -332,6 +354,7 @@ def build_agent_registry() -> dict[SuggestedAction, Resolver]:
     return {
         SuggestedAction.ADVANCE_STAGE: AdvanceStageResolver(),
         SuggestedAction.EXPIRE_SUGGESTION: ExpireSuggestionResolver(),
+        SuggestedAction.NO_ACTION: NoActionResolver(),
     }
 
 
