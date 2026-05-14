@@ -34,11 +34,18 @@ DEFAULT_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "google/gemini-2.5-flash")
 
 @dataclass
 class LLMResponse:
-    """Normalized response from an LLM call."""
+    """Normalized response from an LLM call.
+
+    ``finish_reason`` is captured for diagnostic purposes — without it,
+    parse failures on the consumer side can't distinguish "natural stop"
+    from "length truncation" from "content filter," all of which surface
+    as the same parse error at the agent layer.
+    """
 
     content: str
     model: str
     provider: str
+    finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     latency_ms: float = 0.0
 
@@ -216,6 +223,7 @@ class LLMService:
 
             choice = response.choices[0]
             content = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
 
             usage = {}
             if response.usage:
@@ -229,6 +237,7 @@ class LLMService:
                 content=content,
                 model=response.model or candidate_model,
                 provider=_provider_from_model(response.model or candidate_model),
+                finish_reason=finish_reason,
                 usage=usage,
                 latency_ms=elapsed_ms,
             )
