@@ -33,7 +33,6 @@ from api.ai.llm_service import DEFAULT_MODEL
 from api.classifier.agent_runtime import (
     SuggestionsParseError,
     build_error_followup,
-    diagnostics_from_response,
     parse_suggestions_envelope,
 )
 from api.classifier.formatters import (
@@ -381,7 +380,7 @@ class LoopClassifier:
         responses = [*prior_responses, response.content]
         diagnostics = [
             *prior_diagnostics,
-            diagnostics_from_response(response, attempt=len(prior_responses)),
+            response.to_diagnostics(attempt=len(prior_responses)),
         ]
 
         try:

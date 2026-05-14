@@ -189,24 +189,28 @@ def _make_agent():
 
 
 def _llm_response(content: str, *, finish_reason: str = "stop", completion_tokens: int = 100):
-    """Stub for the LLMResponse return value from LLMService.complete().
+    """Build a real `LLMResponse` (not a MagicMock) for tests.
 
-    Default finish_reason='stop' and a small completion_tokens count mirror
-    the most common real-world response shape so tests touching diagnostics
-    don't have to set them every time.
+    The agents call `response.to_diagnostics(...)` which is a real method on
+    the `LLMResponse` dataclass — a MagicMock would silently return a child
+    Mock instead of the diagnostic dict, masking failures. Default values
+    mirror the most common real-world response shape so tests touching
+    diagnostics don't have to set them every time.
     """
-    resp = MagicMock()
-    resp.content = content
-    resp.model = "test-model"
-    resp.provider = "test"
-    resp.finish_reason = finish_reason
-    resp.latency_ms = 1.0
-    resp.usage = {
-        "prompt_tokens": 1000,
-        "completion_tokens": completion_tokens,
-        "total_tokens": 1000 + completion_tokens,
-    }
-    return resp
+    from api.ai.llm_service import LLMResponse
+
+    return LLMResponse(
+        content=content,
+        model="test-model",
+        provider="test",
+        finish_reason=finish_reason,
+        latency_ms=1.0,
+        usage={
+            "prompt_tokens": 1000,
+            "completion_tokens": completion_tokens,
+            "total_tokens": 1000 + completion_tokens,
+        },
+    )
 
 
 def _suggestions_envelope(items: list[SuggestionItem]) -> str:

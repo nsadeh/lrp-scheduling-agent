@@ -1,9 +1,23 @@
 """Shared helpers for direct-LLM classifier agents.
 
 `NextActionAgent` and `LoopClassifier` both drive `llm.complete()` directly
-(bypassing the generic `llm_endpoint`) so they can use conversation-history
-retries and parse the `<suggestions>` envelope the prompts emit. The bits
-that don't differ between them live here.
+(bypassing `LLMEndpoint`) so they can use conversation-history retries and
+parse the `<suggestions>` envelope the agent prompts emit. The bits that
+don't differ between them live here.
+
+Note: the envelope parser is intentionally separate from
+`LLMEndpoint._try_parse`. The endpoint parses a bare JSON object against a
+caller-supplied Pydantic schema and serves the extractor endpoints
+(`extract_create_loop_fields` etc.). The envelope parser handles the
+reasoning-preamble + `<suggestions>[…]</suggestions>` contract the v26
+loop-classifier and #80 next-action-agent prompts emit, and is hard-coded
+to `ClassificationResult` / `SuggestionItem`. Unifying them would mean
+either breaking the extractor contract or making the endpoint
+classifier-domain-aware — neither is worth it.
+
+Per-LLM-call diagnostics (finish_reason, latency, token counts, etc.) live
+on `LLMResponse.to_diagnostics` rather than here — it's a property of the
+response, not of the classifier.
 """
 
 from __future__ import annotations
@@ -11,14 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from api.classifier.models import ClassificationResult, SuggestionItem
-
-if TYPE_CHECKING:
-    from api.ai.llm_service import LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -71,26 +81,6 @@ def parse_suggestions_envelope(content: str) -> ClassificationResult:
             raise SuggestionsParseError(f"suggestion item failed schema validation: {exc}") from exc
 
     return ClassificationResult(suggestions=suggestions)
-
-
-def diagnostics_from_response(response: LLMResponse, *, attempt: int) -> dict:
-    """Distill an `LLMResponse` into a JSON-friendly diagnostic dict.
-
-    These land on the LangFuse span and Sentry error context, so they have
-    to round-trip through JSON cleanly. Keep the shape stable — LangFuse
-    and Sentry dashboards may filter on these keys.
-    """
-    return {
-        "attempt": attempt,
-        "finish_reason": response.finish_reason,
-        "model": response.model,
-        "provider": response.provider,
-        "latency_ms": round(response.latency_ms, 1),
-        "prompt_tokens": response.usage.get("prompt_tokens"),
-        "completion_tokens": response.usage.get("completion_tokens"),
-        "total_tokens": response.usage.get("total_tokens"),
-        "content_length_chars": len(response.content or ""),
-    }
 
 
 def build_error_followup(errors: list[str]) -> str:

@@ -49,6 +49,27 @@ class LLMResponse:
     usage: dict[str, int] = field(default_factory=dict)
     latency_ms: float = 0.0
 
+    def to_diagnostics(self, *, attempt: int) -> dict:
+        """Distill this response into a JSON-friendly diagnostic dict.
+
+        These end up on LangFuse spans and Sentry error contexts, so they
+        have to round-trip through JSON cleanly. Keep the shape stable —
+        LangFuse and Sentry dashboards may filter on these keys.
+
+        ``attempt`` is 0 for the initial call, 1 for the first retry, etc.
+        """
+        return {
+            "attempt": attempt,
+            "finish_reason": self.finish_reason,
+            "model": self.model,
+            "provider": self.provider,
+            "latency_ms": round(self.latency_ms, 1),
+            "prompt_tokens": self.usage.get("prompt_tokens"),
+            "completion_tokens": self.usage.get("completion_tokens"),
+            "total_tokens": self.usage.get("total_tokens"),
+            "content_length_chars": len(self.content or ""),
+        }
+
 
 def init_llm_service() -> "LLMService":
     """Create an LLMService configured against OpenRouter.
