@@ -10,8 +10,10 @@ a configurable character limit (~4 chars/token as a rough proxy).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape as _xml_escape
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from api.classifier.models import Suggestion
@@ -20,6 +22,28 @@ if TYPE_CHECKING:
 
 # Default thread history budget: ~3000 tokens x 4 chars/token = 12000 chars
 DEFAULT_THREAD_CHAR_BUDGET = 12_000
+
+# LRP runs out of New York; "ET" in the LLM date string follows local
+# coordinator time so day-of-week is unambiguous around midnight UTC.
+_LLM_TZ = ZoneInfo("America/New_York")
+
+
+def format_llm_datetime(dt: datetime | None = None) -> str:
+    """Render a datetime as ``"Wednesday, May 13 2026, 8:02 PM ET"``.
+
+    Includes the day-of-week explicitly because passing a bare ISO date
+    caused the LLM to hallucinate weekdays (e.g. calling Wednesday "Friday"
+    in scheduling drafts). ``dt`` defaults to ``datetime.now(UTC)``;
+    naive datetimes are interpreted as UTC.
+    """
+    if dt is None:
+        dt = datetime.now(UTC)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    local = dt.astimezone(_LLM_TZ)
+    # Hour without leading zero (strftime("%I") gives "08"; we want "8").
+    hour_12 = local.hour % 12 or 12
+    return local.strftime(f"%A, %B {local.day} {local.year}, {hour_12}:%M %p ET")
 
 
 def format_email(message: Message, direction: str, message_type: str = "") -> str:
@@ -357,9 +381,7 @@ def _format_pending_suggestion_body(sug: Suggestion) -> str:
         )
     if sug.action == "update_actor":
         role = (data.get("role") or "").strip()
-        return (
-            f"      <summary>{_escape(summary)}</summary>\n" f"      <role>{_escape(role)}</role>"
-        )
+        return f"      <summary>{_escape(summary)}</summary>\n      <role>{_escape(role)}</role>"
     # Fallback for any future pending action types — keep the body terse.
     return f"      <summary>{_escape(summary)}</summary>"
 
