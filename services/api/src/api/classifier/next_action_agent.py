@@ -24,6 +24,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+import sentry_sdk
 from langfuse.model import ChatPromptClient
 from pydantic import ValidationError
 
@@ -87,16 +88,25 @@ def _suggestion_fingerprint(loop_id: str | None, action: str, action_data: dict)
 class NextActionAgentError(Exception):
     """Raised when the agent cannot produce a usable response.
 
-    Carries ``raw_responses`` so the caller can write the unparsed LLM
-    output to the LangFuse span even when validation fails. Without this,
-    a parse failure (e.g., the model emits an out-of-enum classification
-    value) yields an empty trace output and we lose visibility into what
-    the model actually produced.
+    Carries ``raw_responses`` and ``call_diagnostics`` so the caller can
+    write the unparsed LLM output AND per-call diagnostic metadata
+    (finish_reason, completion_tokens, model, provider, latency) to the
+    LangFuse span when validation fails. Without ``call_diagnostics`` we
+    can't distinguish "natural stop with bad content" from "length
+    truncation" from "content filter" — they all surface as the same
+    parse error at the agent layer.
     """
 
-    def __init__(self, message: str, *, raw_responses: list[str] | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_responses: list[str] | None = None,
+        call_diagnostics: list[dict] | None = None,
+    ):
         super().__init__(message)
         self.raw_responses = list(raw_responses or [])
+        self.call_diagnostics = list(call_diagnostics or [])
 
 
 class NextActionAgent:
@@ -177,7 +187,7 @@ class NextActionAgent:
                     )
                     return
                 try:
-                    valid_items, raw_responses = await self._act_with_messages(
+                    valid_items, raw_responses, call_diagnostics = await self._act_with_messages(
                         prompt,
                         messages,
                         linked_loops,
@@ -187,15 +197,33 @@ class NextActionAgent:
                 except NextActionAgentError as exc:
                     # The model produced something — we just couldn't use it
                     # (schema mismatch, malformed JSON, etc.). Put the raw
-                    # content on the LangFuse span before the exception
-                    # escapes this with-block (the span closes on exit).
-                    # The outer except creates the manual-review fallback.
+                    # content AND per-call diagnostics (finish_reason,
+                    # completion_tokens, model, provider, latency) on the
+                    # LangFuse span before the exception escapes this with-
+                    # block. The diagnostics are load-bearing for diagnosing
+                    # WHY the response was bad: a finish_reason of "stop"
+                    # with completion_tokens far below max_tokens points to
+                    # the model emitting an early EOS rather than length
+                    # truncation. The outer except creates the manual-review
+                    # fallback.
                     self._langfuse.update_current_span(
                         output={
                             "raw_responses": exc.raw_responses,
+                            "call_diagnostics": exc.call_diagnostics,
                             "parse_error": str(exc),
                         }
                     )
+                    # Sentry context so the existing Sentry error captures
+                    # surface the diagnostic fields without us needing to
+                    # query LangFuse to correlate.
+                    if exc.call_diagnostics:
+                        sentry_sdk.set_context(
+                            "next_action_agent",
+                            {
+                                "call_count": len(exc.call_diagnostics),
+                                "last_call": exc.call_diagnostics[-1],
+                            },
+                        )
                     raise
                 self._langfuse.update_current_span(
                     output={
@@ -210,6 +238,7 @@ class NextActionAgent:
                             for item, _ in valid_items
                         ],
                         "raw_responses": raw_responses,
+                        "call_diagnostics": call_diagnostics,
                     }
                 )
         except Exception:
@@ -338,26 +367,44 @@ class NextActionAgent:
         *,
         allow_retry: bool,
         prior_responses: list[str] | None = None,
-    ) -> tuple[list[tuple[SuggestionItem, Loop | None]], list[str]]:
+        prior_diagnostics: list[dict] | None = None,
+    ) -> tuple[list[tuple[SuggestionItem, Loop | None]], list[str], list[dict]]:
         """Run one LLM round-trip and validate the result.
 
         On batch/per-item errors, optionally append the assistant reply plus a
         user follow-up describing the errors and recurse once with
         ``allow_retry=False``.
 
-        Returns ``(valid_items, raw_responses)`` where ``raw_responses`` is the
-        full list of assistant payloads across the initial call and any retry —
-        captured on the span output so LangFuse traces show what the model
-        produced even if guardrails dropped items.
+        Returns ``(valid_items, raw_responses, call_diagnostics)``. The two
+        list returns are accumulated across the initial call and any retry —
+        each call appends one element to each list, in chronological order,
+        so ``call_diagnostics[i]`` describes the LLM call that produced
+        ``raw_responses[i]``. Both are written to the LangFuse span on
+        success and attached to ``NextActionAgentError`` on failure.
         """
         prior_responses = prior_responses or []
+        prior_diagnostics = prior_diagnostics or []
         response = await self._call_llm(prompt, messages)
         responses = [*prior_responses, response.content]
+        diagnostics = [
+            *prior_diagnostics,
+            _diagnostics_from_response(response, attempt=len(prior_responses)),
+        ]
         try:
             result = self._parse_response(response.content)
         except NextActionAgentError as exc:
             if allow_retry:
-                logger.warning("next-action-agent parse failed (%s) — retrying with follow-up", exc)
+                logger.warning(
+                    "next-action-agent parse failed (%s) — retrying with follow-up "
+                    "[finish_reason=%s, completion_tokens=%s, model=%s, "
+                    "provider=%s, latency_ms=%.0f]",
+                    exc,
+                    response.finish_reason,
+                    response.usage.get("completion_tokens"),
+                    response.model,
+                    response.provider,
+                    response.latency_ms,
+                )
                 follow_up = (
                     "Your previous response could not be parsed. "
                     f"Error: {exc}\n\n"
@@ -376,12 +423,31 @@ class NextActionAgent:
                     existing_pending,
                     allow_retry=False,
                     prior_responses=responses,
+                    prior_diagnostics=diagnostics,
                 )
-            # Final failure on the retry attempt — attach the accumulated
-            # responses so the caller can put them on the LangFuse span
-            # before falling through to the manual-review fallback. The bare
-            # ``raise`` would discard the responses list (and the trace).
-            raise NextActionAgentError(str(exc), raw_responses=responses) from exc
+            # Final failure on the retry attempt — attach both raw responses
+            # AND per-call diagnostic metadata so the caller can put them on
+            # the LangFuse span and Sentry context. Without diagnostics
+            # ("finish_reason=stop, completion_tokens=140, ..."), we can't
+            # distinguish natural-stop / length / content-filter failures
+            # from each other — they all surface as the same parse error.
+            logger.warning(
+                "next-action-agent parse failed on retry (%s) — giving up "
+                "[final_finish_reason=%s, completion_tokens=%s, model=%s, "
+                "provider=%s, latency_ms=%.0f, total_attempts=%d]",
+                exc,
+                response.finish_reason,
+                response.usage.get("completion_tokens"),
+                response.model,
+                response.provider,
+                response.latency_ms,
+                len(diagnostics),
+            )
+            raise NextActionAgentError(
+                str(exc),
+                raw_responses=responses,
+                call_diagnostics=diagnostics,
+            ) from exc
 
         valid_items, errors = self._validate_batch(
             result.suggestions, linked_loops, existing_pending
@@ -404,6 +470,7 @@ class NextActionAgent:
                 existing_pending,
                 allow_retry=False,
                 prior_responses=responses,
+                prior_diagnostics=diagnostics,
             )
 
         if errors:
@@ -413,7 +480,7 @@ class NextActionAgent:
                 len(valid_items),
             )
 
-        return valid_items, responses
+        return valid_items, responses, diagnostics
 
     async def _call_llm(self, prompt: Any, messages: list[dict[str, str]]) -> LLMResponse:
         """Dispatch the conversation to the LLM service.
@@ -713,6 +780,26 @@ _REJECTION_FOLLOWUP_TEXT = (
     "If no materially different alternative is appropriate, emit no_action. "
     "It is better to do nothing than to propose another likely-bad option."
 )
+
+
+def _diagnostics_from_response(response: LLMResponse, *, attempt: int) -> dict:
+    """Distill an LLMResponse into a JSON-friendly diagnostic dict.
+
+    These end up on the LangFuse span and Sentry error context, so they
+    have to round-trip through JSON cleanly. Keep the shape stable —
+    LangFuse / Sentry dashboards may filter or alert on these keys.
+    """
+    return {
+        "attempt": attempt,  # 0 for initial call, 1 for retry, etc.
+        "finish_reason": response.finish_reason,
+        "model": response.model,
+        "provider": response.provider,
+        "latency_ms": round(response.latency_ms, 1),
+        "prompt_tokens": response.usage.get("prompt_tokens"),
+        "completion_tokens": response.usage.get("completion_tokens"),
+        "total_tokens": response.usage.get("total_tokens"),
+        "content_length_chars": len(response.content or ""),
+    }
 
 
 def _build_error_followup(errors: list[str]) -> str:
