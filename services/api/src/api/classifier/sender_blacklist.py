@@ -32,8 +32,7 @@ def _find_api_root() -> Path:
         if (parent / "pyproject.toml").is_file():
             return parent
     raise RuntimeError(
-        "could not locate api root: no pyproject.toml in any parent of "
-        f"{Path(__file__).resolve()}"
+        f"could not locate api root: no pyproject.toml in any parent of {Path(__file__).resolve()}"
     )
 
 
