@@ -1076,40 +1076,6 @@ def _two_loop_thread() -> list[Loop]:
 
 
 class TestBatchGuardrails:
-    def test_recruiter_draft_count_exceeds_known_recruiters(self):
-        agent, _ = _make_agent()
-        loops = [_loop()]  # one recruiter on the thread
-        items = [
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                action_data={"body": "A", "recipient_type": "recruiter"},
-            ),
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                action_data={"body": "B", "recipient_type": "recruiter"},
-            ),
-        ]
-        _, errors = agent._validate_batch(items, loops, [])
-        assert any("recruiter draft emails" in e for e in errors)
-
-    def test_recruiter_drafts_match_recruiter_count(self):
-        agent, _ = _make_agent()
-        loops = _two_loop_thread()
-        items = [
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                target_loop_id="lop_1",
-                action_data={"body": "A", "recipient_type": "recruiter"},
-            ),
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                target_loop_id="lop_2",
-                action_data={"body": "B", "recipient_type": "recruiter"},
-            ),
-        ]
-        _, errors = agent._validate_batch(items, loops, [])
-        assert not [e for e in errors if "recruiter draft" in e]
-
     def test_multiple_client_drafts_rejected(self):
         agent, _ = _make_agent()
         loops = _two_loop_thread()
@@ -1133,53 +1099,6 @@ class TestBatchGuardrails:
 
 
 class TestConversationRetry:
-    @pytest.mark.asyncio
-    async def test_batch_error_triggers_followup_with_history(self):
-        agent, suggestion_service = _make_agent()
-        loops = [_loop()]
-
-        # First call: two recruiter drafts (violates batch guardrail).
-        bad_items = [
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                action_data={"body": "A", "recipient_type": "recruiter"},
-            ),
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                action_data={"body": "B", "recipient_type": "recruiter"},
-            ),
-        ]
-        # Retry call: one recruiter draft (valid).
-        good_items = [
-            _suggestion_item(
-                action=SuggestedAction.DRAFT_EMAIL,
-                action_data={"body": "Combined", "recipient_type": "recruiter"},
-            ),
-        ]
-
-        responses = [
-            _llm_response(_suggestions_envelope(bad_items)),
-            _llm_response(_suggestions_envelope(good_items)),
-        ]
-        agent._llm.complete = AsyncMock(side_effect=responses)
-
-        with patch(
-            "api.classifier.next_action_agent.fetch_prompt",
-            return_value=_FakeTextPrompt(),
-        ):
-            await agent.act(_event(), loops)
-
-        # Two LLM calls: original + retry.
-        assert agent._llm.complete.await_count == 2
-
-        # Second call's messages must include the original + assistant turn + error follow-up.
-        retry_messages = agent._llm.complete.await_args_list[1].kwargs["messages"]
-        roles = [m["role"] for m in retry_messages]
-        assert roles == ["system", "user", "assistant", "user"]
-        assert "errors" in retry_messages[-1]["content"].lower()
-
-        suggestion_service.create_suggestion.assert_called_once()
-
     @pytest.mark.asyncio
     async def test_coordinator_response_splices_prior_turn(self):
         agent, _suggestion_service = _make_agent()

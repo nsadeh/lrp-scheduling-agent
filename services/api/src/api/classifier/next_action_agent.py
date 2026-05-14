@@ -673,21 +673,6 @@ class NextActionAgent:
 
             valid.append((item, target_loop))
 
-        # Batch-level: recruiter draft cap.
-        recruiter_drafts = sum(
-            1
-            for it, _ in valid
-            if it.action == SuggestedAction.DRAFT_EMAIL
-            and it.action_data.get("recipient_type") == "recruiter"
-        )
-        known_recruiters = len({lp.recruiter_id for lp in linked_loops if lp.recruiter_id})
-        if recruiter_drafts > known_recruiters:
-            errors.append(
-                f"Too many recruiter draft emails ({recruiter_drafts}) for "
-                f"{known_recruiters} known recruiter(s) on this thread — combine updates "
-                "so each recruiter receives a single email covering all of their candidates."
-            )
-
         # Batch-level: only one client draft per generation.
         client_drafts = sum(
             1
