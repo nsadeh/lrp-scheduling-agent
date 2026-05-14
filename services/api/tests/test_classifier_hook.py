@@ -188,13 +188,24 @@ def _make_agent():
     return agent, suggestion_service
 
 
-def _llm_response(content: str):
-    """Stub for the LLMResponse return value from LLMService.complete()."""
+def _llm_response(content: str, *, finish_reason: str = "stop", completion_tokens: int = 100):
+    """Stub for the LLMResponse return value from LLMService.complete().
+
+    Default finish_reason='stop' and a small completion_tokens count mirror
+    the most common real-world response shape so tests touching diagnostics
+    don't have to set them every time.
+    """
     resp = MagicMock()
     resp.content = content
     resp.model = "test-model"
     resp.provider = "test"
+    resp.finish_reason = finish_reason
     resp.latency_ms = 1.0
+    resp.usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": completion_tokens,
+        "total_tokens": 1000 + completion_tokens,
+    }
     return resp
 
 
@@ -530,14 +541,64 @@ class TestErrorHandling:
         assert call_kwargs["item"].action == SuggestedAction.ASK_COORDINATOR
         assert call_kwargs["item"].confidence == 0.0
 
+    @pytest.mark.asyncio
+    async def test_parse_failure_writes_call_diagnostics_to_langfuse(self):
+        """LangFuse span output must include per-call diagnostics
+        (finish_reason, completion_tokens, model, provider) on the failure
+        path. Without these, "agent failed to parse" traces are
+        indistinguishable from each other and can't be triaged from the
+        dashboard alone.
+        """
+        agent, _ = _make_agent()
+        bad = "no envelope in here at all"
+        agent._llm.complete = AsyncMock(
+            side_effect=[
+                _llm_response(bad, finish_reason="stop", completion_tokens=42),
+                _llm_response(bad, finish_reason="stop", completion_tokens=18),
+            ]
+        )
+
+        with patch(
+            "api.classifier.next_action_agent.fetch_prompt",
+            return_value=_FakeTextPrompt(),
+        ):
+            await agent.act(_event(), [_loop()])
+
+        update_calls = agent._langfuse.update_current_span.call_args_list
+        failure_update = next(
+            (call for call in update_calls if "parse_error" in (call.kwargs.get("output") or {})),
+            None,
+        )
+        assert failure_update is not None
+        output = failure_update.kwargs["output"]
+        diagnostics = output["call_diagnostics"]
+        assert len(diagnostics) == 2, "expected one diagnostics entry per LLM call"
+
+        # First attempt diagnostics
+        assert diagnostics[0]["attempt"] == 0
+        assert diagnostics[0]["finish_reason"] == "stop"
+        assert diagnostics[0]["completion_tokens"] == 42
+        assert diagnostics[0]["model"] == "test-model"
+        assert diagnostics[0]["provider"] == "test"
+        assert diagnostics[0]["content_length_chars"] == len(bad)
+
+        # Retry attempt diagnostics
+        assert diagnostics[1]["attempt"] == 1
+        assert diagnostics[1]["completion_tokens"] == 18
+
     def test_next_action_agent_error_carries_raw_responses(self):
-        """Plain unit assertion that the exception preserves raw_responses."""
+        """Plain unit assertion that the exception preserves raw_responses
+        and call_diagnostics."""
         from api.classifier.next_action_agent import NextActionAgentError
 
-        exc = NextActionAgentError("nope", raw_responses=["a", "b"])
+        diag = [{"attempt": 0, "finish_reason": "stop", "completion_tokens": 100}]
+        exc = NextActionAgentError("nope", raw_responses=["a", "b"], call_diagnostics=diag)
         assert exc.raw_responses == ["a", "b"]
-        # Default empty when not provided — keeps the no-payload call sites valid.
-        assert NextActionAgentError("nope").raw_responses == []
+        assert exc.call_diagnostics == diag
+        # Defaults empty when not provided.
+        bare = NextActionAgentError("nope")
+        assert bare.raw_responses == []
+        assert bare.call_diagnostics == []
 
 
 # --- Coordinator name resolution ---
