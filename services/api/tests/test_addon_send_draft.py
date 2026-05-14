@@ -175,6 +175,106 @@ async def test_reply_still_sends_when_thread_fetch_fails():
     assert call["body"] == "Please share availability."
 
 
+def _build_jit_context(*, draft: EmailDraft):
+    """Like _build_context but routes through the suggestion_id-bearing form
+    that _handle_send_draft uses to decide whether to run _apply_jit_contacts.
+    """
+    body = AddonRequest(
+        common_event_object=CommonEventObject(
+            parameters={"draft_id": draft.id, "suggestion_id": draft.suggestion_id}
+        )
+    )
+    draft_svc = SimpleNamespace(
+        get_draft=AsyncMock(return_value=draft),
+        update_draft_body=AsyncMock(),
+        mark_sent=AsyncMock(),
+    )
+    gmail = SimpleNamespace(get_thread=AsyncMock(return_value=None))
+    app_state = SimpleNamespace(
+        draft_service=draft_svc,
+        gmail=gmail,
+        overview_service=SimpleNamespace(),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=app_state))
+    svc = SimpleNamespace(send_email=AsyncMock(), _pool=SimpleNamespace())
+    return body, svc, "coord@longridgepartners.com", request, draft_svc
+
+
+@pytest.mark.asyncio
+async def test_jit_apply_runs_when_pending_data_present_even_with_to_emails():
+    """Bug fix: a staged CM (in pending_jit_data) must be committed at send,
+    even when the loop already has a recruiter (so draft.to_emails is set).
+    Before this fix, the `not draft.to_emails` guard short-circuited the
+    JIT-apply step for CM-only stagings."""
+    draft = _make_draft(is_forward=False)  # to_emails=["alice@client.com"]
+    draft.pending_jit_data = {"client_manager": {"name": "Carla M", "email": "cm@client.com"}}
+    body, svc, email, request, _draft_svc = _build_jit_context(draft=draft)
+
+    with (
+        patch(
+            "api.addon.routes._apply_jit_contacts",
+            new=AsyncMock(return_value=draft),
+        ) as apply_jit,
+        patch("api.classifier.service.SuggestionService") as sug_cls,
+        patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+    ):
+        sug_cls.return_value.resolve = AsyncMock()
+        await _handle_send_draft(body, svc, email, request=request)
+
+    apply_jit.assert_awaited_once()
+    svc.send_email.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_jit_apply_skipped_when_nothing_pending_and_recipients_present():
+    """Counterpart: when the loop is fully populated and nothing is staged,
+    we should NOT pay the cost of _apply_jit_contacts on send."""
+    draft = _make_draft(is_forward=False)
+    draft.pending_jit_data = {}
+    body, svc, email, request, _draft_svc = _build_jit_context(draft=draft)
+
+    with (
+        patch(
+            "api.addon.routes._apply_jit_contacts",
+            new=AsyncMock(return_value=draft),
+        ) as apply_jit,
+        patch("api.classifier.service.SuggestionService") as sug_cls,
+        patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+    ):
+        sug_cls.return_value.resolve = AsyncMock()
+        await _handle_send_draft(body, svc, email, request=request)
+
+    apply_jit.assert_not_awaited()
+    svc.send_email.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_jit_apply_runs_when_to_emails_missing_regression():
+    """Regression guard: the original use case (recruiter/client missing,
+    to_emails empty, JIT inputs in form fields) still routes through
+    _apply_jit_contacts."""
+    draft = _make_draft(is_forward=False)
+    draft.to_emails = []
+    draft.pending_jit_data = {}
+    body, svc, email, request, _draft_svc = _build_jit_context(draft=draft)
+
+    # Return a draft with recipients populated to simulate a successful JIT fill.
+    filled = _make_draft(is_forward=False)
+    with (
+        patch(
+            "api.addon.routes._apply_jit_contacts",
+            new=AsyncMock(return_value=filled),
+        ) as apply_jit,
+        patch("api.classifier.service.SuggestionService") as sug_cls,
+        patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+    ):
+        sug_cls.return_value.resolve = AsyncMock()
+        await _handle_send_draft(body, svc, email, request=request)
+
+    apply_jit.assert_awaited_once()
+    svc.send_email.assert_awaited_once()
+
+
 class TestPickThreadAnchor:
     """_pick_thread_anchor decides which Message-ID we point In-Reply-To at."""
 

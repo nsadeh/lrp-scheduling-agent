@@ -6,6 +6,7 @@ from api.classifier.formatters import (
     format_active_loops,
     format_email,
     format_events,
+    format_llm_datetime,
     format_loop_state,
     format_pending_suggestions,
     format_stage_states,
@@ -240,3 +241,39 @@ class TestFormatPendingSuggestions:
         assert 'body="Hi there"' in result
         assert "[lop_1] ask_coordinator: Need clarification" in result
         assert 'question="Which time works?"' in result
+
+
+class TestFormatLLMDatetime:
+    """Renders the 'current date' context string passed to LLMs. Day-of-week
+    must be explicit — bare ISO dates caused the model to hallucinate
+    weekdays in scheduling drafts."""
+
+    def test_renders_weekday_month_day_year_time_in_eastern(self):
+        # 2026-05-14 00:02 UTC is 2026-05-13 20:02 ET (Wednesday).
+        dt = datetime(2026, 5, 14, 0, 2, tzinfo=UTC)
+        assert format_llm_datetime(dt) == "Wednesday, May 13 2026, 8:02 PM ET"
+
+    def test_naive_datetime_treated_as_utc(self):
+        dt = datetime(2026, 5, 14, 0, 2)
+        assert format_llm_datetime(dt) == "Wednesday, May 13 2026, 8:02 PM ET"
+
+    def test_morning_hour_strips_leading_zero(self):
+        # 13:30 UTC → 09:30 ET (Wednesday, EDT).
+        dt = datetime(2026, 5, 13, 13, 30, tzinfo=UTC)
+        assert format_llm_datetime(dt) == "Wednesday, May 13 2026, 9:30 AM ET"
+
+    def test_noon_renders_as_12_pm(self):
+        # 16:00 UTC → 12:00 ET (Wednesday, EDT).
+        dt = datetime(2026, 5, 13, 16, 0, tzinfo=UTC)
+        assert format_llm_datetime(dt) == "Wednesday, May 13 2026, 12:00 PM ET"
+
+    def test_midnight_renders_as_12_am(self):
+        # 04:00 UTC → 00:00 ET (Wednesday, EDT).
+        dt = datetime(2026, 5, 13, 4, 0, tzinfo=UTC)
+        assert format_llm_datetime(dt) == "Wednesday, May 13 2026, 12:00 AM ET"
+
+    def test_default_argument_uses_now(self):
+        # Smoke test: default path runs and produces the expected shape.
+        out = format_llm_datetime()
+        assert " ET" in out
+        assert ", " in out

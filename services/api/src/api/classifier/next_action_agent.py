@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from langfuse.model import ChatPromptClient
@@ -32,6 +31,7 @@ from api.ai.langfuse_client import fetch_prompt
 from api.ai.llm_service import DEFAULT_MODEL
 from api.classifier.formatters import (
     format_email_xml,
+    format_llm_datetime,
     format_loops_xml,
     format_thread_history_xml,
 )
@@ -474,7 +474,7 @@ class NextActionAgent:
                 {
                     "role": "user",
                     "content": (
-                        "The coordinator responded with the following:\n" f"{coordinator_response}"
+                        f"The coordinator responded with the following:\n{coordinator_response}"
                     ),
                 }
             )
@@ -552,7 +552,7 @@ class NextActionAgent:
         else:
             thread_history_xml = "<!-- No prior messages in this thread -->"
 
-        date_str = datetime.now(UTC).date().isoformat()
+        date_str = format_llm_datetime()
 
         all_pending: list[Suggestion] = []
         pending_by_loop: dict[str, list[Suggestion]] = {}

@@ -12,7 +12,6 @@ NextActionAgent to determine next steps on the now-linked thread.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import sentry_sdk
@@ -22,6 +21,7 @@ from api.classifier.endpoints import classify_new_thread
 from api.classifier.formatters import (
     format_active_loops,
     format_email,
+    format_llm_datetime,
     format_thread_history,
 )
 from api.classifier.models import (
@@ -247,7 +247,7 @@ class LoopClassifier:
 
         coordinator_name = _resolve_coordinator_name(event, coord)
         coordinator_str = f"{coordinator_name}<{event.coordinator_email}>"
-        date_str = datetime.now(UTC).date().isoformat()
+        date_str = format_llm_datetime()
 
         return LoopClassifierInput(
             coordinator=coordinator_str,

@@ -112,7 +112,7 @@ class EmailRouter:
         # recruiter is now replying) still reach the classifier.
         if _is_internal_only(msg, event.thread_messages):
             logger.debug(
-                "skipping internal-only thread %s (all participants across " "the thread are @%s)",
+                "skipping internal-only thread %s (all participants across the thread are @%s)",
                 msg.thread_id,
                 INTERNAL_DOMAIN,
             )
