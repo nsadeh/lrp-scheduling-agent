@@ -202,7 +202,7 @@ export async function getSuggestionsForLoop(
     FROM agent_suggestions s
     LEFT JOIN email_drafts d ON d.suggestion_id = s.id
     WHERE s.loop_id = $1
-    ORDER BY s.created_at DESC`,
+    ORDER BY s.created_at ASC`,
     [loopId]
   );
 }
