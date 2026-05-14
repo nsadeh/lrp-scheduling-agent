@@ -354,6 +354,102 @@ class TestClassifierGuardrails:
         assert result.action == SuggestedAction.NO_ACTION
         assert error is not None
 
+    # ---- CREATE_LOOP: client-manager allow-list ----
+
+    def _create_loop_item(self, **overrides):
+        """Helper: well-formed CREATE_LOOP with all fields populated."""
+        action_data = {
+            "candidate_name": "Jordan Martinez",
+            "client_name": "David Chen",
+            "client_email": "dchen@apexcap.com",
+            "client_company": "Apex Capital",
+            "cm_name": "Adam L'esperance",
+            "cm_email": "adam@longridgepartners.com",
+        }
+        action_data.update(overrides)
+        return _suggestion_item(action=SuggestedAction.CREATE_LOOP, action_data=action_data)
+
+    def test_create_loop_with_valid_cm_passes(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item()
+        _result, error = classifier._apply_guardrails(item)
+        assert error is None
+
+    def test_create_loop_with_invalid_cm_email_errors(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(cm_email="someone-else@longridgepartners.com")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is not None
+        assert "client-manager" in error.lower()
+
+    def test_create_loop_cm_email_is_case_insensitive(self):
+        classifier, _ = _make_classifier()
+        # Model sometimes returns mixed-case (e.g. RQuatroni) — should still pass.
+        item = self._create_loop_item(cm_email="RQuatroni@longridgepartners.com")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is None
+
+    # ---- CREATE_LOOP: client-contact validity ----
+
+    def test_create_loop_client_same_as_candidate_errors(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(
+            candidate_name="Jordan Martinez", client_name="jordan martinez"
+        )
+        _result, error = classifier._apply_guardrails(item)
+        assert error is not None
+        assert "candidate" in error.lower()
+
+    def test_create_loop_client_email_lrp_domain_errors(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(client_email="someone@longridgepartners.com")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is not None
+        assert "longridgepartners" in error
+
+    def test_create_loop_client_email_gmail_errors(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(client_email="dchen@gmail.com")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is not None
+        assert "consumer" in error.lower()
+
+    def test_create_loop_client_email_hotmail_errors(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(client_email="contact@hotmail.com")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is not None
+        assert "consumer" in error.lower()
+
+    # ---- CREATE_LOOP: client info optional (ATS path) ----
+
+    def test_create_loop_missing_client_email_is_allowed(self):
+        """Automated ATS emails (Greenhouse, etc.) may have no extractable client
+        contact — the CM/recruiter is on the thread but the named client isn't.
+        Loop creation should proceed; the coordinator fills client details later.
+        """
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(client_email="", client_name="")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is None
+
+    def test_create_loop_missing_client_email_with_name_present_is_allowed(self):
+        """client_name set but client_email empty — still OK (name without contact)."""
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(client_email="", client_name="Olivia Chen")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is None
+
+    def test_create_loop_malformed_client_email_errors(self):
+        """A non-empty but malformed email (no @) is still an error — we never
+        want a partial/broken email recorded; the model should omit instead.
+        """
+        classifier, _ = _make_classifier()
+        item = self._create_loop_item(client_email="not-an-email-address")
+        _result, error = classifier._apply_guardrails(item)
+        assert error is not None
+        assert "malformed" in error.lower()
+
 
 # --- Agent guardrails ---
 
@@ -454,11 +550,11 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_classifier_llm_failure_creates_needs_attention(self):
         classifier, suggestion_service = _make_classifier()
+        classifier._llm.complete = AsyncMock(side_effect=Exception("LLM down"))
 
         with patch(
-            "api.classifier.loop_classifier.classify_new_thread",
-            new_callable=AsyncMock,
-            side_effect=Exception("LLM down"),
+            "api.classifier.loop_classifier.fetch_prompt",
+            return_value=_FakeTextPrompt(),
         ):
             event = _event()
             await classifier.classify(event)

@@ -438,6 +438,144 @@ def format_loops_xml(
     return "\n".join(format_loop_xml(lp, pending_by_loop.get(lp.id, [])) for lp in loops)
 
 
+# ---------------------------------------------------------------------------
+# XML formatters — feed the scheduling-new-loop-classifier prompt
+#
+# These are siblings to format_email_xml / format_thread_history_xml /
+# format_loop_xml above. The loop classifier prompt uses a leaner email shape
+# (addresses styled "Name <email>" rather than "Name email") and a much
+# leaner loop shape (candidate + client company only — no stage, actors, or
+# pending suggestions). Keeping these as separate functions avoids burdening
+# next-action-agent's formatters with branching for what is really a
+# different XML contract.
+# ---------------------------------------------------------------------------
+
+
+def _format_address_brackets(name: str | None, email: str) -> str:
+    """Render an address as 'Name <email>' (vs `_format_address`'s 'Name email')."""
+    if name:
+        return f"{name} <{email}>"
+    return email
+
+
+def format_email_xml_simple(message: Message, direction: str) -> str:
+    """Render a single message as a loop-classifier-style <email> block.
+
+    Direction is normalised to inbound / outbound (the internal enum uses
+    incoming / outgoing). Addresses are rendered "Name <email>" with XML
+    escaping, so the angle brackets around the email survive into the
+    serialized prompt as `&lt;…&gt;` rather than colliding with XML tags.
+    A `<timestamp>` is included so the model can reason about message age
+    in the thread-history context.
+    """
+    direction_label = _DIRECTION_LABELS.get(direction, direction)
+    from_str = _format_address_brackets(message.from_.name, message.from_.email)
+    to_str = ", ".join(_format_address_brackets(a.name, a.email) for a in message.to)
+    cc_str = ", ".join(_format_address_brackets(a.name, a.email) for a in message.cc)
+
+    lines = [
+        f"<email direction='{_escape(direction_label)}'>",
+        f"  <timestamp>{_escape(message.date.isoformat())}</timestamp>",
+        f"  <from>{_escape(from_str)}</from>",
+        f"  <to>{_escape(to_str)}</to>",
+    ]
+    if cc_str:
+        lines.append(f"  <cc>{_escape(cc_str)}</cc>")
+    lines.append(f"  <subject>{_escape(message.subject)}</subject>")
+    lines.append(f"  <body>{_escape(message.body_text.strip())}</body>")
+    lines.append("</email>")
+    return "\n".join(lines)
+
+
+def format_thread_history_xml_simple(
+    messages: list[Message],
+    current_message_id: str,
+    coordinator_email: str,
+    char_budget: int = DEFAULT_THREAD_CHAR_BUDGET,
+) -> str:
+    """Render thread history as loop-classifier-style <email> blocks, oldest first.
+
+    Excludes the trigger message (provided separately via the `email`
+    template variable). Per-message direction: `outbound` when the message
+    is from the coordinator's mailbox, else `inbound`. Truncates from the
+    oldest end to stay within `char_budget`, surfacing a `<!-- N earlier
+    message(s) truncated -->` marker when truncation occurs. Returns the
+    plain sentinel string when no prior messages exist — matching the
+    wording the v26 prompt example uses.
+    """
+    prior = [m for m in messages if m.id != current_message_id]
+    prior.sort(key=lambda m: m.date)  # oldest first
+
+    if not prior:
+        return "No prior messages in this thread."
+
+    # Render newest first so we can keep the most recent N within budget,
+    # then reverse to emit oldest-first.
+    rendered_newest_first: list[str] = []
+    total_chars = 0
+    truncated_count = 0
+
+    for msg in reversed(prior):
+        direction = "outbound" if msg.from_.email == coordinator_email else "inbound"
+        block = format_email_xml_simple(msg, direction)
+        if total_chars + len(block) > char_budget and rendered_newest_first:
+            truncated_count = len(prior) - len(rendered_newest_first)
+            break
+        rendered_newest_first.append(block)
+        total_chars += len(block) + 1  # newline between blocks
+
+    parts: list[str] = []
+    if truncated_count > 0:
+        parts.append(f"<!-- {truncated_count} earlier message(s) truncated -->")
+    parts.extend(reversed(rendered_newest_first))
+    return "\n".join(parts)
+
+
+def format_active_loops_xml(
+    loops: list[Loop],
+    char_budget: int = DEFAULT_ACTIVE_LOOPS_CHAR_BUDGET,
+) -> str:
+    """Format active loops as <loop> blocks with candidate + client only.
+
+    This is the leaner shape the v26 loop classifier prompt example uses —
+    the model only needs candidate name and client company to decide
+    whether an incoming email matches an existing loop. Stage, actors,
+    and pending suggestions stay out of this view to keep the prompt
+    tight and reduce decision-relevant noise.
+    """
+    if not loops:
+        return "No active loops for this coordinator."
+
+    blocks: list[str] = []
+    total_chars = 0
+    truncated_count = 0
+
+    for i, loop in enumerate(loops):
+        candidate_name = (
+            loop.candidate.name if loop.candidate and loop.candidate.name else "Unknown"
+        )
+        client_company = (
+            loop.client_contact.company
+            if loop.client_contact and loop.client_contact.company
+            else "Unknown"
+        )
+        block = (
+            f'<loop id="{_escape(loop.id)}">\n'
+            f"  <client-company>{_escape(client_company)}</client-company>\n"
+            f"  <candidate>{_escape(candidate_name)}</candidate>\n"
+            f"</loop>"
+        )
+        if total_chars + len(block) > char_budget and i > 0:
+            truncated_count = len(loops) - i
+            break
+        blocks.append(block)
+        total_chars += len(block) + 1
+
+    if truncated_count > 0:
+        blocks.append(f"<!-- {truncated_count} more loop(s) truncated -->")
+    return "\n".join(blocks)
+
+
 def _action_data_highlights(action: str, action_data: dict) -> str:
     if action == "advance_stage":
         return f"target_stage={action_data.get('target_stage', '?')}"
