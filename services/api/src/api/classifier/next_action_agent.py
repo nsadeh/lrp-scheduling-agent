@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
@@ -30,6 +29,10 @@ from pydantic import ValidationError
 
 from api.ai.langfuse_client import fetch_prompt
 from api.ai.llm_service import DEFAULT_MODEL
+from api.classifier.agent_runtime import (
+    build_error_followup,
+    parse_suggestions_envelope,
+)
 from api.classifier.formatters import (
     format_email_xml,
     format_llm_datetime,
@@ -75,9 +78,6 @@ _AGENT_ALLOWED_ACTIONS = frozenset(
         SuggestedAction.NO_ACTION,
     }
 )
-
-_SUGGESTIONS_RE = re.compile(r"<suggestions>(.*?)</suggestions>", re.DOTALL)
-_JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
 
 
 def _suggestion_fingerprint(loop_id: str | None, action: str, action_data: dict) -> str:
@@ -388,7 +388,7 @@ class NextActionAgent:
         responses = [*prior_responses, response.content]
         diagnostics = [
             *prior_diagnostics,
-            _diagnostics_from_response(response, attempt=len(prior_responses)),
+            response.to_diagnostics(attempt=len(prior_responses)),
         ]
         try:
             result = self._parse_response(response.content)
@@ -459,7 +459,7 @@ class NextActionAgent:
             logger.info(
                 "next-action-agent batch errors (%d) — retrying with follow-up", len(errors)
             )
-            follow_up = _build_error_followup(errors)
+            follow_up = build_error_followup(errors)
             next_messages = [
                 *messages,
                 {"role": "assistant", "content": response.content},
@@ -490,13 +490,14 @@ class NextActionAgent:
         Model config is sourced from the prompt's LangFuse config so prompt-
         version-pinned settings win.
 
-        Updates the current LangFuse span's ``input`` to the messages list
-        we're about to send. Retries append assistant + user-feedback turns
-        to ``messages`` and recurse through this function, so the final span
-        input reflects the complete conversation the model saw — including
-        error follow-ups, coordinator responses, and rejection feedback.
-        Without this update the trace shows our internal ``NextActionInput``
-        dataclass rather than the actual prompt + retry history.
+        Updates the current LangFuse span's ``input`` to the conversation
+        *minus the system prompt* (index 0). Retries append assistant +
+        user-feedback turns and recurse through this function, so the span
+        input still reflects error follow-ups, coordinator responses, and
+        rejection feedback — just not the static, non-templated system
+        prompt, which is already visible on the LangFuse prompt itself and
+        only bloats LangFuse usage / slows trace loading when re-logged on
+        every span. The actual LLM call below sends the full array.
         """
         config: dict = prompt.config or {}
         model = config.get("model", DEFAULT_MODEL)
@@ -509,7 +510,7 @@ class NextActionAgent:
         # the validated playground runs spend. Tunable via LangFuse config.
         reasoning_max_tokens = config.get("reasoning_max_tokens", 1200)
 
-        self._langfuse.update_current_span(input=messages)
+        self._langfuse.update_current_span(input=messages[1:])
 
         return await self._llm.complete(
             messages=messages,
@@ -569,45 +570,18 @@ class NextActionAgent:
     # ------------------------------------------------------------------
 
     def _parse_response(self, content: str) -> ClassificationResult:
-        """Extract the <suggestions> JSON array from the LLM response."""
-        text = content.strip()
-        # Strip surrounding markdown fences, if any.
-        if text.startswith("```"):
-            lines = text.split("\n")
-            if len(lines) >= 2 and lines[-1].strip() == "```":
-                text = "\n".join(lines[1:-1]).strip()
+        """Extract the <suggestions> JSON array from the LLM response.
 
-        match = _SUGGESTIONS_RE.search(text)
-        if match:
-            inner = match.group(1).strip()
-        else:
-            # Fallback: pull the first JSON array we can find.
-            array_match = _JSON_ARRAY_RE.search(text)
-            if not array_match:
-                raise NextActionAgentError(
-                    "response did not contain a <suggestions>…</suggestions> envelope or "
-                    "a JSON array"
-                )
-            inner = array_match.group(0)
+        Wraps the shared `parse_suggestions_envelope` helper to preserve
+        the agent's `NextActionAgentError` contract — callers up the stack
+        already catch that specific type.
+        """
+        from api.classifier.agent_runtime import SuggestionsParseError
 
         try:
-            data = json.loads(inner)
-        except json.JSONDecodeError as exc:
-            raise NextActionAgentError(f"suggestions JSON failed to parse: {exc}") from exc
-
-        if not isinstance(data, list):
-            raise NextActionAgentError("suggestions payload must be a JSON array")
-
-        suggestions: list[SuggestionItem] = []
-        for raw in data:
-            try:
-                suggestions.append(SuggestionItem.model_validate(raw))
-            except ValidationError as exc:
-                raise NextActionAgentError(
-                    f"suggestion item failed schema validation: {exc}"
-                ) from exc
-
-        return ClassificationResult(suggestions=suggestions)
+            return parse_suggestions_envelope(content)
+        except SuggestionsParseError as exc:
+            raise NextActionAgentError(str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Context building
@@ -774,36 +748,6 @@ _REJECTION_FOLLOWUP_TEXT = (
     "If no materially different alternative is appropriate, emit no_action. "
     "It is better to do nothing than to propose another likely-bad option."
 )
-
-
-def _diagnostics_from_response(response: LLMResponse, *, attempt: int) -> dict:
-    """Distill an LLMResponse into a JSON-friendly diagnostic dict.
-
-    These end up on the LangFuse span and Sentry error context, so they
-    have to round-trip through JSON cleanly. Keep the shape stable —
-    LangFuse / Sentry dashboards may filter or alert on these keys.
-    """
-    return {
-        "attempt": attempt,  # 0 for initial call, 1 for retry, etc.
-        "finish_reason": response.finish_reason,
-        "model": response.model,
-        "provider": response.provider,
-        "latency_ms": round(response.latency_ms, 1),
-        "prompt_tokens": response.usage.get("prompt_tokens"),
-        "completion_tokens": response.usage.get("completion_tokens"),
-        "total_tokens": response.usage.get("total_tokens"),
-        "reasoning_tokens": response.usage.get("reasoning_tokens"),
-        "content_length_chars": len(response.content or ""),
-    }
-
-
-def _build_error_followup(errors: list[str]) -> str:
-    bullets = "\n".join(f"- {e}" for e in errors)
-    return (
-        "Your previous suggestions resulted in the following errors:\n"
-        f"{bullets}\n\n"
-        "Please produce a corrected <suggestions>[...]</suggestions> array."
-    )
 
 
 def _reconstruct_prior_assistant(suggestion: Suggestion) -> str:

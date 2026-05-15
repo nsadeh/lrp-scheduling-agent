@@ -95,10 +95,30 @@ def mock_scheduling():
     msg.from_ = from_
     msg.cc = []
     msg.subject = "Intro with Claire"
+    # thread.messages is now run through the real XML formatters before the
+    # (mocked) extractor is called, so it must hold a real Message — a
+    # MagicMock isn't iterable for to/cc and would raise inside the formatter.
+    from datetime import UTC, datetime
+
+    from api.gmail.models import EmailAddress, Message
+
+    thread_msg = Message(
+        id="msg-1",
+        thread_id="thread-xyz",
+        subject="Intro with Claire",
+        **{"from": EmailAddress(name="Jane Client", email="jane@acme.com")},
+        to=[EmailAddress(name="Coordinator", email=_TEST_EMAIL)],
+        cc=[],
+        date=datetime(2026, 5, 14, 12, 0, tzinfo=UTC),
+        body_text="Hi, can we schedule Claire Candidate for an interview?",
+    )
     thread = MagicMock()
-    thread_msg = MagicMock()
-    thread_msg.id = "msg-1"
     thread.messages = [thread_msg]
+    # get_coordinator_by_email feeds the v7 <coordinator> field; a real
+    # value keeps the formatted input readable in traces/tests.
+    coord = MagicMock()
+    coord.name = "Coordinator Casey"
+    svc.get_coordinator_by_email = AsyncMock(return_value=coord)
     gmail = AsyncMock()
     gmail.get_message = AsyncMock(return_value=msg)
     gmail.get_thread = AsyncMock(return_value=thread)
@@ -240,3 +260,181 @@ class TestShowCreateFormExtractor:
         extractor.assert_not_called()
         # No banner either — banner is reserved for the manual AI-assisted path
         assert _banner_text(card) is None
+
+
+# ---------------------------------------------------------------------------
+# parse_loop_envelope
+# ---------------------------------------------------------------------------
+
+
+class TestParseLoopEnvelope:
+    def test_envelope_with_reasoning_preamble(self):
+        from api.classifier.agent_runtime import parse_loop_envelope
+
+        content = (
+            "1. Client is Acme.\n2. CM is Adam.\n3. Candidate is Claire.\n"
+            '<loop>{"candidate_name": "Claire Candidate", '
+            '"client_company": "Acme", "cm_email": "adam@longridgepartners.com"}</loop>'
+        )
+        result = parse_loop_envelope(content)
+        assert result.candidate_name == "Claire Candidate"
+        assert result.client_company == "Acme"
+        assert result.cm_email == "adam@longridgepartners.com"
+        # v7 omits recruiter fields — they parse to None.
+        assert result.recruiter_name is None
+        assert result.recruiter_email is None
+
+    def test_bare_object_fallback(self):
+        from api.classifier.agent_runtime import parse_loop_envelope
+
+        result = parse_loop_envelope('{"candidate_name": "No Tags Nellie"}')
+        assert result.candidate_name == "No Tags Nellie"
+
+    def test_markdown_fenced(self):
+        from api.classifier.agent_runtime import parse_loop_envelope
+
+        content = '```json\n<loop>{"candidate_name": "Fenced Fred"}</loop>\n```'
+        assert parse_loop_envelope(content).candidate_name == "Fenced Fred"
+
+    def test_missing_object_raises(self):
+        from api.classifier.agent_runtime import (
+            LoopEnvelopeParseError,
+            parse_loop_envelope,
+        )
+
+        with pytest.raises(LoopEnvelopeParseError):
+            parse_loop_envelope("no json here at all")
+
+    def test_array_payload_rejected(self):
+        from api.classifier.agent_runtime import (
+            LoopEnvelopeParseError,
+            parse_loop_envelope,
+        )
+
+        # A JSON array is not a valid single-loop object.
+        with pytest.raises(LoopEnvelopeParseError):
+            parse_loop_envelope("<loop>[1, 2, 3]</loop>")
+
+    def test_schema_invalid_raises(self):
+        from api.classifier.agent_runtime import (
+            LoopEnvelopeParseError,
+            parse_loop_envelope,
+        )
+
+        # candidate_name must be a string | None — an int fails validation.
+        with pytest.raises(LoopEnvelopeParseError):
+            parse_loop_envelope('<loop>{"candidate_name": 42}</loop>')
+
+
+# ---------------------------------------------------------------------------
+# extract_create_loop_fields (direct-drive: fetch_prompt + llm.complete)
+# ---------------------------------------------------------------------------
+
+
+def _fake_prompt():
+    """Text-style LangFuse prompt stub — falls through the non-chat branch."""
+    p = MagicMock()
+    p.version = 7
+    p.labels = ["development"]
+    p.config = {"model": "test-model", "temperature": 0.0, "max_tokens": 512}
+    p.compile = MagicMock(return_value="compiled extractor prompt")
+    return p
+
+
+def _llm_response(content: str):
+    """Build a real LLMResponse so .to_diagnostics() runs for real."""
+    from api.ai.llm_service import LLMResponse
+
+    return LLMResponse(
+        content=content,
+        model="test-model",
+        provider="test",
+        finish_reason="stop",
+        latency_ms=1.0,
+        usage={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+    )
+
+
+class TestExtractCreateLoopFields:
+    def _input(self):
+        from api.classifier.create_loop_extractor import ExtractCreateLoopInput
+
+        return ExtractCreateLoopInput(
+            coordinator="Casey <coordinator@longridgepartners.com>",
+            current_email="<email direction='inbound'><from>Jane "
+            "&lt;jane@acme.com&gt;</from><body>Schedule Claire</body></email>",
+            thread_history="No prior messages in this thread.",
+        )
+
+    async def test_happy_path_parses_envelope(self):
+        from api.classifier.create_loop_extractor import extract_create_loop_fields
+
+        llm = MagicMock()
+        llm.complete = AsyncMock(
+            return_value=_llm_response(
+                'reasoning…\n<loop>{"candidate_name": "Claire Candidate", '
+                '"client_company": "Acme"}</loop>'
+            )
+        )
+        langfuse = MagicMock()
+
+        with patch(
+            "api.classifier.create_loop_extractor.fetch_prompt",
+            return_value=_fake_prompt(),
+        ):
+            result = await extract_create_loop_fields(
+                llm=llm, langfuse=langfuse, data=self._input()
+            )
+
+        assert result.candidate_name == "Claire Candidate"
+        assert result.client_company == "Acme"
+        llm.complete.assert_awaited_once()
+
+    async def test_parse_failure_retries_via_conversation_history(self):
+        from api.classifier.create_loop_extractor import extract_create_loop_fields
+
+        llm = MagicMock()
+        llm.complete = AsyncMock(
+            side_effect=[
+                _llm_response("garbage with no envelope"),
+                _llm_response('<loop>{"candidate_name": "Retry Rita"}</loop>'),
+            ]
+        )
+        langfuse = MagicMock()
+
+        with patch(
+            "api.classifier.create_loop_extractor.fetch_prompt",
+            return_value=_fake_prompt(),
+        ):
+            result = await extract_create_loop_fields(
+                llm=llm, langfuse=langfuse, data=self._input()
+            )
+
+        assert result.candidate_name == "Retry Rita"
+        assert llm.complete.await_count == 2
+        # Second call's messages must end with the assistant turn + the
+        # user follow-up describing the parse failure.
+        second_messages = llm.complete.await_args_list[1].kwargs["messages"]
+        assert second_messages[-2]["role"] == "assistant"
+        assert second_messages[-2]["content"] == "garbage with no envelope"
+        assert second_messages[-1]["role"] == "user"
+        assert "<loop>{...}</loop>" in second_messages[-1]["content"]
+
+    async def test_persistent_failure_raises_after_one_retry(self):
+        from api.classifier.agent_runtime import LoopEnvelopeParseError
+        from api.classifier.create_loop_extractor import extract_create_loop_fields
+
+        llm = MagicMock()
+        llm.complete = AsyncMock(return_value=_llm_response("never an envelope"))
+        langfuse = MagicMock()
+
+        with (
+            patch(
+                "api.classifier.create_loop_extractor.fetch_prompt",
+                return_value=_fake_prompt(),
+            ),
+            pytest.raises(LoopEnvelopeParseError),
+        ):
+            await extract_create_loop_fields(llm=llm, langfuse=langfuse, data=self._input())
+        # One initial call + exactly one retry, then give up.
+        assert llm.complete.await_count == 2

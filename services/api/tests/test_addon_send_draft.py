@@ -11,7 +11,7 @@ tests verify that:
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -99,6 +99,7 @@ async def test_forward_draft_quotes_thread_and_prefixes_subject():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -125,6 +126,7 @@ async def test_reply_draft_is_sent_unchanged():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -147,6 +149,7 @@ async def test_forward_raises_when_thread_fetch_fails():
     with (
         patch("api.classifier.service.SuggestionService"),
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
         pytest.raises(RuntimeError),
     ):
         await _handle_send_draft(body, svc, email, request=request)
@@ -164,6 +167,7 @@ async def test_reply_still_sends_when_thread_fetch_fails():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -217,6 +221,7 @@ async def test_jit_apply_runs_when_pending_data_present_even_with_to_emails():
         ) as apply_jit,
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -240,6 +245,7 @@ async def test_jit_apply_skipped_when_nothing_pending_and_recipients_present():
         ) as apply_jit,
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -267,6 +273,7 @@ async def test_jit_apply_runs_when_to_emails_missing_regression():
         ) as apply_jit,
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -380,3 +387,131 @@ class TestPickThreadAnchor:
         )
         anchor = _pick_thread_anchor([client_msg], ["ALICE@CLIENT.COM"], is_forward=False)
         assert anchor.message_id_header == "<client@mail.gmail.com>"
+
+
+@pytest.mark.asyncio
+async def test_accept_suggestion_already_resolved_is_noop():
+    """Suggestion-status guard: a stale cached homepage can show an
+    already-ACCEPTED suggestion. Clicking Accept again must not re-run the
+    side effect (advance_state / link_thread).
+    """
+    from api.addon.routes import _handle_accept_suggestion
+    from api.classifier.models import SuggestedAction, SuggestionStatus
+
+    body = AddonRequest(
+        common_event_object=CommonEventObject(parameters={"suggestion_id": "sug_1"})
+    )
+    svc = SimpleNamespace(
+        advance_state=AsyncMock(),
+        link_thread=AsyncMock(),
+        _pool=SimpleNamespace(),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    resolved = SimpleNamespace(
+        status=SuggestionStatus.ACCEPTED,
+        action=SuggestedAction.ADVANCE_STAGE,
+        gmail_thread_id="t1",
+        loop_id="lup_1",
+        action_data={"target_stage": "awaiting_client"},
+    )
+
+    with (
+        patch("api.classifier.service.SuggestionService") as sug_cls,
+        patch(
+            "api.addon.routes._post_mutation_view",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as pmv,
+    ):
+        inst = sug_cls.return_value
+        inst.get_suggestion = AsyncMock(return_value=resolved)
+        inst.resolve = AsyncMock()
+        await _handle_accept_suggestion(body, svc, "coord@longridgepartners.com", request=request)
+
+    svc.advance_state.assert_not_awaited()
+    svc.link_thread.assert_not_awaited()
+    inst.resolve.assert_not_awaited()
+    pmv.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_draft_already_sent_is_noop_no_duplicate_email():
+    """The marquee idempotency guard: a stale cached homepage can show a
+    draft whose Send was already clicked. Clicking Send again must NOT
+    re-send the email — the highest-severity double-execution case.
+    """
+    body, svc, email, request, draft_svc = _build_context(thread=None)
+    already_sent = _make_draft(is_forward=False).model_copy(update={"status": DraftStatus.SENT})
+    draft_svc.get_draft.return_value = already_sent
+
+    with (
+        patch("api.classifier.service.SuggestionService") as sug_cls,
+        patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch(
+            "api.addon.routes._post_mutation_view",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as pmv,
+    ):
+        sug_cls.return_value.resolve = AsyncMock()
+        await _handle_send_draft(body, svc, email, request=request)
+
+    svc.send_email.assert_not_awaited()  # no duplicate outbound email
+    draft_svc.mark_sent.assert_not_awaited()
+    pmv.assert_awaited_once()  # returns the scoped post-send view, not an error
+
+
+class TestPostMutationView:
+    """Post-mutation responses are thread-scoped (Bug A) — never the global
+    cross-thread board unless no thread is in scope — AND wrapped in the
+    renderActions envelope with a TOP-LEVEL stateChanged:true (Bug B
+    attempt), distinct from the reverted 0b995bd which nested stateChanged
+    inside renderActions.action.
+    """
+
+    def _request(self, overview_svc):
+        return SimpleNamespace(
+            url="http://test/addon/action",
+            app=SimpleNamespace(state=SimpleNamespace(overview_service=overview_svc)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_thread_scoped(self):
+        from api.addon.routes import _post_mutation_view
+
+        overview = SimpleNamespace(
+            get_thread_overview_data=AsyncMock(return_value=[]),
+            get_overview_data=AsyncMock(return_value=[]),
+        )
+        request = self._request(overview)
+
+        resp = await _post_mutation_view(
+            request, "coord@lrp.com", thread_id="thread_A", message_id="m1"
+        )
+
+        overview.get_thread_overview_data.assert_awaited_once_with("thread_A", "coord@lrp.com")
+        overview.get_overview_data.assert_not_awaited()
+        # renderActions envelope + top-level stateChanged sibling (NOT
+        # inside renderActions, NOT a bare-action sibling).
+        data = resp.model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"renderActions", "stateChanged"}
+        assert data["stateChanged"] is True
+        assert "action" in data["renderActions"]
+        assert "stateChanged" not in data["renderActions"]
+        assert "stateChanged" not in data["renderActions"]["action"]
+
+    @pytest.mark.asyncio
+    async def test_no_thread_falls_back_to_global(self):
+        from api.addon.routes import _post_mutation_view
+
+        overview = SimpleNamespace(
+            get_thread_overview_data=AsyncMock(return_value=[]),
+            get_overview_data=AsyncMock(return_value=[]),
+        )
+        request = self._request(overview)
+
+        resp = await _post_mutation_view(request, "coord@lrp.com", thread_id=None)
+
+        overview.get_overview_data.assert_awaited_once_with("coord@lrp.com")
+        overview.get_thread_overview_data.assert_not_awaited()
+        data = resp.model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"renderActions", "stateChanged"}
+        assert data["stateChanged"] is True

@@ -278,6 +278,35 @@ class CardResponse(BaseModel):
     action: ActionResponse
 
 
+class RenderActions(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    action: ActionResponse
+
+
+class RenderActionsResponse(BaseModel):
+    """Action-callback envelope that supports ``stateChanged``.
+
+    Serializes to::
+
+        {"renderActions": {"action": {...}}, "stateChanged": true}
+
+    ``stateChanged`` is a TOP-LEVEL sibling of ``renderActions`` — NOT
+    nested inside ``renderActions.action`` (the reverted 0b995bd
+    placement) and NOT a sibling of a bare ``action`` (the reverted
+    6d878dc placement, which Gmail discards). Only emitted from mutating
+    ``/addon/action`` callbacks; trigger renders (/addon/homepage,
+    /addon/on-message) keep returning the bare ``CardResponse``
+    ({"action": {...}}) form. ``state_changed`` defaults to None so it is
+    omitted unless explicitly set.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, ser_json_by_alias=True)
+
+    render_actions: RenderActions = Field(alias="renderActions")
+    state_changed: bool | None = Field(default=None, alias="stateChanged")
+
+
 # ---------------------------------------------------------------------------
 # Autocomplete (TextInput.autoCompleteAction)
 # ---------------------------------------------------------------------------
