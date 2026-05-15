@@ -1030,8 +1030,8 @@ class TestXMLFormatters:
         assert f"<loop id='{loop.id}'>" in xml
         assert "<stage>awaiting_candidate</stage>" in xml
         assert "<candidate>John Smith</candidate>" in xml
-        assert "<recruiter>Bob</recruiter>" in xml
-        assert "<client-contact>Jane, HF Co</client-contact>" in xml
+        assert "<recruiter>Bob (bob@lrp.com)</recruiter>" in xml
+        assert "<client-contact>Jane (jane@hf.com), HF Co</client-contact>" in xml
         # DRAFT_EMAIL renders body + recipient_type for dedup-by-content + targeting.
         assert "sug_draft" in xml
         assert "Stale draft summary" in xml
