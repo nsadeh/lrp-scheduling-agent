@@ -242,9 +242,10 @@ class TestUpdateActorSuggestionBuilder:
         assert "rachel@lrp.com" in text
         # Internal role → uses directory autocomplete
         assert "auto_complete_action" in text or "autoCompleteAction" in text
-        # Form input names are suggestion-suffixed
+        # Single directory-autocomplete input, suggestion-suffixed. No
+        # separate email field — the autocomplete fills "Name <email>".
         assert "update_actor_name_sug_1" in text
-        assert "update_actor_email_sug_1" in text
+        assert "update_actor_email_sug_1" not in text
         # Save button wired to update_actor handler
         assert "update_actor" in text
 

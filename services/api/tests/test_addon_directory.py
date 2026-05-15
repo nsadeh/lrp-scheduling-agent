@@ -484,21 +484,22 @@ class TestCreateLoopFormAutocomplete:
 
     def test_build_recruiter_inputs_has_autocomplete_but_no_onchange(self):
         """The shared recruiter input builder (used by UPDATE_ACTOR + JIT
-        draft cards) keeps directory autocomplete but emits NO onChange —
-        an onChange round-trip rebuilt the whole board on every selection.
+        draft cards) is a SINGLE directory-autocomplete input — no separate
+        email field (the autocomplete fills "Name <email>" and the commit
+        handlers parse it straight out) and NO onChange (an onChange
+        round-trip rebuilt the whole board on every selection).
         """
         from api.addon.contact_inputs import build_recruiter_inputs
 
         widgets = build_recruiter_inputs(
             directory_search_url="https://x.test/addon/directory/search",
             name_field="r_name",
-            email_field="r_email",
         )
-        assert len(widgets) == 2
-        for w in widgets:
-            ti = w.text_input
-            assert ti.auto_complete_action is not None
-            assert ti.on_change_action is None
+        assert len(widgets) == 1
+        ti = widgets[0].text_input
+        assert ti.name == "r_name"
+        assert ti.auto_complete_action is not None
+        assert ti.on_change_action is None
 
     def test_recruiter_fields_have_on_change_action(self):
         data = build_create_loop_form().model_dump(by_alias=True, exclude_none=True)

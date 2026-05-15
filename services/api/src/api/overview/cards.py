@@ -246,7 +246,6 @@ def _render_recruiter_jit(sug_id: str, draft_id: str, pending: dict) -> list[Wid
         build_recruiter_inputs(
             directory_search_url=directory_search_url(),
             name_field=f"jit_recruiter_name_{sug_id}",
-            email_field=f"jit_recruiter_email_{sug_id}",
         )
     )
     return widgets
@@ -297,7 +296,6 @@ def _render_cm_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
         build_recruiter_inputs(
             directory_search_url=directory_search_url(),
             name_field=f"jit_cm_name_{sug_id}",
-            email_field=f"jit_cm_email_{sug_id}",
         )
     )
     return widgets
@@ -607,19 +605,15 @@ def _build_update_actor_suggestion(view: SuggestionView) -> list[Widget]:
 
     if role in ("recruiter", "client_manager"):
         name_field = f"update_actor_name_{sid}"
-        email_field = f"update_actor_email_{sid}"
         widgets.extend(
             build_recruiter_inputs(
                 directory_search_url=directory_search_url(),
                 name_field=name_field,
-                email_field=email_field,
             )
         )
-        # Require the NAME field, not email: picking from the directory
-        # autocomplete fills the focused (name) input with "Name <email>"
-        # and leaves email blank; the Save handler parses the address out
-        # of whichever field carries it. Gating on email would block Save
-        # after a valid pick.
+        # The single directory input is required: picking from the
+        # autocomplete fills it with "Name <email>"; the Save handler
+        # parses the address straight out of it.
         required = [name_field]
     elif role == "client_contact":
         name_field = f"update_actor_name_{sid}"

@@ -11,7 +11,7 @@ tests verify that:
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -417,7 +417,10 @@ async def test_accept_suggestion_already_resolved_is_noop():
 
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
-        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)) as pmv,
+        patch(
+            "api.addon.routes._post_mutation_view",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as pmv,
     ):
         inst = sug_cls.return_value
         inst.get_suggestion = AsyncMock(return_value=resolved)
@@ -443,7 +446,10 @@ async def test_send_draft_already_sent_is_noop_no_duplicate_email():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
-        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)) as pmv,
+        patch(
+            "api.addon.routes._post_mutation_view",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as pmv,
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)

@@ -44,8 +44,13 @@ from api.classifier.formatters import (
     format_email_xml_simple,
     format_thread_history_xml_simple,
 )
-from api.classifier.models import CreateLoopExtraction, SuggestedAction, SuggestionStatus
-from api.drafts.models import DraftStatus
+from api.classifier.models import (
+    CreateLoopExtraction,
+    SuggestedAction,
+    Suggestion,
+    SuggestionStatus,
+)
+from api.drafts.models import DraftStatus, EmailDraft
 from api.gmail.exceptions import (
     GmailScopeError,
     GmailUserNotAuthorizedError,
@@ -464,6 +469,44 @@ async def _post_mutation_view(
     return RenderActionsResponse(
         render_actions=RenderActions(action=scoped.action),
         state_changed=True,
+    )
+
+
+async def _stale_action_guard(
+    request: Request,
+    email: str,
+    body: AddonRequest,
+    *,
+    suggestion: Suggestion | None = None,
+    draft: EmailDraft | None = None,
+) -> RenderActionsResponse | None:
+    """The single idempotency rule: an action may only run while its
+    target is live — a suggestion must be PENDING, a draft GENERATED.
+
+    A stale cached homepage card can re-submit an already-resolved action;
+    without this the side effect (send email, advance stage, set actor…)
+    fires twice. When the target isn't live (resolved, sent, discarded, or
+    missing) this returns the scoped post-action view so the handler can
+    no-op; it returns None to let the handler proceed.
+
+    Pass exactly one of ``suggestion`` / ``draft`` (the one the handler
+    just fetched). ``_handle_create_loop`` does NOT use this — its guard
+    is a different concern (dedupe loop creation; the manual path has no
+    suggestion at all).
+    """
+    if suggestion is not None and suggestion.status == SuggestionStatus.PENDING:
+        return None
+    if draft is not None and draft.status == DraftStatus.GENERATED:
+        return None
+    thread_id = (
+        suggestion.gmail_thread_id
+        if suggestion is not None
+        else draft.gmail_thread_id
+        if draft is not None
+        else None
+    )
+    return await _post_mutation_view(
+        request, email, thread_id=thread_id, message_id=_get_param(body, "message_id")
     )
 
 
@@ -1347,17 +1390,10 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     if not draft:
         return await _build_refreshed_overview(request, email)
 
-    # Idempotency guard (highest severity): a stale cached homepage can
-    # show a draft whose Send was already clicked. Re-sending = duplicate
-    # outbound email. Only a GENERATED draft is sendable; SENT/DISCARDED
-    # is a safe no-op returning the scoped (post-send) view.
-    if draft.status != DraftStatus.GENERATED:
-        return await _post_mutation_view(
-            request,
-            email,
-            thread_id=draft.gmail_thread_id,
-            message_id=_get_param(body, "message_id"),
-        )
+    # Highest-severity case: re-sending an already-SENT draft = duplicate
+    # outbound email. Single shared rule (see _stale_action_guard).
+    if (stale := await _stale_action_guard(request, email, body, draft=draft)) is not None:
+        return stale
 
     # If the body was edited inline, use the form value
     # Check both the suggestion-specific input name and the generic "draft_body"
@@ -1504,15 +1540,11 @@ async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str
         return await _build_refreshed_overview(request, email)
 
     draft = await draft_svc.get_draft(draft_id)
-    # Idempotency guard: stale double-click must not re-discard / re-reject
-    # an already-finalized draft. Only GENERATED is discardable.
-    if draft and draft.status != DraftStatus.GENERATED:
-        return await _post_mutation_view(
-            request,
-            email,
-            thread_id=draft.gmail_thread_id,
-            message_id=_get_param(body, "message_id"),
-        )
+    if (
+        draft is not None
+        and (stale := await _stale_action_guard(request, email, body, draft=draft)) is not None
+    ):
+        return stale
     if draft:
         await draft_svc.mark_discarded(draft.id)
         suggestion_svc = SuggestionService(db_pool=svc._pool)
@@ -1544,17 +1576,9 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     if not suggestion:
         return await _build_refreshed_overview(request, email)
 
-    # Idempotency guard: a stale cached homepage can show an
-    # already-resolved suggestion; clicking Accept again must NOT re-run
-    # the side effect (advance_state / link_thread). resolve() itself is
-    # DB-idempotent, but it runs *after* the side effect — so guard here.
-    if suggestion.status != SuggestionStatus.PENDING:
-        return await _post_mutation_view(
-            request,
-            email,
-            thread_id=suggestion.gmail_thread_id,
-            message_id=_get_param(body, "message_id"),
-        )
+    stale = await _stale_action_guard(request, email, body, suggestion=suggestion)
+    if stale is not None:
+        return stale
 
     # New ADVANCE_STAGE / LINK_THREAD suggestions are auto-resolved by the
     # classifier and never render an Accept button. These branches still
@@ -1615,16 +1639,9 @@ async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email:
     suggestion_svc = SuggestionService(db_pool=svc._pool)
     suggestion = await suggestion_svc.get_suggestion(suggestion_id)
 
-    # Idempotency guard: stale double-click on an already-resolved
-    # suggestion must not re-discard a draft or re-enqueue the rejection
-    # re-run.
-    if suggestion is None or suggestion.status != SuggestionStatus.PENDING:
-        return await _post_mutation_view(
-            request,
-            email,
-            thread_id=suggestion.gmail_thread_id if suggestion else None,
-            message_id=_get_param(body, "message_id"),
-        )
+    stale = await _stale_action_guard(request, email, body, suggestion=suggestion)
+    if stale is not None:
+        return stale
 
     # If the suggestion has a draft, discard it too
     if suggestion and suggestion.action == SuggestedAction.DRAFT_EMAIL:
@@ -1729,15 +1746,9 @@ async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, emai
     if not suggestion:
         return await _build_refreshed_overview(request, email)
 
-    # Idempotency guard: stale double-submit must not re-enqueue
-    # process_coordinator_response for an already-resolved question.
-    if suggestion.status != SuggestionStatus.PENDING:
-        return await _post_mutation_view(
-            request,
-            email,
-            thread_id=suggestion.gmail_thread_id,
-            message_id=_get_param(body, "message_id"),
-        )
+    stale = await _stale_action_guard(request, email, body, suggestion=suggestion)
+    if stale is not None:
+        return stale
 
     user_input = _get_form_value(body, f"coordinator_response_{suggestion_id}")
     if not user_input or not user_input.strip():
@@ -1821,15 +1832,9 @@ async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str,
     if not suggestion or not suggestion.loop_id:
         return await _build_refreshed_overview(request, email)
 
-    # Idempotency guard: stale double-click must not re-point the loop's
-    # actor FK / re-enqueue the agent re-run.
-    if suggestion.status != SuggestionStatus.PENDING:
-        return await _post_mutation_view(
-            request,
-            email,
-            thread_id=suggestion.gmail_thread_id,
-            message_id=_get_param(body, "message_id"),
-        )
+    stale = await _stale_action_guard(request, email, body, suggestion=suggestion)
+    if stale is not None:
+        return stale
 
     def _f(name: str) -> str:
         return (_get_form_value(body, f"{name}_{suggestion_id}") or "").strip()
