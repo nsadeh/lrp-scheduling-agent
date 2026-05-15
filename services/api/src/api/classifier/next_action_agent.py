@@ -396,11 +396,12 @@ class NextActionAgent:
             if allow_retry:
                 logger.warning(
                     "next-action-agent parse failed (%s) — retrying with follow-up "
-                    "[finish_reason=%s, completion_tokens=%s, model=%s, "
-                    "provider=%s, latency_ms=%.0f]",
+                    "[finish_reason=%s, completion_tokens=%s, reasoning_tokens=%s, "
+                    "model=%s, provider=%s, latency_ms=%.0f]",
                     exc,
                     response.finish_reason,
                     response.usage.get("completion_tokens"),
+                    response.usage.get("reasoning_tokens"),
                     response.model,
                     response.provider,
                     response.latency_ms,
@@ -433,11 +434,12 @@ class NextActionAgent:
             # from each other — they all surface as the same parse error.
             logger.warning(
                 "next-action-agent parse failed on retry (%s) — giving up "
-                "[final_finish_reason=%s, completion_tokens=%s, model=%s, "
-                "provider=%s, latency_ms=%.0f, total_attempts=%d]",
+                "[final_finish_reason=%s, completion_tokens=%s, reasoning_tokens=%s, "
+                "model=%s, provider=%s, latency_ms=%.0f, total_attempts=%d]",
                 exc,
                 response.finish_reason,
                 response.usage.get("completion_tokens"),
+                response.usage.get("reasoning_tokens"),
                 response.model,
                 response.provider,
                 response.latency_ms,
@@ -501,6 +503,12 @@ class NextActionAgent:
         model = config.get("model", DEFAULT_MODEL)
         temperature = config.get("temperature", 0.0)
         max_tokens = config.get("max_tokens", 4096)
+        # Pin an explicit thinking budget. Without it, OpenRouter leaves the
+        # budget unspecified and the routed Google endpoint can run with ~0
+        # thinking, which collapses the loop's distinct actors (the recruiter
+        # gets read as the coordinator). 1200 matches the thought-token count
+        # the validated playground runs spend. Tunable via LangFuse config.
+        reasoning_max_tokens = config.get("reasoning_max_tokens", 1200)
 
         self._langfuse.update_current_span(input=messages[1:])
 
@@ -509,6 +517,7 @@ class NextActionAgent:
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_max_tokens=reasoning_max_tokens,
         )
 
     def _build_initial_messages(
