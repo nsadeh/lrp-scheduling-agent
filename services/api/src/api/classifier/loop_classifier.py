@@ -470,16 +470,19 @@ class LoopClassifier:
         """Direct dispatch to the LLM service.
 
         Model + temperature + max_tokens come from the prompt's LangFuse
-        config so version-pinned settings win. Updates the current span's
-        `input` to the live messages list — including retry follow-ups —
-        so the trace reflects exactly what the model saw.
+        config so version-pinned settings win. The span `input` records the
+        live conversation *minus the system prompt* (index 0): the system
+        prompt is static/non-templated and already visible on the LangFuse
+        prompt itself, so re-logging it on every span bloats LangFuse usage
+        and slows trace loading. Retry follow-ups (assistant/user turns)
+        are still captured. The actual LLM call below sends the full array.
         """
         config: dict = prompt.config or {}
         model = config.get("model", DEFAULT_MODEL)
         temperature = config.get("temperature", 0.0)
         max_tokens = config.get("max_tokens", 4096)
 
-        self._langfuse.update_current_span(input=messages)
+        self._langfuse.update_current_span(input=messages[1:])
 
         return await self._llm.complete(
             messages=messages,

@@ -488,20 +488,21 @@ class NextActionAgent:
         Model config is sourced from the prompt's LangFuse config so prompt-
         version-pinned settings win.
 
-        Updates the current LangFuse span's ``input`` to the messages list
-        we're about to send. Retries append assistant + user-feedback turns
-        to ``messages`` and recurse through this function, so the final span
-        input reflects the complete conversation the model saw — including
-        error follow-ups, coordinator responses, and rejection feedback.
-        Without this update the trace shows our internal ``NextActionInput``
-        dataclass rather than the actual prompt + retry history.
+        Updates the current LangFuse span's ``input`` to the conversation
+        *minus the system prompt* (index 0). Retries append assistant +
+        user-feedback turns and recurse through this function, so the span
+        input still reflects error follow-ups, coordinator responses, and
+        rejection feedback — just not the static, non-templated system
+        prompt, which is already visible on the LangFuse prompt itself and
+        only bloats LangFuse usage / slows trace loading when re-logged on
+        every span. The actual LLM call below sends the full array.
         """
         config: dict = prompt.config or {}
         model = config.get("model", DEFAULT_MODEL)
         temperature = config.get("temperature", 0.0)
         max_tokens = config.get("max_tokens", 4096)
 
-        self._langfuse.update_current_span(input=messages)
+        self._langfuse.update_current_span(input=messages[1:])
 
         return await self._llm.complete(
             messages=messages,
