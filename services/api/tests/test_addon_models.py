@@ -135,3 +135,27 @@ class TestCardResponse:
         header = data["action"]["navigations"][0]["updateCard"]["header"]
         assert "imageUrl" not in header
         assert "subtitle" not in header
+
+    def test_response_has_no_unknown_top_level_keys(self):
+        """Gmail's HTTP add-on schema rejects unknown top-level keys (the
+        whole payload is discarded → generic add-on error). The serialized
+        response must be exactly {"action": {...}} — no siblings."""
+        data = CardResponse(
+            action=ActionResponse(
+                navigations=[
+                    UpdateCard(
+                        update_card=Card(
+                            header=CardHeader(title="T"),
+                            sections=[
+                                Section(
+                                    widgets=[
+                                        TextParagraphWidget(text_paragraph=TextParagraph(text="x"))
+                                    ]
+                                )
+                            ],
+                        )
+                    )
+                ]
+            )
+        ).model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"action"}

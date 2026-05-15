@@ -300,30 +300,53 @@ class TestUpdateActorSuggestionBuilder:
         assert "Save" not in text
         assert "update_actor_email_" not in text
 
-    def test_inputs_prefilled_from_pending_pick(self):
-        """When the autocomplete onChange has staged a pick via the route
-        handler, the card builder re-renders with the inputs pre-filled.
-        The user reviews the staged values and must explicitly click Save
-        to commit — autocomplete selection alone does NOT apply the change.
+    def test_recruiter_inputs_have_no_onchange(self):
+        """Selecting a recruiter from the directory autocomplete must NOT
+        trigger an onChange round-trip — that forced a full board rebuild
+        (reloading every suggestion across every thread). The dropdown
+        fills the field natively; Save parses "Name <email>" out of it.
         """
         view = _view(
             action=SuggestedAction.UPDATE_ACTOR,
             summary="Recruiter looks wrong",
-            action_data={
-                "role": "recruiter",
-                "pending_pick": {
-                    "name": "Alice Recruiter",
-                    "email": "alice@lrp.com",
-                },
-            },
+            action_data={"role": "recruiter"},
+        )
+        widgets = _build_update_actor_suggestion(view)
+        inputs = [w.text_input for w in widgets if getattr(w, "text_input", None) is not None]
+        recruiter_inputs = [ti for ti in inputs if ti.name.startswith("update_actor_")]
+        assert recruiter_inputs, "expected update_actor_* inputs"
+        for ti in recruiter_inputs:
+            assert (
+                ti.on_change_action is None
+            ), f"{ti.name!r} must have no onChange (no rebuild on select)"
+            assert (
+                ti.auto_complete_action is not None
+            ), f"{ti.name!r} must keep directory autocomplete"
+
+    def test_recruiter_required_gate_is_name_field(self):
+        """The Save gate must be on the NAME field: the directory
+        autocomplete fills the focused (name) input with "Name <email>"
+        and leaves email blank. Gating on email would block Save after a
+        valid pick.
+        """
+        view = _view(
+            action=SuggestedAction.UPDATE_ACTOR,
+            summary="Recruiter looks wrong",
+            action_data={"role": "recruiter"},
         )
         widgets = _build_update_actor_suggestion(view)
         text = str([w.model_dump(by_alias=True, exclude_none=True) for w in widgets])
-        # The staged pick is visible in the rendered input values.
-        assert "Alice Recruiter" in text
-        assert "alice@lrp.com" in text
-        # Save button is still present — autocomplete-select did NOT commit.
-        assert "update_actor" in text
+        sid = view.suggestion.id
+        assert f"update_actor_name_{sid}" in text
+        # The Save button's requiredWidgets must name the *name* field, not email.
+        assert f"'update_actor_name_{sid}'" in text or f'"update_actor_name_{sid}"' in text
+        assert "requiredWidgets" in text
+        # Email field must NOT be the required gate.
+        import re as _re
+
+        req_match = _re.search(r"requiredWidgets'?\s*:\s*\[([^\]]*)\]", text)
+        assert req_match, "expected requiredWidgets on the Save action"
+        assert f"update_actor_email_{sid}" not in req_match.group(1)
 
     def test_inputs_not_prefilled_when_pending_pick_absent(self):
         view = _view(

@@ -432,6 +432,28 @@ async def _build_thread_overview_or_placeholder(
     return build_loop_pending_card(thread_id, message_id=message_id)
 
 
+async def _post_mutation_view(
+    request: Request,
+    email: str,
+    *,
+    thread_id: str | None,
+    message_id: str | None = None,
+) -> CardResponse:
+    """Response for a handler that just mutated state — scoped to the
+    acted-on thread rather than the global cross-thread board (Bug A).
+    Falls back to the global board only when no thread is in scope.
+
+    NOTE: this deliberately does NOT emit a ``stateChanged`` flag. Gmail's
+    HTTP add-on response schema rejects an unknown top-level key (the whole
+    payload is discarded → generic "add-on error", card never updates), so
+    the stale-homepage-cache problem must be solved a different way — see
+    the open follow-up; do not re-add a top-level stateChanged here.
+    """
+    return await _build_thread_overview_or_placeholder(
+        request, email, thread_id, message_id=message_id
+    )
+
+
 def _as_push(response: CardResponse) -> CardResponse:
     """Convert updateCard navigations to pushCard for initial triggers."""
     navigations = [
@@ -929,78 +951,21 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
 
 
 async def _handle_recruiter_selected(body: AddonRequest, svc: LoopService, email: str, **kwargs):
-    """onChangeAction handler for recruiter directory autocomplete.
+    """onChangeAction handler for the standalone create-loop form's recruiter input.
 
-    Three callers, distinguished by which extra params come along:
-
-    - **UPDATE_ACTOR path** (``update_actor_role`` present): the coordinator
-      picked from the autocomplete on an UPDATE_ACTOR card. STAGE the pick
-      on the suggestion's ``action_data.pending_pick`` and refresh — the
-      card re-renders with the inputs pre-filled, and the coordinator must
-      click Save to actually commit. Autocomplete selection never commits.
-
-    - **JIT path** (``draft_id`` present): the coordinator picked a recruiter
-      from the autocomplete on a DRAFT_EMAIL card. Stash on draft pending
-      data so the JIT inputs collapse to a "selected" badge but nothing
-      commits until Send.
-
-    - **Create-loop form path** (neither): the coordinator picked inside the
-      standalone create-loop form. Split ``"Name <email>"`` into the two
-      fields and re-render the form with prefills.
+    This is now the *only* caller: the UPDATE_ACTOR and JIT draft cards no
+    longer wire an onChange (selecting from their directory autocomplete
+    fills the field natively and the commit handlers parse "Name <email>"
+    out of it — no rebuild). The create-loop form keeps its onChange
+    (wired via ``scheduling.cards._recruiter_selected_action``) so picking
+    a recruiter splits ``"Name <email>"`` across the two fields and the
+    form re-renders with prefills.
     """
-    request = kwargs.get("request")
     suggestion_id = _get_param(body, "suggestion_id")
-    draft_id = _get_param(body, "draft_id")
-    update_actor_role = _get_param(body, "update_actor_role")
 
     def _field(name: str) -> str | None:
         return _get_form_value(body, name)
 
-    # UPDATE_ACTOR origin — stage the pick rather than commit. Misclicks in
-    # the autocomplete dropdown were committing directly to the loop with no
-    # way to undo; this routes through the standard Save-button commit step.
-    if suggestion_id and update_actor_role:
-        return await _stash_update_actor_pick(
-            body, svc, email, request, suggestion_id, update_actor_role
-        )
-
-    if draft_id and suggestion_id:
-        # JIT path — stash the pick on draft.pending_jit_data instead of
-        # committing to the loop. The actual contact creation + loop attach
-        # happens at Send time. This makes misclicks recoverable via the
-        # "x" Clear button and matches the user's mental model: nothing is
-        # final until you press Send.
-        jit_role = _get_param(body, "jit_role") or "recruiter"
-        if jit_role == "client_manager":
-            name_field = f"jit_cm_name_{suggestion_id}"
-            email_field = f"jit_cm_email_{suggestion_id}"
-        else:
-            name_field = f"jit_recruiter_name_{suggestion_id}"
-            email_field = f"jit_recruiter_email_{suggestion_id}"
-        raw_name = _field(name_field) or ""
-        raw_email = _field(email_field) or ""
-        parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
-        if parsed is None:
-            # Mid-type — no parseable "Name <email>" yet. Just refresh.
-            return await _build_refreshed_overview(request, email)
-        new_name, new_email = parsed
-        new_email = new_email.strip()
-        if not new_email:
-            return await _build_refreshed_overview(request, email)
-
-        draft_svc = _get_draft_service(request)
-        if not draft_svc:
-            return await _build_refreshed_overview(request, email)
-        draft = await draft_svc.get_draft(draft_id)
-        if not draft:
-            return await _build_refreshed_overview(request, email)
-
-        new_pending = dict(draft.pending_jit_data or {})
-        new_pending[jit_role] = {"name": new_name, "email": new_email}
-        await draft_svc.update_pending_jit_data(draft.id, new_pending)
-        return await _build_refreshed_overview(request, email)
-
-    # Create-loop form path — preserve the existing behavior.
     raw_name = _field("recruiter_name") or ""
     raw_email = _field("recruiter_email") or ""
     parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
@@ -1152,8 +1117,8 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     # Stay anchored to the just-linked thread. The agent runs async, so
     # this typically renders the placeholder card; the user clicks Refresh
     # (or Gmail re-fires on-message) once the agent has emitted suggestions.
-    return await _build_thread_overview_or_placeholder(
-        request, email, gmail_thread_id, message_id=gmail_message_id
+    return await _post_mutation_view(
+        request, email, thread_id=gmail_thread_id, message_id=gmail_message_id
     )
 
 
@@ -1321,7 +1286,12 @@ async def _handle_clear_jit(body: AddonRequest, svc: LoopService, email: str, **
     new_pending = dict(draft.pending_jit_data or {})
     new_pending.pop(role, None)
     await draft_svc.update_pending_jit_data(draft.id, new_pending)
-    return await _build_refreshed_overview(request, email)
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=draft.gmail_thread_id,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1463,8 +1433,13 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
         resolved_by=email,
     )
 
-    # Return refreshed overview instead of loop detail
-    return await _build_refreshed_overview(request, email)
+    # Scoped to this draft's thread — not the global cross-thread board.
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=draft.gmail_thread_id,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1490,7 +1465,12 @@ async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str
             resolved_by=email,
         )
 
-    return await _build_refreshed_overview(request, email)
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=draft.gmail_thread_id if draft else None,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1537,7 +1517,12 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     # Resolve the suggestion as accepted
     await suggestion_svc.resolve(suggestion_id, SuggestionStatus.ACCEPTED, email)
 
-    return await _build_refreshed_overview(request, email)
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=suggestion.gmail_thread_id,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1596,7 +1581,12 @@ async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email:
                     "failed to enqueue rejection re-run for suggestion %s", suggestion_id
                 )
 
-    return await _build_refreshed_overview(request, email)
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=suggestion.gmail_thread_id if suggestion else None,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 async def _handle_show_suggestions_tab(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1634,7 +1624,15 @@ async def _handle_update_candidate_name(body: AddonRequest, svc: LoopService, em
             coordinator_email=email,
             loop_id=loop_id,
         )
-    return await _build_refreshed_overview(request, email)
+    # A loop spans multiple threads, so there's no single thread to scope
+    # to — use the request's thread context if present, else fall back to
+    # the global board.
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=_get_param(body, "gmail_thread_id"),
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1697,62 +1695,15 @@ async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, emai
             f"Background processing unavailable. Original: {original_question}",
         )
 
-    return await _build_refreshed_overview(request, email)
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=suggestion.gmail_thread_id,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 _UPDATE_ACTOR_ROLES = frozenset({"recruiter", "client_manager", "client_contact"})
-
-
-async def _stash_update_actor_pick(
-    body: AddonRequest,
-    svc: LoopService,
-    email: str,
-    request,
-    suggestion_id: str,
-    update_actor_role: str,
-):
-    """Autocomplete onChange handler for UPDATE_ACTOR cards.
-
-    Stages the directory selection by writing it to the suggestion's
-    ``action_data.pending_pick``. The card builder reads pending_pick on
-    re-render and pre-fills the autocomplete inputs with the staged values,
-    so the coordinator sees what they picked but the change is NOT
-    committed until they click Save (which routes to _handle_update_actor).
-
-    Idempotent: re-picking from the autocomplete overwrites pending_pick.
-    Mid-typed input that doesn't parse as "Name <email>" is a no-op refresh
-    — same gating as the JIT path uses.
-    """
-    from api.classifier.service import SuggestionService
-
-    name_field = f"update_actor_name_{suggestion_id}"
-    email_field = f"update_actor_email_{suggestion_id}"
-    raw_name = _get_form_value(body, name_field) or ""
-    raw_email = _get_form_value(body, email_field) or ""
-    parsed = parse_name_email(raw_name) or parse_name_email(raw_email)
-    if parsed is None:
-        return await _build_refreshed_overview(request, email)
-    new_name, new_email = parsed
-    new_email = new_email.strip()
-    if not new_email:
-        return await _build_refreshed_overview(request, email)
-
-    suggestion_svc = SuggestionService(db_pool=svc._pool)
-    suggestion = await suggestion_svc.get_suggestion(suggestion_id)
-    if suggestion is None:
-        return await _build_refreshed_overview(request, email)
-
-    new_action_data = dict(suggestion.action_data or {})
-    new_action_data["role"] = update_actor_role  # idempotent — already set by the agent
-    new_action_data["pending_pick"] = {"name": new_name, "email": new_email}
-    await suggestion_svc.update_action_data(suggestion_id, new_action_data)
-    logger.info(
-        "staged update_actor pick for suggestion %s (role=%s, email=%s)",
-        suggestion_id,
-        update_actor_role,
-        new_email,
-    )
-    return await _build_refreshed_overview(request, email)
 
 
 async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str, **kwargs):
@@ -1851,7 +1802,12 @@ async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str,
                     suggestion_id,
                 )
 
-    return await _build_refreshed_overview(request, email)
+    return await _post_mutation_view(
+        request,
+        email,
+        thread_id=suggestion.gmail_thread_id,
+        message_id=_get_param(body, "message_id"),
+    )
 
 
 _ACTION_HANDLERS = {

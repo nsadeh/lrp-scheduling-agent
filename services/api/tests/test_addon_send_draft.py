@@ -99,6 +99,7 @@ async def test_forward_draft_quotes_thread_and_prefixes_subject():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -125,6 +126,7 @@ async def test_reply_draft_is_sent_unchanged():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -147,6 +149,7 @@ async def test_forward_raises_when_thread_fetch_fails():
     with (
         patch("api.classifier.service.SuggestionService"),
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
         pytest.raises(RuntimeError),
     ):
         await _handle_send_draft(body, svc, email, request=request)
@@ -164,6 +167,7 @@ async def test_reply_still_sends_when_thread_fetch_fails():
     with (
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -217,6 +221,7 @@ async def test_jit_apply_runs_when_pending_data_present_even_with_to_emails():
         ) as apply_jit,
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -240,6 +245,7 @@ async def test_jit_apply_skipped_when_nothing_pending_and_recipients_present():
         ) as apply_jit,
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -267,6 +273,7 @@ async def test_jit_apply_runs_when_to_emails_missing_regression():
         ) as apply_jit,
         patch("api.classifier.service.SuggestionService") as sug_cls,
         patch("api.addon.routes._build_refreshed_overview", new=AsyncMock(return_value=None)),
+        patch("api.addon.routes._post_mutation_view", new=AsyncMock(return_value=None)),
     ):
         sug_cls.return_value.resolve = AsyncMock()
         await _handle_send_draft(body, svc, email, request=request)
@@ -380,3 +387,53 @@ class TestPickThreadAnchor:
         )
         anchor = _pick_thread_anchor([client_msg], ["ALICE@CLIENT.COM"], is_forward=False)
         assert anchor.message_id_header == "<client@mail.gmail.com>"
+
+
+class TestPostMutationView:
+    """Post-mutation responses are thread-scoped (Bug A) — never the global
+    cross-thread board unless no thread is in scope. The response is a plain
+    CardResponse with no extra top-level keys (Gmail rejects unknown keys).
+    """
+
+    def _request(self, overview_svc):
+        return SimpleNamespace(
+            url="http://test/addon/action",
+            app=SimpleNamespace(state=SimpleNamespace(overview_service=overview_svc)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_thread_scoped(self):
+        from api.addon.routes import _post_mutation_view
+
+        overview = SimpleNamespace(
+            get_thread_overview_data=AsyncMock(return_value=[]),
+            get_overview_data=AsyncMock(return_value=[]),
+        )
+        request = self._request(overview)
+
+        resp = await _post_mutation_view(
+            request, "coord@lrp.com", thread_id="thread_A", message_id="m1"
+        )
+
+        overview.get_thread_overview_data.assert_awaited_once_with("thread_A", "coord@lrp.com")
+        overview.get_overview_data.assert_not_awaited()
+        # Schema-safe: exactly {"action": {...}}, no sibling keys.
+        data = resp.model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"action"}
+
+    @pytest.mark.asyncio
+    async def test_no_thread_falls_back_to_global(self):
+        from api.addon.routes import _post_mutation_view
+
+        overview = SimpleNamespace(
+            get_thread_overview_data=AsyncMock(return_value=[]),
+            get_overview_data=AsyncMock(return_value=[]),
+        )
+        request = self._request(overview)
+
+        resp = await _post_mutation_view(request, "coord@lrp.com", thread_id=None)
+
+        overview.get_overview_data.assert_awaited_once_with("coord@lrp.com")
+        overview.get_thread_overview_data.assert_not_awaited()
+        data = resp.model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"action"}

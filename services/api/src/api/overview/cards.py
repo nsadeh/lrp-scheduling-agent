@@ -43,7 +43,6 @@ from api.scheduling.cards import (
     _text,
     _update_card,
     directory_search_url,
-    get_action_url,
     set_action_url,  # noqa: F401 - re-exported for routes
 )
 
@@ -200,18 +199,19 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
         )
     )
 
-    # Send is enabled when the required role (recruiter for NEW, client
-    # otherwise) is either already on the loop OR staged in pending_jit_data.
-    # CM is optional; it doesn't gate Send.
-    send_disabled = False
-    if not draft.to_emails:
-        if needs_recruiter and not pending.get("recruiter", {}).get("email"):
-            send_disabled = True
-        if needs_client and not pending.get("client_contact", {}).get("email"):
-            send_disabled = True
-
+    # Gate Send client-side on the JIT name field the coordinator must fill
+    # (recruiter for NEW, client otherwise). This replaces a server-computed
+    # `disabled` flag that keyed off pending_jit_data — stale now that
+    # selecting a contact no longer round-trips to stage it. The Send handler
+    # parses "Name <email>" out of these fields server-side
+    # (_apply_jit_contacts → _from_pending_or_form). CM stays optional.
     send_label = "Forward" if is_fwd else "Send"
     send_required = [] if is_fwd else [input_name]
+    if not draft.to_emails:
+        if needs_recruiter:
+            send_required.append(f"jit_recruiter_name_{sug.id}")
+        elif needs_client:
+            send_required.append(f"jit_client_name_{sug.id}")
     send_button = Button(
         text=send_label,
         on_click=_action(
@@ -220,7 +220,6 @@ def _build_draft_suggestion(view: SuggestionView) -> list[Widget]:
             draft_id=draft.id,
             suggestion_id=sug.id,
         ),
-        disabled=send_disabled,
     )
     # Convention across all suggestion cards: accept path on the left,
     # reject/dismiss on the right. Send (or Forward) is the accept here.
@@ -245,15 +244,9 @@ def _render_recruiter_jit(sug_id: str, draft_id: str, pending: dict) -> list[Wid
     ]
     widgets.extend(
         build_recruiter_inputs(
-            action_url=get_action_url(),
             directory_search_url=directory_search_url(),
             name_field=f"jit_recruiter_name_{sug_id}",
             email_field=f"jit_recruiter_email_{sug_id}",
-            on_change_extra_params={
-                "suggestion_id": sug_id,
-                "draft_id": draft_id,
-                "jit_role": "recruiter",
-            },
         )
     )
     return widgets
@@ -302,15 +295,9 @@ def _render_cm_jit(sug_id: str, draft_id: str, pending: dict) -> list[Widget]:
     # Reuse the same Workspace-directory autocomplete (CMs are LRP folks).
     widgets.extend(
         build_recruiter_inputs(
-            action_url=get_action_url(),
             directory_search_url=directory_search_url(),
             name_field=f"jit_cm_name_{sug_id}",
             email_field=f"jit_cm_email_{sug_id}",
-            on_change_extra_params={
-                "suggestion_id": sug_id,
-                "draft_id": draft_id,
-                "jit_role": "client_manager",
-            },
         )
     )
     return widgets
@@ -618,33 +605,22 @@ def _build_update_actor_suggestion(view: SuggestionView) -> list[Widget]:
         display = f"{current_name} &lt;{current_email}&gt;" if current_name else current_email
         widgets.append(_text(f"<i>Currently: {display}</i>"))
 
-    # When the coordinator has staged a pick via the autocomplete (the
-    # onChange handler stashes to action_data.pending_pick), render the
-    # inputs pre-filled. The user must still click Save to commit — this
-    # is the difference between "I clicked a row in the dropdown" and
-    # "I confirmed that's the recruiter I want."
-    pending = data.get("pending_pick") if isinstance(data.get("pending_pick"), dict) else None
-    prefill_name = pending.get("name") if pending else None
-    prefill_email = pending.get("email") if pending else None
-
     if role in ("recruiter", "client_manager"):
         name_field = f"update_actor_name_{sid}"
         email_field = f"update_actor_email_{sid}"
         widgets.extend(
             build_recruiter_inputs(
-                action_url=get_action_url(),
                 directory_search_url=directory_search_url(),
                 name_field=name_field,
                 email_field=email_field,
-                prefill_name=prefill_name,
-                prefill_email=prefill_email,
-                on_change_extra_params={
-                    "suggestion_id": sid,
-                    "update_actor_role": role,
-                },
             )
         )
-        required = [email_field]
+        # Require the NAME field, not email: picking from the directory
+        # autocomplete fills the focused (name) input with "Name <email>"
+        # and leaves email blank; the Save handler parses the address out
+        # of whichever field carries it. Gating on email would block Save
+        # after a valid pick.
+        required = [name_field]
     elif role == "client_contact":
         name_field = f"update_actor_name_{sid}"
         email_field = f"update_actor_email_{sid}"
