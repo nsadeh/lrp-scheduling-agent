@@ -38,7 +38,10 @@ from api.classifier.create_loop_extractor import (
     ExtractCreateLoopInput,
     extract_create_loop_fields,
 )
-from api.classifier.formatters import format_thread_history
+from api.classifier.formatters import (
+    format_email_xml_simple,
+    format_thread_history_xml_simple,
+)
 from api.classifier.models import CreateLoopExtraction, SuggestedAction, SuggestionStatus
 from api.gmail.exceptions import (
     GmailScopeError,
@@ -770,18 +773,30 @@ async def _run_create_loop_extractor(
 
     try:
         thread = await svc._gmail.get_thread(email, gmail_thread_id)
-        # Pass "" for current_message_id so NO message is excluded — the
-        # extractor prompt has no separate {{email}} section, so it must see
-        # every message in the thread, including the one the coordinator is
-        # looking at (which is usually THE message we want to extract from).
-        formatted = format_thread_history(thread.messages, current_message_id="")
+        if not thread.messages:
+            return None
+
+        # v7 splits input into a focused <current-email> + <thread-history>.
+        # The focused message is the one the coordinator is looking at
+        # (message_id); fall back to the newest message when that's absent.
+        current = next(
+            (m for m in thread.messages if m.id == message_id),
+            None,
+        ) or max(thread.messages, key=lambda m: m.date)
+
+        coord = await svc.get_coordinator_by_email(email)
+        coordinator = f"{coord.name} <{email}>" if coord and coord.name else email
+
         return await asyncio.wait_for(
             extract_create_loop_fields(
                 llm=llm,
                 langfuse=langfuse,
                 data=ExtractCreateLoopInput(
-                    thread_history=formatted,
-                    coordinator_email=email,
+                    coordinator=coordinator,
+                    current_email=format_email_xml_simple(current, "incoming"),
+                    thread_history=format_thread_history_xml_simple(
+                        thread.messages, current.id, email
+                    ),
                 ),
             ),
             timeout=_EXTRACTOR_TIMEOUT_SECONDS,
