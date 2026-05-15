@@ -32,6 +32,21 @@ if TYPE_CHECKING:
 RecipientType = Literal["client", "recruiter", "internal"]
 
 
+def _pick_trigger(
+    thread_messages: list[Message],
+    trigger_message_id: str | None,
+) -> Message:
+    """The message we're replying to: the one named by ``trigger_message_id``,
+    falling back to the latest message by date. Single definition so forward
+    detection and reply-all CC carry-over never disagree on which message is
+    the trigger."""
+    if trigger_message_id:
+        match = next((m for m in thread_messages if m.id == trigger_message_id), None)
+        if match is not None:
+            return match
+    return max(thread_messages, key=lambda m: m.date)
+
+
 def _is_forward_draft(
     to_emails: list[str],
     thread_messages: list[Message] | None,
@@ -59,11 +74,7 @@ def _is_forward_draft(
     if not thread_messages or not to_emails:
         return False
 
-    trigger = None
-    if trigger_message_id:
-        trigger = next((m for m in thread_messages if m.id == trigger_message_id), None)
-    if trigger is None:
-        trigger = max(thread_messages, key=lambda m: m.date)
+    trigger = _pick_trigger(thread_messages, trigger_message_id)
 
     seen: set[str] = {trigger.from_.email.lower()}
     for addr in trigger.to + trigger.cc:
@@ -159,6 +170,70 @@ def resolve_recipients(
     return to_emails, cc_emails
 
 
+def _apply_reply_all_cc(
+    cc_emails: list[str],
+    trigger_cc: list[str],
+    to_emails: list[str],
+    sender_email: str | None,
+) -> list[str]:
+    """Reply-all: carry the trigger message's CC line onto our outgoing CC.
+
+    ``cc_emails`` is the base (the client manager, already sender-filtered by
+    ``resolve_recipients``). Every address on ``trigger_cc`` is unioned in.
+    First-seen order is preserved (CM first, then carried-over order) so the
+    sidebar shows a stable, reviewable list.
+
+    Dropped, case-insensitively: the sending coordinator (we never CC
+    ourselves — same rule the CM path already applies), anyone already on our
+    ``to_emails`` line, and exact duplicates.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+    blocked = {e.lower() for e in to_emails}
+    if sender_email:
+        blocked.add(sender_email.lower())
+
+    for email in [*cc_emails, *trigger_cc]:
+        key = email.lower()
+        if key in seen or key in blocked:
+            continue
+        seen.add(key)
+        result.append(email)
+    return result
+
+
+def resolve_reply_recipients(
+    loop: Loop,
+    recipient_type: RecipientType | None,
+    *,
+    sender_email: str | None = None,
+    thread_messages: list[Message] | None = None,
+    trigger_message_id: str | None = None,
+) -> tuple[list[str], list[str], bool]:
+    """Routing + reply-vs-forward + reply-all CC carry-over, in one place.
+
+    Consolidates the sequence both call sites need so they can't drift:
+      1. ``resolve_recipients`` for ``to_emails`` + the client-manager CC.
+      2. ``_is_forward_draft`` to decide reply vs. forward.
+      3. On a *reply* (not a forward), carry the trigger message's CC line
+         onto our CC via ``_apply_reply_all_cc``. Forwards keep exactly the
+         CM-only CC — a forward already puts the thread in front of someone
+         new; reply-all semantics don't apply.
+
+    ``resolve_recipients`` itself is intentionally left untouched so its
+    existing callers and tests are unaffected.
+    """
+    to_emails, cc_emails = resolve_recipients(loop, recipient_type, sender_email=sender_email)
+    is_forward = _is_forward_draft(
+        to_emails, thread_messages, trigger_message_id, recipient_type=recipient_type
+    )
+    if not is_forward and thread_messages:
+        trigger = _pick_trigger(thread_messages, trigger_message_id)
+        trigger_cc = [addr.email for addr in trigger.cc]
+        cc_emails = _apply_reply_all_cc(cc_emails, trigger_cc, to_emails, sender_email)
+    return to_emails, cc_emails, is_forward
+
+
 class DraftService:
     """Persists and manages email drafts for scheduling communications."""
 
@@ -185,8 +260,12 @@ class DraftService:
     ) -> EmailDraft:
         """Create and persist an email draft for a DRAFT_EMAIL suggestion."""
         recipient_type = (suggestion.action_data or {}).get("recipient_type")
-        to_emails, cc_emails = resolve_recipients(
-            loop, recipient_type, sender_email=suggestion.coordinator_email
+        to_emails, cc_emails, is_forward = resolve_reply_recipients(
+            loop,
+            recipient_type,
+            sender_email=suggestion.coordinator_email,
+            thread_messages=thread_messages,
+            trigger_message_id=suggestion.gmail_message_id,
         )
         subject = self._resolve_subject(loop, thread_messages)
 
@@ -197,13 +276,6 @@ class DraftService:
                 suggestion.id,
             )
             body = body[:MAX_BODY_LENGTH] + "\n\n[Draft truncated — please review]"
-
-        is_forward = _is_forward_draft(
-            to_emails,
-            thread_messages,
-            suggestion.gmail_message_id,
-            recipient_type=recipient_type,
-        )
 
         draft_id = make_id("drf")
         async with self._pool.connection() as conn, conn.transaction():

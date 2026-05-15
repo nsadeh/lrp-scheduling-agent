@@ -1271,14 +1271,36 @@ async def _apply_jit_contacts(
     # We need recipient_type from the originating suggestion to route
     # correctly — fetch the suggestion to read its action_data.
     from api.classifier.service import SuggestionService
-    from api.drafts.service import resolve_recipients
+    from api.drafts.service import resolve_reply_recipients
 
     suggestion_svc = SuggestionService(db_pool=svc._pool)
     suggestion = await suggestion_svc.get_suggestion(suggestion_id)
     recipient_type = (suggestion.action_data or {}).get("recipient_type") if suggestion else None
 
+    # Re-resolving must preserve reply-all CC carry-over (otherwise attaching a
+    # JIT contact would silently drop everyone we'd already CC'd). Fetch the
+    # thread so resolve_reply_recipients can re-derive the carried-over CCs.
+    thread_messages = None
+    trigger_message_id = suggestion.gmail_message_id if suggestion else None
+    gmail_thread_id = suggestion.gmail_thread_id if suggestion else draft.gmail_thread_id
+    if svc._gmail is not None and gmail_thread_id:
+        try:
+            thread = await svc._gmail.get_thread(coordinator_email, gmail_thread_id)
+            thread_messages = thread.messages if thread else None
+        except Exception:
+            logger.exception(
+                "compose_email: failed to fetch thread %s for reply-all CC re-resolve",
+                gmail_thread_id,
+            )
+
     loop = await svc.get_loop(draft.loop_id)
-    to_emails, cc_emails = resolve_recipients(loop, recipient_type, sender_email=coordinator_email)
+    to_emails, cc_emails, _is_forward = resolve_reply_recipients(
+        loop,
+        recipient_type,
+        sender_email=coordinator_email,
+        thread_messages=thread_messages,
+        trigger_message_id=trigger_message_id,
+    )
     await draft_svc.update_draft_recipients(draft.id, to_emails, cc_emails)
     if pending:
         await draft_svc.update_pending_jit_data(draft.id, {})

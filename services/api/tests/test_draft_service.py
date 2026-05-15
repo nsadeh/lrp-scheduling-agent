@@ -7,7 +7,13 @@ import pytest
 
 from api.classifier.models import EmailClassification, Suggestion, SuggestionStatus
 from api.drafts.models import DraftStatus
-from api.drafts.service import DraftService, _is_forward_draft, _row_to_draft, resolve_recipients
+from api.drafts.service import (
+    DraftService,
+    _is_forward_draft,
+    _row_to_draft,
+    resolve_recipients,
+    resolve_reply_recipients,
+)
 from api.gmail.models import EmailAddress, Message
 from api.scheduling.models import (
     Candidate,
@@ -333,6 +339,128 @@ class TestIsForwardDraft:
             )
             is True
         )
+
+
+class TestResolveReplyRecipients:
+    """Reply-all: a reply carries the trigger message's CC line onto our CC,
+    on top of the client manager. Forwards keep the CM-only CC."""
+
+    def test_reply_carries_trigger_cc_on_top_of_cm(self):
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["fiona@lrp.com"],
+            cc_emails=["a@x.com", "b@y.com"],
+            msg_id="msg_1",
+        )
+        to, cc, is_forward = resolve_reply_recipients(
+            loop,
+            "client",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert to == ["haley@client.com"]
+        # CM first, then carried-over CCs in order.
+        assert cc == ["sarah@lrp.com", "a@x.com", "b@y.com"]
+        assert is_forward is False
+
+    def test_sender_on_trigger_cc_is_filtered(self):
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["fiona@lrp.com"],
+            cc_emails=["fiona@lrp.com", "a@x.com"],
+            msg_id="msg_1",
+        )
+        _, cc, _ = resolve_reply_recipients(
+            loop,
+            "client",
+            sender_email="fiona@lrp.com",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert cc == ["sarah@lrp.com", "a@x.com"]
+
+    def test_cm_equals_sender_still_carries_trigger_cc(self):
+        """CM == coordinator: CM dropped (don't CC yourself), but the
+        carried-over CCs still come through."""
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["sarah@lrp.com"],
+            cc_emails=["a@x.com"],
+            msg_id="msg_1",
+        )
+        _, cc, _ = resolve_reply_recipients(
+            loop,
+            "client",
+            sender_email="sarah@lrp.com",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert cc == ["a@x.com"]
+
+    def test_to_recipient_not_duplicated_into_cc(self):
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["fiona@lrp.com"],
+            cc_emails=["haley@client.com", "a@x.com"],
+            msg_id="msg_1",
+        )
+        to, cc, _ = resolve_reply_recipients(
+            loop,
+            "client",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert to == ["haley@client.com"]
+        assert "haley@client.com" not in cc
+        assert cc == ["sarah@lrp.com", "a@x.com"]
+
+    def test_case_insensitive_dedupe(self):
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["fiona@lrp.com"],
+            cc_emails=["Sarah@LRP.com", "A@X.com", "a@x.com"],
+            msg_id="msg_1",
+        )
+        _, cc, _ = resolve_reply_recipients(
+            loop,
+            "client",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        # CM already present (case-insensitively) — not re-added; A@X.com kept once.
+        assert cc == ["sarah@lrp.com", "A@X.com"]
+
+    def test_forward_keeps_cm_only_cc(self):
+        """Forward (recruiter not on the client's trigger) → no carry-over,
+        CM-only CC, exactly today's behavior."""
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["fiona@lrp.com"],
+            cc_emails=["a@x.com", "b@y.com"],
+            msg_id="msg_1",
+        )
+        to, cc, is_forward = resolve_reply_recipients(
+            loop,
+            "recruiter",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert to == ["mike@recruiter.com"]
+        assert is_forward is True
+        assert cc == ["sarah@lrp.com"]
+
+    def test_no_thread_messages_falls_back_to_cm_only(self):
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        to, cc, is_forward = resolve_reply_recipients(loop, "client")
+        assert to == ["haley@client.com"]
+        assert cc == ["sarah@lrp.com"]
+        assert is_forward is False
 
 
 class _AsyncCtx:
