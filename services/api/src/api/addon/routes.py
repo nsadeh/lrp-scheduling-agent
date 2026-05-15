@@ -20,6 +20,8 @@ from api.addon.models import (
     AddonRequest,
     CardResponse,
     PushCard,
+    RenderActions,
+    RenderActionsResponse,
     SuggestionItem,
     Suggestions,
     SuggestionsResponse,
@@ -43,6 +45,7 @@ from api.classifier.formatters import (
     format_thread_history_xml_simple,
 )
 from api.classifier.models import CreateLoopExtraction, SuggestedAction, SuggestionStatus
+from api.drafts.models import DraftStatus
 from api.gmail.exceptions import (
     GmailScopeError,
     GmailUserNotAuthorizedError,
@@ -438,24 +441,40 @@ async def _post_mutation_view(
     *,
     thread_id: str | None,
     message_id: str | None = None,
-) -> CardResponse:
-    """Response for a handler that just mutated state — scoped to the
-    acted-on thread rather than the global cross-thread board (Bug A).
-    Falls back to the global board only when no thread is in scope.
+) -> RenderActionsResponse:
+    """Response for a handler that just mutated state.
 
-    NOTE: this deliberately does NOT emit a ``stateChanged`` flag. Gmail's
-    HTTP add-on response schema rejects an unknown top-level key (the whole
-    payload is discarded → generic "add-on error", card never updates), so
-    the stale-homepage-cache problem must be solved a different way — see
-    the open follow-up; do not re-add a top-level stateChanged here.
+    - Bug A: scoped to the acted-on thread, not the global cross-thread
+      board (falls back to the global board only when no thread is in
+      scope).
+    - Bug B (cache): wrapped in the ``renderActions`` envelope with a
+      TOP-LEVEL ``stateChanged: true`` so Gmail can clear the cached
+      homepage. This placement is distinct from the two reverted attempts
+      (bare-``action`` sibling 6d878dc; inside-``renderActions.action``
+      0b995bd). It is backed by the pending-status guards in the mutating
+      handlers, so a stale double-click is a safe no-op even if Gmail
+      ignores the flag.
+
+    Single seam: every mutating handler returns through here, so the
+    envelope can be reverted in one place if Gmail rejects it.
     """
-    return await _build_thread_overview_or_placeholder(
+    scoped = await _build_thread_overview_or_placeholder(
         request, email, thread_id, message_id=message_id
+    )
+    return RenderActionsResponse(
+        render_actions=RenderActions(action=scoped.action),
+        state_changed=True,
     )
 
 
 def _as_push(response: CardResponse) -> CardResponse:
-    """Convert updateCard navigations to pushCard for initial triggers."""
+    """Convert updateCard navigations to pushCard for initial triggers.
+
+    Trigger-only (/addon/homepage, /addon/on-message). The bare
+    ``{"action": {...}}`` shape is required for triggers — never wrap a
+    trigger response in ``renderActions`` or add ``stateChanged`` here;
+    that's only valid for /addon/action callbacks.
+    """
     navigations = [
         PushCard(push_card=nav.update_card) if isinstance(nav, UpdateCard) else nav
         for nav in response.action.navigations
@@ -1026,6 +1045,23 @@ async def _handle_create_loop(body: AddonRequest, svc: LoopService, email: str, 
     gmail_subject = _get_param(body, "gmail_subject")
     gmail_message_id = _get_param(body, "gmail_message_id")
 
+    # Idempotency guard: when this Create came from a CREATE_LOOP
+    # suggestion card, a stale cached homepage can re-submit it after the
+    # loop was already created — which would duplicate the loop and
+    # re-send the welcome email. No-op if that suggestion is already
+    # resolved. The manual create form (no suggestion_id) is unaffected.
+    if suggestion_id and request is not None:
+        from api.classifier.service import SuggestionService
+
+        existing = await SuggestionService(db_pool=svc._pool).get_suggestion(suggestion_id)
+        if existing is not None and existing.status != SuggestionStatus.PENDING:
+            return await _post_mutation_view(
+                request,
+                email,
+                thread_id=gmail_thread_id,
+                message_id=gmail_message_id,
+            )
+
     # Create or find contacts only when the coordinator supplied an email
     # for them. Loops with missing recruiter/client are valid — the JIT
     # widget on the draft card collects them at send time.
@@ -1311,6 +1347,18 @@ async def _handle_send_draft(body: AddonRequest, svc: LoopService, email: str, *
     if not draft:
         return await _build_refreshed_overview(request, email)
 
+    # Idempotency guard (highest severity): a stale cached homepage can
+    # show a draft whose Send was already clicked. Re-sending = duplicate
+    # outbound email. Only a GENERATED draft is sendable; SENT/DISCARDED
+    # is a safe no-op returning the scoped (post-send) view.
+    if draft.status != DraftStatus.GENERATED:
+        return await _post_mutation_view(
+            request,
+            email,
+            thread_id=draft.gmail_thread_id,
+            message_id=_get_param(body, "message_id"),
+        )
+
     # If the body was edited inline, use the form value
     # Check both the suggestion-specific input name and the generic "draft_body"
     suggestion_id = _get_param(body, "suggestion_id")
@@ -1456,6 +1504,15 @@ async def _handle_discard_draft(body: AddonRequest, svc: LoopService, email: str
         return await _build_refreshed_overview(request, email)
 
     draft = await draft_svc.get_draft(draft_id)
+    # Idempotency guard: stale double-click must not re-discard / re-reject
+    # an already-finalized draft. Only GENERATED is discardable.
+    if draft and draft.status != DraftStatus.GENERATED:
+        return await _post_mutation_view(
+            request,
+            email,
+            thread_id=draft.gmail_thread_id,
+            message_id=_get_param(body, "message_id"),
+        )
     if draft:
         await draft_svc.mark_discarded(draft.id)
         suggestion_svc = SuggestionService(db_pool=svc._pool)
@@ -1486,6 +1543,18 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
     suggestion = await suggestion_svc.get_suggestion(suggestion_id)
     if not suggestion:
         return await _build_refreshed_overview(request, email)
+
+    # Idempotency guard: a stale cached homepage can show an
+    # already-resolved suggestion; clicking Accept again must NOT re-run
+    # the side effect (advance_state / link_thread). resolve() itself is
+    # DB-idempotent, but it runs *after* the side effect — so guard here.
+    if suggestion.status != SuggestionStatus.PENDING:
+        return await _post_mutation_view(
+            request,
+            email,
+            thread_id=suggestion.gmail_thread_id,
+            message_id=_get_param(body, "message_id"),
+        )
 
     # New ADVANCE_STAGE / LINK_THREAD suggestions are auto-resolved by the
     # classifier and never render an Accept button. These branches still
@@ -1545,6 +1614,17 @@ async def _handle_reject_suggestion(body: AddonRequest, svc: LoopService, email:
 
     suggestion_svc = SuggestionService(db_pool=svc._pool)
     suggestion = await suggestion_svc.get_suggestion(suggestion_id)
+
+    # Idempotency guard: stale double-click on an already-resolved
+    # suggestion must not re-discard a draft or re-enqueue the rejection
+    # re-run.
+    if suggestion is None or suggestion.status != SuggestionStatus.PENDING:
+        return await _post_mutation_view(
+            request,
+            email,
+            thread_id=suggestion.gmail_thread_id if suggestion else None,
+            message_id=_get_param(body, "message_id"),
+        )
 
     # If the suggestion has a draft, discard it too
     if suggestion and suggestion.action == SuggestedAction.DRAFT_EMAIL:
@@ -1649,6 +1729,16 @@ async def _handle_respond_to_question(body: AddonRequest, svc: LoopService, emai
     if not suggestion:
         return await _build_refreshed_overview(request, email)
 
+    # Idempotency guard: stale double-submit must not re-enqueue
+    # process_coordinator_response for an already-resolved question.
+    if suggestion.status != SuggestionStatus.PENDING:
+        return await _post_mutation_view(
+            request,
+            email,
+            thread_id=suggestion.gmail_thread_id,
+            message_id=_get_param(body, "message_id"),
+        )
+
     user_input = _get_form_value(body, f"coordinator_response_{suggestion_id}")
     if not user_input or not user_input.strip():
         return await _build_refreshed_overview(request, email)
@@ -1730,6 +1820,16 @@ async def _handle_update_actor(body: AddonRequest, svc: LoopService, email: str,
     suggestion = await suggestion_svc.get_suggestion(suggestion_id)
     if not suggestion or not suggestion.loop_id:
         return await _build_refreshed_overview(request, email)
+
+    # Idempotency guard: stale double-click must not re-point the loop's
+    # actor FK / re-enqueue the agent re-run.
+    if suggestion.status != SuggestionStatus.PENDING:
+        return await _post_mutation_view(
+            request,
+            email,
+            thread_id=suggestion.gmail_thread_id,
+            message_id=_get_param(body, "message_id"),
+        )
 
     def _f(name: str) -> str:
         return (_get_form_value(body, f"{name}_{suggestion_id}") or "").strip()

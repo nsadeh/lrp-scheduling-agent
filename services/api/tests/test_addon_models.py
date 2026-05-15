@@ -6,6 +6,8 @@ from api.addon.models import (
     Card,
     CardHeader,
     CardResponse,
+    RenderActions,
+    RenderActionsResponse,
     Section,
     TextParagraph,
     TextParagraphWidget,
@@ -159,3 +161,47 @@ class TestCardResponse:
             )
         ).model_dump(by_alias=True, exclude_none=True)
         assert set(data.keys()) == {"action"}
+
+
+class TestRenderActionsResponse:
+    """The action-callback envelope for mutating handlers (Bug B attempt)."""
+
+    def _action(self) -> ActionResponse:
+        return ActionResponse(
+            navigations=[
+                UpdateCard(
+                    update_card=Card(
+                        header=CardHeader(title="T"),
+                        sections=[
+                            Section(
+                                widgets=[
+                                    TextParagraphWidget(text_paragraph=TextParagraph(text="x"))
+                                ]
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+
+    def test_state_changed_is_top_level_sibling_of_render_actions(self):
+        """Correct placement: {"renderActions": {"action": {...}},
+        "stateChanged": true}. NOT inside renderActions.action (the
+        reverted 0b995bd placement), NOT a sibling of a bare action (the
+        reverted 6d878dc placement)."""
+        data = RenderActionsResponse(
+            render_actions=RenderActions(action=self._action()),
+            state_changed=True,
+        ).model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"renderActions", "stateChanged"}
+        assert data["stateChanged"] is True
+        assert "action" in data["renderActions"]
+        assert "stateChanged" not in data["renderActions"]
+        assert "stateChanged" not in data["renderActions"]["action"]
+        assert "action" not in data  # not a bare-action sibling
+
+    def test_state_changed_omitted_when_unset(self):
+        data = RenderActionsResponse(
+            render_actions=RenderActions(action=self._action())
+        ).model_dump(by_alias=True, exclude_none=True)
+        assert set(data.keys()) == {"renderActions"}
