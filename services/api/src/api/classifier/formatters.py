@@ -267,6 +267,23 @@ def _format_address(name: str | None, email: str) -> str:
     return email
 
 
+def _format_actor_label(name: str | None, email: str | None) -> str:
+    """Render an actor as 'Name (email)', degrading gracefully.
+
+    name + email -> "Name (email)"
+    name only     -> "Name"      (candidate has no email)
+    email only    -> "email"
+    neither       -> "Unknown"
+    """
+    if name and email:
+        return f"{name} ({email})"
+    if name:
+        return name
+    if email:
+        return email
+    return "Unknown"
+
+
 _DIRECTION_LABELS = {
     "incoming": "inbound",
     "outgoing": "outbound",
@@ -339,19 +356,19 @@ def format_thread_history_xml(
     return "\n".join(parts)
 
 
-def _format_actor(prefix_tag: str, value: str | None) -> str:
-    """Render a single actor tag, defaulting to 'Unknown' when null."""
-    return f"<{prefix_tag}>{_escape(value or 'Unknown')}</{prefix_tag}>"
+def _format_actor(prefix_tag: str, name: str | None, email: str | None = None) -> str:
+    """Render a single actor tag, defaulting to 'Unknown' when empty."""
+    return f"<{prefix_tag}>{_escape(_format_actor_label(name, email))}</{prefix_tag}>"
 
 
 def _format_client_contact(loop: Loop) -> str:
     cc = loop.client_contact
     if cc is None:
         return "<client-contact>Unknown</client-contact>"
-    name = cc.name or cc.email
+    label = _format_actor_label(cc.name, cc.email)
     company = cc.company or ""
-    label = f"{name}, {company}".rstrip(", ").strip()
-    return f"<client-contact>{_escape(label or 'Unknown')}</client-contact>"
+    full = f"{label}, {company}".rstrip(", ").strip()
+    return f"<client-contact>{_escape(full or 'Unknown')}</client-contact>"
 
 
 def _format_pending_suggestion_body(sug: Suggestion) -> str:
@@ -403,10 +420,27 @@ def _format_pending_suggestions_xml(pending: list[Suggestion]) -> str:
 
 def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
     """Render a single loop as a <loop> XML block."""
-    coordinator_name = loop.coordinator.name if loop.coordinator else None
-    recruiter_name = loop.recruiter.name if loop.recruiter else None
-    candidate_name = loop.candidate.name if loop.candidate else None
-    cm_name = loop.client_manager.name if loop.client_manager else None
+    coordinator = loop.coordinator
+    recruiter = loop.recruiter
+    candidate = loop.candidate
+    cm = loop.client_manager
+
+    coordinator_tag = _format_actor(
+        "coordinator",
+        coordinator.name if coordinator else None,
+        coordinator.email if coordinator else None,
+    )
+    cm_tag = _format_actor(
+        "client-manager",
+        cm.name if cm else None,
+        cm.email if cm else None,
+    )
+    recruiter_tag = _format_actor(
+        "recruiter",
+        recruiter.name if recruiter else None,
+        recruiter.email if recruiter else None,
+    )
+    candidate_tag = _format_actor("candidate", candidate.name if candidate else None)
 
     pending_block = _format_pending_suggestions_xml(pending_for_loop)
     # Indent the pending block by two spaces so it aligns with siblings.
@@ -416,11 +450,11 @@ def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
         f"<loop id='{_escape(loop.id)}'>",
         f"  <stage>{_escape(loop.state.value)}</stage>",
         "  <actors>",
-        f"    {_format_actor('coordinator', coordinator_name)}",
+        f"    {coordinator_tag}",
         f"    {_format_client_contact(loop)}",
-        f"    {_format_actor('client-manager', cm_name)}",
-        f"    {_format_actor('recruiter', recruiter_name)}",
-        f"    {_format_actor('candidate', candidate_name)}",
+        f"    {cm_tag}",
+        f"    {recruiter_tag}",
+        f"    {candidate_tag}",
         "  </actors>",
         pending_block_indented,
         "</loop>",
