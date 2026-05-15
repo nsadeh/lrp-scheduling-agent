@@ -123,6 +123,7 @@ class LLMService:
         temperature: float = 0.0,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
+        reasoning_max_tokens: int | None = None,
     ) -> LLMResponse:
         """Make an LLM completion call with automatic failover.
 
@@ -132,8 +133,15 @@ class LLMService:
                 If None, uses LLM_DEFAULT_MODEL. On failure, falls back to
                 LLM_SECONDARY_MODEL, then LLM_TERTIARY_MODEL.
             temperature: Sampling temperature (0.0 = deterministic).
-            max_tokens: Maximum tokens in the response.
+            max_tokens: Maximum tokens in the response. Note: for thinking
+                models, reasoning tokens are drawn from this same budget, so
+                it must cover reasoning_max_tokens plus the visible output.
             response_format: Optional response format spec.
+            reasoning_max_tokens: If set, request an explicit thinking budget
+                (OpenRouter ``reasoning.max_tokens``) and require an endpoint
+                that actually supports it. Only applied to the primary model
+                leg — see the call-site comment for why failover legs are
+                left unconstrained.
 
         Returns:
             LLMResponse with the completion content and metadata.
@@ -159,6 +167,18 @@ class LLMService:
             }
             if response_format:
                 kwargs["response_format"] = response_format
+
+            # Reasoning + require_parameters only on the primary leg (i == 0).
+            # The failover chain dedups to [primary-gemini, openai/gpt-4o];
+            # gpt-4o is not reasoning-capable, so sending `reasoning` with
+            # require_parameters=true would make OpenRouter exclude every
+            # gpt-4o endpoint and silently kill the cross-vendor fallback.
+            # Failover is best-effort — run it as a plain call.
+            if reasoning_max_tokens is not None and i == 0:
+                kwargs["extra_body"] = {
+                    "reasoning": {"max_tokens": reasoning_max_tokens},
+                    "provider": {"require_parameters": True},
+                }
 
             attempt_error: Exception | None = None
             elapsed_ms: float = 0.0
@@ -227,10 +247,18 @@ class LLMService:
 
             usage = {}
             if response.usage:
+                # reasoning_tokens lives in the OpenAI-compatible
+                # completion_tokens_details sub-object. Not every provider
+                # populates it (it's a real cross-provider boundary, not a
+                # defensive-for-impossible case), so read it None-safe. A
+                # value of 0 means the model answered with no thinking budget
+                # — a load-bearing signal for trace diagnostics.
+                details = getattr(response.usage, "completion_tokens_details", None)
                 usage = {
                     "prompt_tokens": response.usage.prompt_tokens or 0,
                     "completion_tokens": response.usage.completion_tokens or 0,
                     "total_tokens": response.usage.total_tokens or 0,
+                    "reasoning_tokens": getattr(details, "reasoning_tokens", None) or 0,
                 }
 
             return LLMResponse(
