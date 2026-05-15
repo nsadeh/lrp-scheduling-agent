@@ -62,12 +62,15 @@ RETURNING id, name, email, company, created_at;
 SELECT id, name, email, company, created_at
 FROM client_contacts WHERE id = :id;
 
--- name: get_client_contact_by_email^
--- Used to dedupe on loop creation: reuse an existing client contact if
--- the email already exists instead of inserting a duplicate.
+-- name: get_client_contact_by_email_and_company^
+-- Dedupe on loop creation: reuse a contact only when BOTH the email and
+-- company match. A shared/system sender (e.g. no-reply@greenhouse.io) reused
+-- across different clients must NOT collapse into one identity.
 SELECT id, name, email, company, created_at
 FROM client_contacts
 WHERE email = :email
+  AND company IS NOT DISTINCT FROM :company::text
+ORDER BY created_at
 LIMIT 1;
 
 -- name: search_client_contacts_by_prefix

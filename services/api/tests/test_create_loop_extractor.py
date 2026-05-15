@@ -83,7 +83,7 @@ def mock_scheduling():
     svc.get_status_board = AsyncMock(return_value=StatusBoard())
     svc.find_loop_by_thread = AsyncMock(return_value=None)
     svc.get_contact_by_email = AsyncMock(return_value=None)
-    svc.get_client_contact_by_email = AsyncMock(return_value=None)
+    svc.get_client_contact_by_email_and_company = AsyncMock(return_value=None)
     # _handle_show_create_form pokes svc._gmail for get_message/get_thread.
     # MagicMock auto-creates attributes, including `.name`, which is truthy —
     # so set `.name = ""` explicitly on `from_` (otherwise `msg.from_.name or None`

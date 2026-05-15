@@ -62,7 +62,7 @@ def _action_url_set():
 def mock_scheduling():
     svc = AsyncMock()
     svc.get_contact_by_email = AsyncMock(return_value=None)
-    svc.get_client_contact_by_email = AsyncMock(return_value=None)
+    svc.get_client_contact_by_email_and_company = AsyncMock(return_value=None)
     return svc
 
 
