@@ -355,6 +355,83 @@ class TestClassifierGuardrails:
         assert error is not None
 
 
+class TestCreateLoopRoleDomainGuardrails:
+    """CREATE_LOOP role-domain guardrails: client must be corporate; CM and
+    recruiter must be internal LRP addresses."""
+
+    @staticmethod
+    def _create_loop(**action_data) -> SuggestionItem:
+        action_data.setdefault("candidate_name", "Amar Shah")
+        return _suggestion_item(action=SuggestedAction.CREATE_LOOP, action_data=action_data)
+
+    def test_consumer_client_email_blocked_even_with_company(self):
+        """Reproduces the screenshot bug: hotmail client + company set."""
+        classifier, _ = _make_classifier()
+        item = self._create_loop(
+            client_email="amar_shah80@hotmail.com",
+            client_company="5 Dimensions Energy",
+        )
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+        assert "hotmail.com" in error
+
+    def test_corporate_client_email_passes(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop(
+            client_email="max@berlinuniversity.edu",
+            cm_email="adam@longridgepartners.com",
+            recruiter_email="rq@longridgepartners.com",
+        )
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.CREATE_LOOP
+        assert error is None
+
+    def test_optional_role_emails_absent_passes(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop()
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.CREATE_LOOP
+        assert error is None
+
+    def test_malformed_client_email_blocked(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop(client_email="notanemail")
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+
+    def test_external_cm_email_blocked(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop(cm_email="someone@gmail.com")
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+        assert "cm_email" in error
+
+    def test_internal_cm_email_passes(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop(cm_email="adam@longridgepartners.com")
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.CREATE_LOOP
+        assert error is None
+
+    def test_external_recruiter_email_blocked(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop(recruiter_email="ext@acme.com")
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.NO_ACTION
+        assert error is not None
+        assert "recruiter_email" in error
+
+    def test_internal_recruiter_email_passes(self):
+        classifier, _ = _make_classifier()
+        item = self._create_loop(recruiter_email="rq@longridgepartners.com")
+        result, error = classifier._apply_guardrails(item)
+        assert result.action == SuggestedAction.CREATE_LOOP
+        assert error is None
+
+
 # --- Agent guardrails ---
 
 

@@ -57,6 +57,51 @@ _CLASSIFIER_ALLOWED_ACTIONS = frozenset(
     {SuggestedAction.CREATE_LOOP, SuggestedAction.LINK_THREAD, SuggestedAction.NO_ACTION}
 )
 
+# A client contact never uses a consumer mailbox — a consumer-domain
+# client_email almost always means the model grabbed the candidate or
+# another non-client party. Enforced as a CREATE_LOOP guardrail.
+_CONSUMER_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "yahoo.com",
+        "ymail.com",
+        "hotmail.com",
+        "outlook.com",
+        "live.com",
+        "msn.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "aol.com",
+        "protonmail.com",
+        "proton.me",
+        "hey.com",
+        "fastmail.com",
+        "duck.com",
+        "gmx.com",
+        "mail.com",
+        "zoho.com",
+        "yandex.com",
+        "yandex.ru",
+        "qq.com",
+        "163.com",
+        "naver.com",
+    }
+)
+
+# CM and recruiter are always LRP employees. router.py:INTERNAL_DOMAIN holds
+# the same literal for an unrelated routing gate; this constant is kept
+# independent so the guardrail stays self-contained.
+_INTERNAL_EMAIL_DOMAIN = "longridgepartners.com"
+
+
+def _email_domain(addr: str) -> str | None:
+    """Lowercased domain of an email address, or None if there is no '@'."""
+    if "@" not in addr:
+        return None
+    return addr.rsplit("@", 1)[-1].strip().lower()
+
 
 def _resolve_coordinator_name(event: EmailEvent, coord: Coordinator | None) -> str:
     if coord and coord.name:
@@ -351,6 +396,59 @@ class LoopClassifier:
                     "CREATE_LOOP candidate_name must be a real name, not 'Unknown Candidate'. "
                     "Re-read the email to extract the candidate's actual name.",
                 )
+
+            # 7. CREATE_LOOP client_email must be a corporate address.
+            client_email = (item.action_data.get("client_email") or "").strip()
+            if client_email:
+                domain = _email_domain(client_email)
+                if domain is None:
+                    return (
+                        item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
+                        f"CREATE_LOOP client_email '{client_email}' is malformed "
+                        "(no '@'). Re-read the email for the real client contact, "
+                        "or emit NO_ACTION if none can be identified.",
+                    )
+                if domain in _CONSUMER_EMAIL_DOMAINS:
+                    return (
+                        item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
+                        f"CREATE_LOOP client_email '{client_email}' uses a consumer "
+                        f"email provider ({domain}). The client always uses a "
+                        "corporate domain; a consumer address almost always means "
+                        "the model extracted the candidate or another non-client "
+                        "party. Re-read the email for the real corporate client "
+                        "contact, or emit NO_ACTION if none can be identified.",
+                    )
+
+            # 8. CREATE_LOOP cm_email must be an internal LRP address.
+            cm_email = (item.action_data.get("cm_email") or "").strip()
+            if cm_email:
+                domain = _email_domain(cm_email)
+                if domain != _INTERNAL_EMAIL_DOMAIN:
+                    return (
+                        item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
+                        f"CREATE_LOOP cm_email '{cm_email}' is not an internal LRP "
+                        f"address. The client manager is always an LRP employee "
+                        f"(@{_INTERNAL_EMAIL_DOMAIN}); an external address means "
+                        "the model picked the wrong person. Re-read the email for "
+                        "the internal CM, or emit NO_ACTION if none can be "
+                        "identified.",
+                    )
+
+            # 9. CREATE_LOOP recruiter_email must be an internal LRP address.
+            recruiter_email = (item.action_data.get("recruiter_email") or "").strip()
+            if recruiter_email:
+                domain = _email_domain(recruiter_email)
+                if domain != _INTERNAL_EMAIL_DOMAIN:
+                    return (
+                        item.model_copy(update={"action": SuggestedAction.NO_ACTION}),
+                        f"CREATE_LOOP recruiter_email '{recruiter_email}' is not an "
+                        f"internal LRP address. The recruiter is always an LRP "
+                        f"employee (@{_INTERNAL_EMAIL_DOMAIN}); an external address "
+                        "is typically a third-party recruiter pitching candidates, "
+                        "not the loop's recruiter. Re-read the email for the "
+                        "internal recruiter, or omit recruiter fields if none is "
+                        "clearly present.",
+                    )
 
         return item, None
 
