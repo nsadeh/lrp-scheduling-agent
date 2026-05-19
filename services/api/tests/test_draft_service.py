@@ -44,7 +44,7 @@ def _loop(
         coordinator=Coordinator(
             id="crd_1",
             name="Fiona",
-            email="fiona@lrp.com",
+            email="fiona@longridgepartners.com",
             created_at=datetime(2026, 4, 15, tzinfo=UTC),
         ),
         client_contact=ClientContact(
@@ -65,7 +65,7 @@ def _loop(
         client_manager=Contact(
             id="con_2",
             name="Sarah",
-            email="sarah@lrp.com",
+            email="sarah@longridgepartners.com",
             role="client_manager",
             company=None,
             created_at=datetime(2026, 4, 15, tzinfo=UTC),
@@ -88,7 +88,7 @@ def _suggestion(
 ) -> Suggestion:
     return Suggestion(
         id=sug_id,
-        coordinator_email="fiona@lrp.com",
+        coordinator_email="fiona@longridgepartners.com",
         gmail_message_id="msg_1",
         gmail_thread_id="thread_1",
         loop_id="lop_1",
@@ -116,7 +116,7 @@ def _draft_row(
         "id": draft_id,
         "suggestion_id": "sug_1",
         "loop_id": "lop_1",
-        "coordinator_email": "fiona@lrp.com",
+        "coordinator_email": "fiona@longridgepartners.com",
         "to_emails": ["haley@client.com"],
         "cc_emails": [],
         "subject": "Re: Round 1 - John Smith",
@@ -167,7 +167,7 @@ class TestResolveRecipients:
         loop = _loop(state=StageState.SCHEDULED, with_client_manager=True)
         to, cc = resolve_recipients(loop, "internal")
         assert to == []
-        assert cc == ["sarah@lrp.com"]
+        assert cc == ["sarah@longridgepartners.com"]
 
     def test_state_does_not_override_recipient_type(self):
         """Regression: SCHEDULED loop + recipient_type='recruiter' → recruiter, not client."""
@@ -199,13 +199,13 @@ class TestResolveRecipients:
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         to, cc = resolve_recipients(loop, "client")
         assert to == ["haley@client.com"]
-        assert cc == ["sarah@lrp.com"]
+        assert cc == ["sarah@longridgepartners.com"]
 
     def test_sender_filtered_from_cc(self):
         """Coordinators are sometimes their own CM — don't CC yourself."""
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
-        # sarah@lrp.com is the CM in the fixture
-        _, cc = resolve_recipients(loop, "client", sender_email="sarah@lrp.com")
+        # sarah@longridgepartners.com is the CM in the fixture
+        _, cc = resolve_recipients(loop, "client", sender_email="sarah@longridgepartners.com")
         assert cc == []
 
 
@@ -230,28 +230,41 @@ def _thread_msg(
 
 class TestIsForwardDraft:
     def test_new_recipient_is_forward(self):
-        msgs = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        msgs = [_thread_msg("alice@a.com", ["coord@longridgepartners.com"])]
         assert _is_forward_draft(["bob@b.com"], msgs) is True
 
     def test_existing_recipient_is_not_forward(self):
-        msgs = [_thread_msg("alice@a.com", ["coord@lrp.com"])]
+        msgs = [_thread_msg("alice@a.com", ["coord@longridgepartners.com"])]
         assert _is_forward_draft(["alice@a.com"], msgs) is False
 
     def test_no_thread_messages_is_not_forward(self):
         assert _is_forward_draft(["anyone@a.com"], None) is False
         assert _is_forward_draft(["anyone@a.com"], []) is False
 
+    def test_empty_to_emails_is_forward(self):
+        """Rule 2: empty To (recruiter JIT-pending) → assume forward, so
+        reply-all CC carry-over is skipped and CC stays CM-only."""
+        trigger = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
+        assert _is_forward_draft([], [trigger], "msg_1") is True
+        assert _is_forward_draft([], None) is True
+
+    def test_client_guard_wins_over_empty_to(self):
+        """recipient_type=client still never forwards, even with empty To —
+        the client privacy guard is checked first."""
+        trigger = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
+        assert _is_forward_draft([], [trigger], "msg_1", recipient_type="client") is False
+
     def test_only_checks_trigger_message(self):
         """Recipient on an earlier message but NOT on the trigger → forward."""
         old = _thread_msg(
             "bob@b.com",
-            ["coord@lrp.com"],
+            ["coord@longridgepartners.com"],
             msg_id="msg_old",
             date=datetime(2026, 4, 14, tzinfo=UTC),
         )
         trigger = _thread_msg(
             "alice@a.com",
-            ["coord@lrp.com"],
+            ["coord@longridgepartners.com"],
             msg_id="msg_new",
             date=datetime(2026, 4, 15, tzinfo=UTC),
         )
@@ -261,7 +274,7 @@ class TestIsForwardDraft:
         """Recipient on the trigger message → not a forward."""
         trigger = _thread_msg(
             "alice@a.com",
-            ["bob@b.com", "coord@lrp.com"],
+            ["bob@b.com", "coord@longridgepartners.com"],
             msg_id="msg_new",
         )
         assert _is_forward_draft(["bob@b.com"], [trigger], "msg_new") is False
@@ -276,8 +289,8 @@ class TestIsForwardDraft:
         and the recruiter's reply would be quoted to the client (LEAK).
         """
         recruiter_reply = _thread_msg(
-            "recruiter@lrp.com",
-            ["coord@lrp.com"],
+            "recruiter@longridgepartners.com",
+            ["coord@longridgepartners.com"],
             msg_id="msg_recruiter",
         )
         assert (
@@ -294,7 +307,7 @@ class TestIsForwardDraft:
         """Consistency: client recipient is always reply, never forward."""
         trigger = _thread_msg(
             "alice@a.com",
-            ["client@external.com", "coord@lrp.com"],
+            ["client@external.com", "coord@longridgepartners.com"],
             msg_id="msg_new",
         )
         assert (
@@ -309,13 +322,13 @@ class TestIsForwardDraft:
         to internal LRP folks is safe and often correct."""
         client_msg = _thread_msg(
             "client@external.com",
-            ["coord@lrp.com"],
+            ["coord@longridgepartners.com"],
             msg_id="msg_client",
         )
         # Recruiter not on the trigger → forward (preserves existing semantics).
         assert (
             _is_forward_draft(
-                ["recruiter@lrp.com"],
+                ["recruiter@longridgepartners.com"],
                 [client_msg],
                 "msg_client",
                 recipient_type="recruiter",
@@ -327,7 +340,7 @@ class TestIsForwardDraft:
         """recipient_type=None (legacy suggestions) → trigger-based detection."""
         client_msg = _thread_msg(
             "client@external.com",
-            ["coord@lrp.com"],
+            ["coord@longridgepartners.com"],
             msg_id="msg_client",
         )
         assert (
@@ -349,7 +362,7 @@ class TestResolveReplyRecipients:
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         trigger = _thread_msg(
             "haley@client.com",
-            ["fiona@lrp.com"],
+            ["fiona@longridgepartners.com"],
             cc_emails=["a@x.com", "b@y.com"],
             msg_id="msg_1",
         )
@@ -361,25 +374,25 @@ class TestResolveReplyRecipients:
         )
         assert to == ["haley@client.com"]
         # CM first, then carried-over CCs in order.
-        assert cc == ["sarah@lrp.com", "a@x.com", "b@y.com"]
+        assert cc == ["sarah@longridgepartners.com", "a@x.com", "b@y.com"]
         assert is_forward is False
 
     def test_sender_on_trigger_cc_is_filtered(self):
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         trigger = _thread_msg(
             "haley@client.com",
-            ["fiona@lrp.com"],
-            cc_emails=["fiona@lrp.com", "a@x.com"],
+            ["fiona@longridgepartners.com"],
+            cc_emails=["fiona@longridgepartners.com", "a@x.com"],
             msg_id="msg_1",
         )
         _, cc, _ = resolve_reply_recipients(
             loop,
             "client",
-            sender_email="fiona@lrp.com",
+            sender_email="fiona@longridgepartners.com",
             thread_messages=[trigger],
             trigger_message_id="msg_1",
         )
-        assert cc == ["sarah@lrp.com", "a@x.com"]
+        assert cc == ["sarah@longridgepartners.com", "a@x.com"]
 
     def test_cm_equals_sender_still_carries_trigger_cc(self):
         """CM == coordinator: CM dropped (don't CC yourself), but the
@@ -387,14 +400,14 @@ class TestResolveReplyRecipients:
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         trigger = _thread_msg(
             "haley@client.com",
-            ["sarah@lrp.com"],
+            ["sarah@longridgepartners.com"],
             cc_emails=["a@x.com"],
             msg_id="msg_1",
         )
         _, cc, _ = resolve_reply_recipients(
             loop,
             "client",
-            sender_email="sarah@lrp.com",
+            sender_email="sarah@longridgepartners.com",
             thread_messages=[trigger],
             trigger_message_id="msg_1",
         )
@@ -404,7 +417,7 @@ class TestResolveReplyRecipients:
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         trigger = _thread_msg(
             "haley@client.com",
-            ["fiona@lrp.com"],
+            ["fiona@longridgepartners.com"],
             cc_emails=["haley@client.com", "a@x.com"],
             msg_id="msg_1",
         )
@@ -416,14 +429,14 @@ class TestResolveReplyRecipients:
         )
         assert to == ["haley@client.com"]
         assert "haley@client.com" not in cc
-        assert cc == ["sarah@lrp.com", "a@x.com"]
+        assert cc == ["sarah@longridgepartners.com", "a@x.com"]
 
     def test_case_insensitive_dedupe(self):
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         trigger = _thread_msg(
             "haley@client.com",
-            ["fiona@lrp.com"],
-            cc_emails=["Sarah@LRP.com", "A@X.com", "a@x.com"],
+            ["fiona@longridgepartners.com"],
+            cc_emails=["Sarah@LongRidgePartners.com", "A@X.com", "a@x.com"],
             msg_id="msg_1",
         )
         _, cc, _ = resolve_reply_recipients(
@@ -433,7 +446,7 @@ class TestResolveReplyRecipients:
             trigger_message_id="msg_1",
         )
         # CM already present (case-insensitively) — not re-added; A@X.com kept once.
-        assert cc == ["sarah@lrp.com", "A@X.com"]
+        assert cc == ["sarah@longridgepartners.com", "A@X.com"]
 
     def test_forward_keeps_cm_only_cc(self):
         """Forward (recruiter not on the client's trigger) → no carry-over,
@@ -441,7 +454,7 @@ class TestResolveReplyRecipients:
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         trigger = _thread_msg(
             "haley@client.com",
-            ["fiona@lrp.com"],
+            ["fiona@longridgepartners.com"],
             cc_emails=["a@x.com", "b@y.com"],
             msg_id="msg_1",
         )
@@ -453,14 +466,66 @@ class TestResolveReplyRecipients:
         )
         assert to == ["mike@recruiter.com"]
         assert is_forward is True
-        assert cc == ["sarah@lrp.com"]
+        assert cc == ["sarah@longridgepartners.com"]
 
     def test_no_thread_messages_falls_back_to_cm_only(self):
         loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
         to, cc, is_forward = resolve_reply_recipients(loop, "client")
         assert to == ["haley@client.com"]
-        assert cc == ["sarah@lrp.com"]
+        assert cc == ["sarah@longridgepartners.com"]
         assert is_forward is False
+
+    def test_unset_recruiter_jit_pending_is_forward_cm_only_cc(self):
+        """The screenshot bug: recipient_type=recruiter but recruiter not yet
+        set (JIT pending). Trigger is a CM reply whose CC carries a
+        client-domain teammate. Expect: empty To, is_forward=True (Rule 2 —
+        empty To assumes forward, no reply-all carry-over), CC = CM only.
+        Pre-fix this leaked the client onto the recruiter draft."""
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        loop.recruiter = None
+        trigger = _thread_msg(
+            "sarah@longridgepartners.com",
+            ["haley@client.com"],
+            cc_emails=[
+                "mike@longridgepartners.com",
+                "teammate@client.com",
+                "fiona@longridgepartners.com",
+            ],
+            msg_id="msg_1",
+        )
+        to, cc, is_forward = resolve_reply_recipients(
+            loop,
+            "recruiter",
+            sender_email="fiona@longridgepartners.com",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert to == []
+        assert is_forward is True
+        assert cc == ["sarah@longridgepartners.com"]
+
+    def test_recruiter_reply_strips_client_cc_keeps_internal(self):
+        """Rule 1: even when carry-over runs (recruiter set, on the trigger so
+        it's a reply), client-domain addresses are stripped from CC while
+        internal ones survive."""
+        loop = _loop(state=StageState.AWAITING_CANDIDATE, with_client_manager=True)
+        trigger = _thread_msg(
+            "haley@client.com",
+            ["mike@recruiter.com"],
+            cc_emails=["teammate@client.com", "lijo@longridgepartners.com"],
+            msg_id="msg_1",
+        )
+        to, cc, is_forward = resolve_reply_recipients(
+            loop,
+            "recruiter",
+            sender_email="fiona@longridgepartners.com",
+            thread_messages=[trigger],
+            trigger_message_id="msg_1",
+        )
+        assert to == ["mike@recruiter.com"]
+        assert is_forward is False
+        assert "teammate@client.com" not in cc
+        assert cc == ["sarah@longridgepartners.com", "lijo@longridgepartners.com"]
 
 
 class _AsyncCtx:
@@ -492,25 +557,25 @@ class TestResolveSubject:
     """
 
     def test_mirrors_latest_thread_subject(self):
-        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
         msg.subject = "Trump"
         result = DraftService._resolve_subject(_loop(), [msg])
         assert result == "Re: Trump"
 
     def test_no_double_re_prefix_lowercase(self):
-        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
         msg.subject = "re: Phone screen"
         result = DraftService._resolve_subject(_loop(), [msg])
         assert result == "re: Phone screen"
 
     def test_no_double_re_prefix_uppercase(self):
-        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
         msg.subject = "RE: Phone screen"
         result = DraftService._resolve_subject(_loop(), [msg])
         assert result == "RE: Phone screen"
 
     def test_no_double_re_prefix_titlecase(self):
-        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
         msg.subject = "Re: Phone screen"
         result = DraftService._resolve_subject(_loop(), [msg])
         assert result == "Re: Phone screen"
@@ -527,14 +592,14 @@ class TestResolveSubject:
         """The latest message wins even when list order is oldest-first."""
         oldest = _thread_msg(
             "alice@a.com",
-            ["coord@lrp.com"],
+            ["coord@longridgepartners.com"],
             msg_id="msg_old",
             date=datetime(2026, 4, 14, tzinfo=UTC),
         )
         oldest.subject = "Re: Old subject"
         newest = _thread_msg(
             "alice@a.com",
-            ["coord@lrp.com"],
+            ["coord@longridgepartners.com"],
             msg_id="msg_new",
             date=datetime(2026, 4, 16, tzinfo=UTC),
         )
@@ -545,7 +610,7 @@ class TestResolveSubject:
     def test_falls_back_when_latest_subject_is_blank(self):
         """Defensive: a thread message with whitespace-only subject falls
         back to the loop title rather than producing 'Re: ' alone."""
-        msg = _thread_msg("alice@a.com", ["coord@lrp.com"])
+        msg = _thread_msg("alice@a.com", ["coord@longridgepartners.com"])
         msg.subject = "   "
         result = DraftService._resolve_subject(_loop(), [msg])
         assert result == "Re: Round 1 - John Smith"
@@ -594,7 +659,7 @@ class TestGenerateDraft:
 
         loop = _loop(state=StageState.AWAITING_CANDIDATE)
         suggestion = _suggestion()
-        thread_msg = _thread_msg("alice@client.com", ["coord@lrp.com"])
+        thread_msg = _thread_msg("alice@client.com", ["coord@longridgepartners.com"])
         thread_msg.subject = "Trump"
 
         from unittest.mock import patch

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 
 from psycopg.rows import dict_row, tuple_row
 
+from api.classifier.router import INTERNAL_DOMAIN
 from api.drafts.models import DraftStatus, EmailDraft
 from api.drafts.queries import queries
 from api.ids import make_id
@@ -71,7 +72,16 @@ def _is_forward_draft(
     """
     if recipient_type == "client":
         return False
-    if not thread_messages or not to_emails:
+    if not to_emails:
+        # JIT-pending: recruiter not yet attached, so we can't run the
+        # trigger-based check. Default to *forward*, not reply — this keeps
+        # reply-all CC carry-over from dragging the trigger thread's
+        # (possibly client-bearing) CC onto a draft whose recipient we don't
+        # even know yet. Result: CM-only CC until the coordinator fills the
+        # contact in. (Was: returned False/"reply" here, which leaked the
+        # client onto recruiter drafts — issue this fixes.)
+        return True
+    if not thread_messages:
         return False
 
     trigger = _pick_trigger(thread_messages, trigger_message_id)
@@ -202,6 +212,18 @@ def _apply_reply_all_cc(
     return result
 
 
+def _internal_only(emails: list[str]) -> list[str]:
+    """Drop every non-internal (non-LRP-domain) address from ``emails``.
+
+    Pure list filter — order preserved, domain compared case-insensitively.
+    The caller decides *when* internal-only filtering applies; this just
+    enforces it on whatever list it's handed.
+    """
+    return [
+        email for email in emails if email.rpartition("@")[2].strip().lower() == INTERNAL_DOMAIN
+    ]
+
+
 def resolve_reply_recipients(
     loop: Loop,
     recipient_type: RecipientType | None,
@@ -231,6 +253,12 @@ def resolve_reply_recipients(
         trigger = _pick_trigger(thread_messages, trigger_message_id)
         trigger_cc = [addr.email for addr in trigger.cc]
         cc_emails = _apply_reply_all_cc(cc_emails, trigger_cc, to_emails, sender_email)
+    # Recruiter-bound drafts and internal notes are LRP-internal coordination
+    # the client must never see. Carry-over above can drag client-side
+    # addresses off the trigger thread's CC; scrub them here. Client-bound
+    # drafts are untouched — the client is the intended audience.
+    if recipient_type in ("recruiter", "internal"):
+        cc_emails = _internal_only(cc_emails)
     return to_emails, cc_emails, is_forward
 
 
