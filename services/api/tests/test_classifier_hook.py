@@ -16,7 +16,7 @@ from api.classifier.models import (
     SuggestionStatus,
 )
 from api.classifier.next_action_agent import NextActionAgent
-from api.classifier.router import EmailRouter, _is_internal_only
+from api.classifier.router import EmailRouter, _coordinator_on_trigger, _is_internal_only
 from api.classifier.sender_blacklist import SenderBlacklist
 from api.gmail.hooks import EmailEvent, MessageDirection, MessageType
 from api.gmail.models import EmailAddress, Message
@@ -918,6 +918,151 @@ class TestInternalOnlyFilter:
         )
         await router.on_email(event)
         classifier.classify.assert_called_once()
+
+
+# --- Off-thread coordinator filter ---
+
+
+def _off_thread_msg(
+    from_email: str,
+    to_emails: tuple[str, ...] = (),
+    cc_emails: tuple[str, ...] = (),
+    msg_id: str = "msg1",
+    thread_id: str = "thread1",
+) -> Message:
+    """Build a Message with arbitrary participants (none of them the coordinator)."""
+    return Message(
+        id=msg_id,
+        thread_id=thread_id,
+        subject="Off-thread",
+        **{"from": EmailAddress(email=from_email)},
+        to=[EmailAddress(email=e) for e in to_emails],
+        cc=[EmailAddress(email=e) for e in cc_emails],
+        date=datetime(2026, 5, 19, 17, 42, tzinfo=UTC),
+        body_text="Body",
+    )
+
+
+class TestCoordinatorOnTrigger:
+    """Unit tests for the _coordinator_on_trigger helper."""
+
+    def test_coordinator_on_from(self):
+        msg = _off_thread_msg(from_email="coord@lrp.com", to_emails=("ext@example.com",))
+        assert _coordinator_on_trigger(msg, "coord@lrp.com") is True
+
+    def test_coordinator_on_to(self):
+        msg = _off_thread_msg(
+            from_email="ext@example.com", to_emails=("coord@lrp.com", "other@lrp.com")
+        )
+        assert _coordinator_on_trigger(msg, "coord@lrp.com") is True
+
+    def test_coordinator_on_cc(self):
+        msg = _off_thread_msg(
+            from_email="ext@example.com",
+            to_emails=("other@lrp.com",),
+            cc_emails=("coord@lrp.com",),
+        )
+        assert _coordinator_on_trigger(msg, "coord@lrp.com") is True
+
+    def test_coordinator_absent(self):
+        # Mirrors the Fubo / Trump / Eric-pitching-Steve traces: external sender,
+        # another LRP staffer on To, coordinator nowhere.
+        msg = _off_thread_msg(
+            from_email="stream@newsletters.fubo.tv",
+            to_emails=("aaron@longridgepartners.com",),
+        )
+        assert _coordinator_on_trigger(msg, "adam@longridgepartners.com") is False
+
+    def test_case_insensitive(self):
+        msg = _off_thread_msg(from_email="ext@example.com", to_emails=("COORD@LRP.COM",))
+        assert _coordinator_on_trigger(msg, "coord@lrp.com") is True
+
+
+class TestOffThreadFilter:
+    """Router-level integration: off-thread trigger never reaches the classifier."""
+
+    @pytest.mark.asyncio
+    async def test_coordinator_on_to_passes_through(self):
+        router, classifier, _, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = EmailEvent(
+            message=_off_thread_msg(from_email="ext@candidate.com", to_emails=("coord@lrp.com",)),
+            coordinator_email="coord@lrp.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.NEW_THREAD,
+            new_participants=[],
+        )
+        await router.on_email(event)
+
+        classifier.classify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_on_cc_passes_through(self):
+        router, classifier, _, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = EmailEvent(
+            message=_off_thread_msg(
+                from_email="ext@candidate.com",
+                to_emails=("other@external.com",),
+                cc_emails=("coord@lrp.com",),
+            ),
+            coordinator_email="coord@lrp.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.NEW_THREAD,
+            new_participants=[],
+        )
+        await router.on_email(event)
+
+        classifier.classify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_on_from_never_reaches_classifier(self):
+        """Outbound from the coordinator — the existing outgoing-on-unlinked
+        filter catches this first, so the assertion is just that the classifier
+        is never called (robust to which filter trips first)."""
+        router, classifier, _, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = EmailEvent(
+            message=_off_thread_msg(from_email="coord@lrp.com", to_emails=("ext@candidate.com",)),
+            coordinator_email="coord@lrp.com",
+            direction=MessageDirection.OUTGOING,
+            message_type=MessageType.NEW_THREAD,
+            new_participants=[],
+        )
+        await router.on_email(event)
+
+        classifier.classify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_off_thread_marketing_blast_is_blocked(self, caplog):
+        """Mirrors the Fubo / Trump / pitched-candidate traces: marketing /
+        forwarded mail in the coordinator's mailbox where they aren't on
+        From/To/Cc must never reach the loop classifier."""
+        import logging
+
+        router, classifier, _, loop_service = _make_router()
+        loop_service.find_loops_by_thread.return_value = []
+
+        event = EmailEvent(
+            message=_off_thread_msg(
+                from_email="stream@newsletters.fubo.tv",
+                to_emails=("aaron@longridgepartners.com",),
+                msg_id="msg_fubo",
+                thread_id="thread_fubo",
+            ),
+            coordinator_email="adam@longridgepartners.com",
+            direction=MessageDirection.INCOMING,
+            message_type=MessageType.NEW_THREAD,
+            new_participants=[],
+        )
+        with caplog.at_level(logging.INFO, logger="api.classifier.router"):
+            await router.on_email(event)
+
+        classifier.classify.assert_not_called()
+        assert any("skipping off-thread message" in r.message for r in caplog.records)
 
 
 # --- Deduplication ---
