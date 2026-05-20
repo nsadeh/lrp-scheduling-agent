@@ -50,6 +50,24 @@ def _is_internal_only(msg: Message, thread_messages: list[Message] | None = None
     return True
 
 
+def _coordinator_on_trigger(msg: Message, coordinator_email: str) -> bool:
+    """True iff the coordinator appears in From/To/Cc of the trigger message.
+
+    The coordinator is the watched-mailbox owner. If they aren't visibly
+    addressed on the trigger, the message reached their mailbox via a
+    mailbox-level forward (personal Gmail filter or Workspace routing) and
+    must not spawn a new scheduling loop. Note: does not consider aliases —
+    if a coordinator is onboarded with a primary address plus aliases, mail
+    sent to the alias will be filtered. LRP doesn't currently use aliases.
+    """
+    coord = coordinator_email.lower()
+    if msg.from_.email.lower() == coord:
+        return True
+    if any(addr.email.lower() == coord for addr in msg.to):
+        return True
+    return any(addr.email.lower() == coord for addr in msg.cc)
+
+
 class EmailRouter:
     """Routes emails to the correct handler based on thread linkage."""
 
@@ -123,6 +141,21 @@ class EmailRouter:
             logger.debug(
                 "skipping outgoing email on unlinked thread %s",
                 msg.thread_id,
+            )
+            return
+
+        # 4. Off-thread filter — the coordinator (watched-mailbox owner) is not
+        # addressed on the trigger message. The message arrived via mailbox-level
+        # forwarding (personal Gmail filter or Workspace routing) and must not
+        # create a new scheduling loop. Logged at INFO to keep a baseline metric
+        # of how often the rule fires without a separate metric pipeline.
+        if not _coordinator_on_trigger(msg, event.coordinator_email):
+            logger.info(
+                "skipping off-thread message id=%s thread=%s coordinator=%s from=%s",
+                msg.id,
+                msg.thread_id,
+                event.coordinator_email,
+                msg.from_.email,
             )
             return
 
