@@ -23,6 +23,7 @@ loss for the happy-path optimization.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 import sentry_sdk
@@ -31,9 +32,21 @@ from api.classifier.models import (
     CreateLoopExtraction,
     SuggestedAction,
     Suggestion,
+    SuggestionItem,
     SuggestionStatus,
 )
+from api.encore import (
+    AmbiguousRecruiters,
+    EncoreLookupError,
+    NoMatch,
+    Skipped,
+    UniqueRecruiter,
+    resolve_recruiter,
+)
 from api.scheduling.models import StageState
+
+if TYPE_CHECKING:
+    from api.encore import ResolverOutcome
 
 if TYPE_CHECKING:
     from arq.connections import ArqRedis
@@ -181,7 +194,80 @@ class CreateLoopResolver:
             candidate_name,
         )
 
+        # Encore recruiter resolution — must run BEFORE enqueue_next_action so
+        # the agent's first pass observes either a populated recruiter or the
+        # synthesized UPDATE_ACTOR suggestion (avoids duplicate emission via
+        # _suggestion_fingerprint dedup in NextActionAgent).
+        if not extraction.recruiter_email:
+            cutoff = suggestion.created_at or datetime.now(UTC)
+            outcome = await resolve_recruiter(
+                candidate_name=candidate_name,
+                cutoff_date=cutoff,
+                coordinator_email=ctx.coordinator_email,
+            )
+            await self._apply_encore_outcome(
+                loop_id=loop.id,
+                suggestion=suggestion,
+                candidate_name=candidate_name,
+                outcome=outcome,
+                ctx=ctx,
+            )
+
         await ctx.enqueue_next_action()
+
+    async def _apply_encore_outcome(
+        self,
+        *,
+        loop_id: str,
+        suggestion: Suggestion,
+        candidate_name: str,
+        outcome: ResolverOutcome,
+        ctx: ResolverContext,
+    ) -> None:
+        """Dispatch the resolver outcome to set_recruiter or emit UPDATE_ACTOR."""
+        if isinstance(outcome, UniqueRecruiter):
+            recruiter = await ctx.loops.find_or_create_contact(
+                name=outcome.display_name,
+                email=outcome.email,
+                role="recruiter",
+            )
+            await ctx.loops.set_recruiter(
+                loop_id=loop_id,
+                recruiter_id=recruiter.id,
+                coordinator_email=ctx.coordinator_email,
+            )
+            logger.info(
+                "encore.resolver set recruiter=%s on loop=%s via source=%s",
+                outcome.email,
+                loop_id,
+                outcome.source,
+            )
+            return
+
+        if isinstance(outcome, Skipped):
+            logger.info("encore.resolver skipped loop=%s reason=%s", loop_id, outcome.reason)
+            return
+
+        summary = _format_encore_summary(outcome, candidate_name)
+        await ctx.suggestions.create_suggestion(
+            coordinator_email=ctx.coordinator_email,
+            gmail_message_id=ctx.gmail_message_id,
+            gmail_thread_id=ctx.gmail_thread_id,
+            loop_id=loop_id,
+            item=SuggestionItem(
+                classification=suggestion.classification,
+                action=SuggestedAction.UPDATE_ACTOR,
+                confidence=1.0,
+                summary=summary,
+                action_data={"role": "recruiter"},
+            ),
+            reasoning="emitted by encore resolver",
+        )
+        logger.info(
+            "encore.resolver emitted UPDATE_ACTOR(recruiter) on loop=%s outcome=%s",
+            loop_id,
+            type(outcome).__name__,
+        )
 
     def _read_extraction(self, suggestion: Suggestion) -> CreateLoopExtraction:
         if not suggestion.action_data:
@@ -200,6 +286,30 @@ class CreateLoopResolver:
         if company:
             return f"{candidate_name}, {company}"
         return candidate_name
+
+
+def _format_encore_summary(outcome: ResolverOutcome, candidate_name: str) -> str:
+    """Deterministic summary string for the synthesized UPDATE_ACTOR card."""
+    if isinstance(outcome, AmbiguousRecruiters):
+        listed = "; ".join(
+            f"{c.display_name} (last activity {c.last_activity:%Y-%m-%d}, {c.genie_type})"
+            for c in outcome.candidates
+        )
+        return (
+            f"Encore returned {len(outcome.candidates)} possible recruiters for "
+            f"'{candidate_name}' in the last 12 months: {listed}. Pick the right one."
+        )
+    if isinstance(outcome, NoMatch):
+        return (
+            f"Encore lookup found no recent recruiter for '{candidate_name}' "
+            f"(reason: {outcome.reason}). Pick one manually."
+        )
+    if isinstance(outcome, EncoreLookupError):
+        return (
+            f"Encore lookup failed for '{candidate_name}' "
+            f"({outcome.exception_type}). Pick a recruiter manually."
+        )
+    return f"Pick a recruiter for '{candidate_name}'."
 
 
 # ---------------------------------------------------------------------------

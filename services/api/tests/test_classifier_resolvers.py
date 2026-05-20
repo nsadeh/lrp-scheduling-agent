@@ -1,7 +1,7 @@
 """Tests for the auto-resolver registry — CreateLoop, AdvanceStage, LinkThread, NoAction."""
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -21,6 +21,14 @@ from api.classifier.resolvers import (
     build_classifier_registry,
     build_registry,
     try_auto_resolve,
+)
+from api.encore import (
+    AmbiguousRecruiters,
+    EncoreLookupError,
+    NoMatch,
+    RecruiterCandidate,
+    Skipped,
+    UniqueRecruiter,
 )
 from api.scheduling.models import (
     Candidate,
@@ -124,11 +132,17 @@ class TestCreateLoopResolver:
         loop_service.find_or_create_client_contact = AsyncMock(return_value=MagicMock(id="cli_1"))
         loop_service.find_or_create_contact = AsyncMock(return_value=MagicMock(id="con_1"))
         loop_service.create_loop = AsyncMock(return_value=_loop())
+        loop_service.set_recruiter = AsyncMock()
         arq_pool = AsyncMock()
 
-        suggestion = _suggestion(SuggestedAction.CREATE_LOOP, action_data={"candidate_name": "X"})
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "X Y"},
+        )
         ctx = _ctx(loop_service, MagicMock(), arq_pool=arq_pool)
-        await CreateLoopResolver().resolve(suggestion, ctx)
+        stub = AsyncMock(return_value=Skipped(reason="single_word_name"))
+        with patch("api.classifier.resolvers.resolve_recruiter", new=stub):
+            await CreateLoopResolver().resolve(suggestion, ctx)
 
         arq_pool.enqueue_job.assert_awaited_once()
         args = arq_pool.enqueue_job.await_args.args
@@ -136,6 +150,246 @@ class TestCreateLoopResolver:
         assert args[1] == "coord@lrp.com"
         assert args[2] == "msg_1"
         assert args[3] == "thread_1"
+
+
+class TestCreateLoopResolverEncoreWiring:
+    """Phase 3: dispatch on resolve_recruiter outcomes, with ordering invariant."""
+
+    def _common_mocks(self):
+        loop_service = MagicMock()
+        loop_service.find_or_create_client_contact = AsyncMock(return_value=MagicMock(id="cli_1"))
+        loop_service.find_or_create_contact = AsyncMock(return_value=MagicMock(id="rec_1"))
+        loop_service.create_loop = AsyncMock(return_value=_loop(loop_id="lop_99"))
+        loop_service.set_recruiter = AsyncMock()
+        suggestion_service = MagicMock()
+        suggestion_service.create_suggestion = AsyncMock()
+        return loop_service, suggestion_service
+
+    @pytest.mark.asyncio
+    async def test_unique_outcome_sets_recruiter(self):
+        loop_service, suggestion_service = self._common_mocks()
+        outcome = UniqueRecruiter(email="dchen@lrp.com", display_name="Dana Chen", source="genie")
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Daniel Kim"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        loop_service.find_or_create_contact.assert_awaited_once_with(
+            name="Dana Chen", email="dchen@lrp.com", role="recruiter"
+        )
+        loop_service.set_recruiter.assert_awaited_once_with(
+            loop_id="lop_99",
+            recruiter_id="rec_1",
+            coordinator_email="coord@lrp.com",
+        )
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_outcome_emits_update_actor_with_summary(self):
+        loop_service, suggestion_service = self._common_mocks()
+        outcome = AmbiguousRecruiters(
+            candidates=[
+                RecruiterCandidate(
+                    email="a@lrp.com",
+                    display_name="Alice Andrews",
+                    last_activity=datetime(2026, 2, 10, tzinfo=UTC),
+                    genie_type="Submit to Client",
+                ),
+                RecruiterCandidate(
+                    email="b@lrp.com",
+                    display_name="Bob Boyle",
+                    last_activity=datetime(2026, 1, 4, tzinfo=UTC),
+                    genie_type="General Information",
+                ),
+            ]
+        )
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Daniel Kim"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        loop_service.set_recruiter.assert_not_called()
+        suggestion_service.create_suggestion.assert_awaited_once()
+        kwargs = suggestion_service.create_suggestion.await_args.kwargs
+        assert kwargs["loop_id"] == "lop_99"
+        item = kwargs["item"]
+        assert item.action == SuggestedAction.UPDATE_ACTOR
+        assert item.action_data == {"role": "recruiter"}
+        assert "Daniel Kim" in item.summary
+        assert "Alice Andrews" in item.summary
+        assert "Bob Boyle" in item.summary
+        assert "2026-02-10" in item.summary
+
+    @pytest.mark.asyncio
+    async def test_no_match_outcome_emits_short_update_actor(self):
+        loop_service, suggestion_service = self._common_mocks()
+        outcome = NoMatch(reason="no_genie_rows")
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Phantom Person"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        suggestion_service.create_suggestion.assert_awaited_once()
+        item = suggestion_service.create_suggestion.await_args.kwargs["item"]
+        assert item.action == SuggestedAction.UPDATE_ACTOR
+        assert "no_genie_rows" in item.summary
+        assert "Phantom Person" in item.summary
+
+    @pytest.mark.asyncio
+    async def test_lookup_error_outcome_emits_update_actor(self):
+        loop_service, suggestion_service = self._common_mocks()
+        outcome = EncoreLookupError(exception_type="OperationalError")
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Daniel Kim"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        suggestion_service.create_suggestion.assert_awaited_once()
+        item = suggestion_service.create_suggestion.await_args.kwargs["item"]
+        assert item.action == SuggestedAction.UPDATE_ACTOR
+        assert "OperationalError" in item.summary
+
+    @pytest.mark.asyncio
+    async def test_skipped_outcome_is_a_noop(self):
+        loop_service, suggestion_service = self._common_mocks()
+        outcome = Skipped(reason="coordinator_is_adam")
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Daniel Kim"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        loop_service.set_recruiter.assert_not_called()
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolver_skipped_when_llm_supplied_recruiter_email(self):
+        loop_service, suggestion_service = self._common_mocks()
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={
+                "candidate_name": "Daniel Kim",
+                "recruiter_email": "preset@lrp.com",
+                "recruiter_name": "Preset Recruiter",
+            },
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=AsyncMock())
+
+        spy = AsyncMock(return_value=Skipped(reason="coordinator_is_adam"))
+        with patch("api.classifier.resolvers.resolve_recruiter", new=spy):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        spy.assert_not_called()
+        loop_service.set_recruiter.assert_not_called()
+        suggestion_service.create_suggestion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolver_runs_before_enqueue_next_action(self):
+        """Ordering invariant: any side effect from the resolver must complete
+        BEFORE the next-action agent is enqueued, so the agent observes a
+        fully resolved loop (recruiter set or pending UPDATE_ACTOR)."""
+        loop_service, suggestion_service = self._common_mocks()
+        arq_pool = AsyncMock()
+
+        # Share a parent mock so call order across services is recorded together.
+        parent = MagicMock()
+        parent.attach_mock(loop_service.set_recruiter, "set_recruiter")
+        parent.attach_mock(arq_pool.enqueue_job, "enqueue_job")
+
+        outcome = UniqueRecruiter(email="dchen@lrp.com", display_name="Dana Chen", source="genie")
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Daniel Kim"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=arq_pool)
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        call_names = [c[0] for c in parent.mock_calls]
+        assert call_names.index("set_recruiter") < call_names.index("enqueue_job"), (
+            f"Resolver-emitted side effect must come before enqueue_next_action; "
+            f"got order: {call_names}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolver_emit_runs_before_enqueue_on_ambiguous(self):
+        loop_service, suggestion_service = self._common_mocks()
+        arq_pool = AsyncMock()
+
+        parent = MagicMock()
+        parent.attach_mock(suggestion_service.create_suggestion, "create_suggestion")
+        parent.attach_mock(arq_pool.enqueue_job, "enqueue_job")
+
+        outcome = AmbiguousRecruiters(
+            candidates=[
+                RecruiterCandidate(
+                    email="a@lrp.com",
+                    display_name="A",
+                    last_activity=datetime(2026, 2, 10, tzinfo=UTC),
+                    genie_type="General Information",
+                ),
+                RecruiterCandidate(
+                    email="b@lrp.com",
+                    display_name="B",
+                    last_activity=datetime(2026, 1, 1, tzinfo=UTC),
+                    genie_type="General Information",
+                ),
+            ]
+        )
+        suggestion = _suggestion(
+            SuggestedAction.CREATE_LOOP,
+            action_data={"candidate_name": "Daniel Kim"},
+        )
+        ctx = _ctx(loop_service, suggestion_service, arq_pool=arq_pool)
+
+        with patch(
+            "api.classifier.resolvers.resolve_recruiter",
+            new=AsyncMock(return_value=outcome),
+        ):
+            await CreateLoopResolver().resolve(suggestion, ctx)
+
+        call_names = [c[0] for c in parent.mock_calls]
+        assert call_names.index("create_suggestion") < call_names.index(
+            "enqueue_job"
+        ), f"UPDATE_ACTOR emit must precede enqueue_next_action; got: {call_names}"
 
 
 class TestAdvanceStageResolver:
