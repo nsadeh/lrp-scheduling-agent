@@ -174,6 +174,46 @@ All LLM calls are routed through OpenRouter (https://openrouter.ai) — a single
 
 ---
 
+## Encore (Cluein ATS — MS SQL)
+
+Read-only MS SQL access to LRP's Encore ATS for the recruiter-resolution path
+that runs after every loop creation. See
+[rfcs/rfc-encore-recruiter-resolution.md](rfc-encore-recruiter-resolution.md).
+
+### `ENCORE_MSSQL_HOST`
+- **Purpose**: MS SQL Server host for the Encore tenant.
+- **Status**: To be set in Railway.
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
+
+### `ENCORE_MSSQL_PORT`
+- **Purpose**: MS SQL Server port.
+- **Status**: Code-default.
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
+- **Default fallback**: `1433`.
+
+### `ENCORE_MSSQL_DATABASE`
+- **Purpose**: MS SQL database name for the Encore tenant.
+- **Status**: To be set in Railway.
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
+
+### `ENCORE_MSSQL_USER`
+- **Purpose**: MS SQL read-only user. DBA-enforced read-only; the codebase contains no write SQL against Encore.
+- **Status**: To be set in Railway.
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
+
+### `ENCORE_MSSQL_PASSWORD`
+- **Purpose**: MS SQL password matching `ENCORE_MSSQL_USER`.
+- **Status**: To be set in Railway.
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
+
+### `ENCORE_MSSQL_QUERY_TIMEOUT_SECONDS`
+- **Purpose**: Hard cap on individual MSSQL query duration. Caps classifier latency overhead in the worst case.
+- **Status**: Code-default.
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
+- **Default fallback**: `5`.
+
+---
+
 ## Scheduling domain
 
 ### `INTERNAL_EMAIL_DOMAINS`

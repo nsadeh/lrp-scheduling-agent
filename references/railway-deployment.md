@@ -266,6 +266,32 @@ If the worker misbehaves:
 
 ---
 
+## Encore (Cluein ATS) MS SQL credentials
+
+Required on **both** the `api` and `arq-worker` services (the worker
+classifies email, which is where `resolve_recruiter` runs). LRP's DBA
+provisions the read-only login; copy the connection details into Railway
+when they hand off.
+
+| Variable | Notes |
+|---|---|
+| `ENCORE_MSSQL_HOST` | MSSQL Server hostname |
+| `ENCORE_MSSQL_PORT` | Optional, defaults to `1433` |
+| `ENCORE_MSSQL_DATABASE` | Encore tenant DB name |
+| `ENCORE_MSSQL_USER` | Read-only login (DBA-enforced — no write privileges) |
+| `ENCORE_MSSQL_PASSWORD` | Matching password |
+| `ENCORE_MSSQL_QUERY_TIMEOUT_SECONDS` | Optional, defaults to `5` |
+
+**Rollback**: there is no env-var kill switch. To disable the integration
+in an incident, unset (or scramble) `ENCORE_MSSQL_PASSWORD` on the
+`arq-worker` service and redeploy — the connection opener hard-fails and
+the resolver returns `EncoreLookupError`, which lands in Sentry and
+emits a manual `UPDATE_ACTOR(recruiter)` for the coordinator (the status
+quo path). For a permanent revert, revert the wiring commit on
+`feat/encore-recruiter-resolution` and redeploy.
+
+---
+
 ## Ongoing operations
 
 - **Regular deploys**: `./scripts/deploy.sh staging` or `./scripts/deploy.sh production` — deploys api then worker in order and refreshes the GCP add-on descriptor. Accepts `api` or `worker` as a second arg to deploy just one side.
