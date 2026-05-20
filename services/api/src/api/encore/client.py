@@ -4,9 +4,6 @@ Single shared connection per process, opened lazily on first use. pymssql
 connections are not coroutine-safe, so callers wrap `with_cursor` in
 `asyncio.to_thread` and a `threading.Lock` serializes cursor access. Reset
 on OperationalError so transient network blips don't kill the worker.
-
-Kill switch: `ENCORE_RESOLVER_ENABLED=false` makes `is_enabled()` return
-False; the resolver short-circuits without ever touching pymssql.
 """
 
 from __future__ import annotations
@@ -28,11 +25,6 @@ _DEFAULT_TIMEOUT = 5
 
 _lock = threading.Lock()
 _conn: pymssql.Connection | None = None
-
-
-def is_enabled() -> bool:
-    """True unless the kill switch is set to a falsy value."""
-    return os.environ.get("ENCORE_RESOLVER_ENABLED", "true").lower() not in {"false", "0", "no"}
 
 
 def query_timeout_seconds() -> int:

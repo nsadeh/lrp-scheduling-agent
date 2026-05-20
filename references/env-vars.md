@@ -180,42 +180,36 @@ Read-only MS SQL access to LRP's Encore ATS for the recruiter-resolution path
 that runs after every loop creation. See
 [rfcs/rfc-encore-recruiter-resolution.md](rfc-encore-recruiter-resolution.md).
 
-### `ENCORE_RESOLVER_ENABLED`
-- **Purpose**: Kill switch. When falsy (`false`/`0`/`no`), the resolver short-circuits and never connects to MSSQL. Defaults to enabled.
-- **Status**: Code-default (planned to be set in Railway staging first).
-- **Read in**: [api/encore/client.py:34](../services/api/src/api/encore/client.py:34).
-- **Default fallback**: `true`.
-
 ### `ENCORE_MSSQL_HOST`
 - **Purpose**: MS SQL Server host for the Encore tenant.
 - **Status**: To be set in Railway.
-- **Read in**: [api/encore/client.py:46](../services/api/src/api/encore/client.py:46).
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
 
 ### `ENCORE_MSSQL_PORT`
 - **Purpose**: MS SQL Server port.
 - **Status**: Code-default.
-- **Read in**: [api/encore/client.py:56](../services/api/src/api/encore/client.py:56).
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
 - **Default fallback**: `1433`.
 
 ### `ENCORE_MSSQL_DATABASE`
 - **Purpose**: MS SQL database name for the Encore tenant.
 - **Status**: To be set in Railway.
-- **Read in**: [api/encore/client.py:47](../services/api/src/api/encore/client.py:47).
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
 
 ### `ENCORE_MSSQL_USER`
 - **Purpose**: MS SQL read-only user. DBA-enforced read-only; the codebase contains no write SQL against Encore.
 - **Status**: To be set in Railway.
-- **Read in**: [api/encore/client.py:48](../services/api/src/api/encore/client.py:48).
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
 
 ### `ENCORE_MSSQL_PASSWORD`
 - **Purpose**: MS SQL password matching `ENCORE_MSSQL_USER`.
 - **Status**: To be set in Railway.
-- **Read in**: [api/encore/client.py:49](../services/api/src/api/encore/client.py:49).
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
 
 ### `ENCORE_MSSQL_QUERY_TIMEOUT_SECONDS`
 - **Purpose**: Hard cap on individual MSSQL query duration. Caps classifier latency overhead in the worst case.
 - **Status**: Code-default.
-- **Read in**: [api/encore/client.py:39](../services/api/src/api/encore/client.py:39).
+- **Read in**: [api/encore/client.py](../services/api/src/api/encore/client.py).
 - **Default fallback**: `5`.
 
 ---

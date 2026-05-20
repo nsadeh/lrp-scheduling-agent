@@ -63,19 +63,15 @@ async def resolve_recruiter(
     """Resolve the recruiter for a candidate via Encore Genie history.
 
     Branches (in order):
-    1. Kill switch off → Skipped("resolver_disabled")
-    2. Coordinator is Adam → Skipped("coordinator_is_adam")
-    3. Single-word candidate name → Skipped("single_word_name")
-    4. Primary query fails → EncoreLookupError + sentry
-    5. 0 raw rows → NoMatch("no_genie_rows")
-    6. 0 non-coordinator rows + coordinator is Ana → Ana initials fallback
-    7. 0 non-coordinator rows + coordinator is not Ana → NoMatch("no_non_coordinator")
-    8. 1 distinct non-coordinator recruiter → UniqueRecruiter (coordinator-guard checked)
-    9. 2+ distinct → AmbiguousRecruiters (top 5 by recency)
+    1. Coordinator is Adam → Skipped("coordinator_is_adam")
+    2. Single-word candidate name → Skipped("single_word_name")
+    3. Primary query fails → EncoreLookupError + sentry
+    4. 0 raw rows → NoMatch("no_genie_rows")
+    5. 0 non-coordinator rows + coordinator is Ana → Ana initials fallback
+    6. 0 non-coordinator rows + coordinator is not Ana → NoMatch("no_non_coordinator")
+    7. 1 distinct non-coordinator recruiter → UniqueRecruiter (coordinator-guard checked)
+    8. 2+ distinct → AmbiguousRecruiters (top 5 by recency)
     """
-    if not client.is_enabled():
-        return Skipped(reason="resolver_disabled")
-
     if coordinator_email == ADAM_EMAIL:
         logger.info("encore.resolve_recruiter skipped — coordinator is Adam")
         return Skipped(reason="coordinator_is_adam")
@@ -161,7 +157,8 @@ async def _ana_fallback(rows: list[_Row]) -> ResolverOutcome:
 
     latest = max(ana_rows, key=lambda r: r.time_entered)
     match = _INITIALS_RE.match(latest.genie_notes or "")
-    if not match:
+    initials = match.group(1) if match else None
+    if not initials:
         logger.warning(
             "encore.ana_fallback notes format drift — could not parse initials from %r",
             (latest.genie_notes or "")[:80],
@@ -171,8 +168,6 @@ async def _ana_fallback(rows: list[_Row]) -> ResolverOutcome:
             level="warning",
         )
         return NoMatch(reason="ana_parse_failed")
-
-    initials = match.group(1)
 
     try:
         lookup_rows = await asyncio.to_thread(

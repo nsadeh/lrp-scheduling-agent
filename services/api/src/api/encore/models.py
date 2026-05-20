@@ -52,7 +52,7 @@ class NoMatch:
 class Skipped:
     """Resolver did not run. Coordinator-driven gate, not a query failure."""
 
-    reason: Literal["coordinator_is_adam", "single_word_name", "resolver_disabled"]
+    reason: Literal["coordinator_is_adam", "single_word_name"]
 
 
 @dataclass(frozen=True)

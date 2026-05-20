@@ -16,7 +16,6 @@ def _reset_module_state(monkeypatch):
     """Clear singleton + env so each test starts clean."""
     encore_client._conn = None
     for var in (
-        "ENCORE_RESOLVER_ENABLED",
         "ENCORE_MSSQL_HOST",
         "ENCORE_MSSQL_PORT",
         "ENCORE_MSSQL_DATABASE",
@@ -27,21 +26,6 @@ def _reset_module_state(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     yield
     encore_client._conn = None
-
-
-class TestKillSwitch:
-    def test_enabled_by_default(self):
-        assert encore_client.is_enabled() is True
-
-    @pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "No"])
-    def test_disabled_when_set_to_falsy(self, monkeypatch, value):
-        monkeypatch.setenv("ENCORE_RESOLVER_ENABLED", value)
-        assert encore_client.is_enabled() is False
-
-    @pytest.mark.parametrize("value", ["true", "1", "yes", "anything-else"])
-    def test_enabled_for_truthy_and_unrecognized(self, monkeypatch, value):
-        monkeypatch.setenv("ENCORE_RESOLVER_ENABLED", value)
-        assert encore_client.is_enabled() is True
 
 
 class TestQueryTimeout:

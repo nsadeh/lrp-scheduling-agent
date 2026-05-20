@@ -55,9 +55,7 @@ def _row(
 
 
 @pytest.fixture(autouse=True)
-def _enable_resolver(monkeypatch):
-    """Default: resolver enabled. Individual tests can disable it."""
-    monkeypatch.delenv("ENCORE_RESOLVER_ENABLED", raising=False)
+def _reset_connection():
     encore_client._conn = None
     yield
     encore_client._conn = None
@@ -88,14 +86,6 @@ def _patch_raise(exc: Exception):
 
 
 class TestResolverGates:
-    @pytest.mark.asyncio
-    async def test_kill_switch_short_circuits(self, monkeypatch):
-        monkeypatch.setenv("ENCORE_RESOLVER_ENABLED", "false")
-        with _patch_rows([]):
-            outcome = await resolve_recruiter("Daniel Kim", NOW, FIONA_EMAIL)
-        assert isinstance(outcome, Skipped)
-        assert outcome.reason == "resolver_disabled"
-
     @pytest.mark.asyncio
     async def test_adam_coordinator_skipped_without_sql_call(self):
         with patch.object(encore_client, "with_cursor") as spy:
