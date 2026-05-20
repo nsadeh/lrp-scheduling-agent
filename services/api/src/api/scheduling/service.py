@@ -143,7 +143,9 @@ class LoopService:
         self, name: str, email: str, company: str | None = None
     ) -> ClientContact:
         async with self._pool.connection() as conn, conn.transaction():
-            existing = await queries.get_client_contact_by_email(conn, email=email)
+            existing = await queries.get_client_contact_by_email_and_company(
+                conn, email=email, company=company
+            )
             if existing is not None:
                 return _row_to_client_contact(existing)
             row = await queries.create_client_contact(
@@ -158,9 +160,13 @@ class LoopService:
                 return None
             return _row_to_contact(row)
 
-    async def get_client_contact_by_email(self, email: str) -> ClientContact | None:
+    async def get_client_contact_by_email_and_company(
+        self, email: str, company: str | None
+    ) -> ClientContact | None:
         async with self._pool.connection() as conn:
-            row = await queries.get_client_contact_by_email(conn, email=email)
+            row = await queries.get_client_contact_by_email_and_company(
+                conn, email=email, company=company
+            )
             if row is None:
                 return None
             return _row_to_client_contact(row)

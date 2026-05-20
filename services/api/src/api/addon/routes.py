@@ -970,13 +970,16 @@ async def _handle_show_create_form(body: AddonRequest, svc: LoopService, email: 
             prefill = _merge_prefill(deterministic=prefill, extracted=extracted)
             banner = _CREATE_LOOP_BANNER
 
-    # If a pre-filled email matches an existing contact, prefer the stored
-    # name/company so the form shows what will actually be persisted on
-    # submit — the dedup logic in find_or_create_contact keeps the stored
-    # row untouched, so showing the classifier-suggested name here would
-    # mislead the coordinator.
+    # If a pre-filled email+company matches an existing contact, prefer the
+    # stored name so the form shows what will actually be persisted on submit
+    # — find_or_create_client_contact dedups on (email, company) and keeps the
+    # stored row untouched. Scoping by company too means a shared/system sender
+    # (e.g. no-reply@greenhouse.io) reused across clients no longer pulls a
+    # stale, unrelated client's name/company onto this form.
     if prefill.client_email:
-        existing_client = await svc.get_client_contact_by_email(prefill.client_email)
+        existing_client = await svc.get_client_contact_by_email_and_company(
+            prefill.client_email, prefill.client_company
+        )
         if existing_client is not None:
             prefill.client_name = existing_client.name
             if existing_client.company:
