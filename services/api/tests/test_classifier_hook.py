@@ -489,6 +489,45 @@ class TestAgentGuardrails:
         assert result.action == SuggestedAction.DRAFT_EMAIL
         assert error is None
 
+    def test_draft_email_placeholder_fails(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.DRAFT_EMAIL,
+            action_data={
+                "body": "Hi [Recruiter name], here are the times.",
+                "recipient_type": "recruiter",
+            },
+        )
+        _result, error = agent._apply_guardrails(item, set())
+        assert error is not None
+        assert "placeholder" in error.lower()
+
+    def test_draft_email_bracketed_token_anywhere_fails(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.DRAFT_EMAIL,
+            action_data={
+                "body": "Confirming the [DATE] slot works.",
+                "recipient_type": "recruiter",
+            },
+        )
+        _result, error = agent._apply_guardrails(item, set())
+        assert error is not None
+        assert "placeholder" in error.lower()
+
+    def test_draft_email_clean_body_passes(self):
+        agent, _ = _make_agent()
+        item = _suggestion_item(
+            action=SuggestedAction.DRAFT_EMAIL,
+            action_data={
+                "body": "Hi Sarah, can you confirm Tuesday 2pm ET?",
+                "recipient_type": "recruiter",
+            },
+        )
+        result, error = agent._apply_guardrails(item, set())
+        assert error is None
+        assert result.action == SuggestedAction.DRAFT_EMAIL
+
     def test_missing_target_loop_id_fails(self):
         agent, _ = _make_agent()
         item = _suggestion_item(action=SuggestedAction.DRAFT_EMAIL, target_loop_id=None)
