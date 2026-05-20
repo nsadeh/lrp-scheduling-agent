@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
@@ -67,6 +68,13 @@ if TYPE_CHECKING:
     from api.scheduling.service import LoopService
 
 logger = logging.getLogger(__name__)
+
+# Matches any non-empty bracketed token in a draft body (e.g. "[Recruiter name]",
+# "[DATE]"). Prompt forbids placeholders; this guards the ~1% that slip through.
+# `\n` is excluded so stray brackets on separate lines can't get matched as one
+# giant span.
+_PLACEHOLDER_RE = re.compile(r"\[[^\]\n]+\]")
+
 
 _AGENT_ALLOWED_ACTIONS = frozenset(
     {
@@ -716,6 +724,15 @@ class NextActionAgent:
             model_cls.model_validate(item.action_data)
         except ValidationError as e:
             return item, f"action_data for '{item.action}' is invalid: {e}"
+
+        if item.action == SuggestedAction.DRAFT_EMAIL:
+            body = item.action_data.get("body", "")
+            if _PLACEHOLDER_RE.search(body):
+                return item, (
+                    "I detected a placeholder in the draft message. "
+                    "Placeholders are not permitted in draft messages. "
+                    "Please re-draft."
+                )
 
         if not item.target_loop_id:
             return item, (
