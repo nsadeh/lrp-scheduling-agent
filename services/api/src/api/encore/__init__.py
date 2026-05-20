@@ -16,6 +16,7 @@ from api.encore.models import (
     Skipped,
     UniqueRecruiter,
 )
+from api.encore.resolver import resolve_recruiter
 
 __all__ = [
     "AmbiguousRecruiters",
@@ -25,4 +26,5 @@ __all__ = [
     "ResolverOutcome",
     "Skipped",
     "UniqueRecruiter",
+    "resolve_recruiter",
 ]
