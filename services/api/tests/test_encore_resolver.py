@@ -1,7 +1,7 @@
 """Tests for the deterministic Encore recruiter resolver.
 
 Covers the 12 scenarios listed in rfcs/rfc-encore-recruiter-resolution.md
-§Test Scenarios. The MS SQL layer is patched at `client.with_cursor` so
+§Test Scenarios. The MS SQL layer is patched at `client.with_connection` so
 tests run without a live database; each test passes the row payloads the
 resolver would have read from Encore.
 """
@@ -62,33 +62,33 @@ def _reset_connection():
 
 
 def _patch_rows(*row_batches: list[dict]):
-    """Patch `client.with_cursor` so successive calls return successive batches.
+    """Patch `client.with_connection` so successive calls return successive batches.
 
-    The resolver calls with_cursor once for the primary query, and a second
+    The resolver calls with_connection once for the primary query, and a second
     time for the Ana initials lookup. Tests pass one batch for the primary
     only, or two batches when expecting the fallback to fire.
     """
     iterator = iter(row_batches)
 
-    def fake_with_cursor(fn):
+    def fake_with_connection(fn):
         # The lambda passed in calls queries.get_*; we ignore it and return
         # the next pre-baked batch directly.
         return next(iterator)
 
-    return patch.object(encore_client, "with_cursor", side_effect=fake_with_cursor)
+    return patch.object(encore_client, "with_connection", side_effect=fake_with_connection)
 
 
 def _patch_raise(exc: Exception):
     def boom(_fn):
         raise exc
 
-    return patch.object(encore_client, "with_cursor", side_effect=boom)
+    return patch.object(encore_client, "with_connection", side_effect=boom)
 
 
 class TestResolverGates:
     @pytest.mark.asyncio
     async def test_adam_coordinator_skipped_without_sql_call(self):
-        with patch.object(encore_client, "with_cursor") as spy:
+        with patch.object(encore_client, "with_connection") as spy:
             outcome = await resolve_recruiter("Daniel Kim", NOW, ADAM_EMAIL)
         assert isinstance(outcome, Skipped)
         assert outcome.reason == "coordinator_is_adam"
@@ -97,7 +97,7 @@ class TestResolverGates:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", ["Daniel", "", "   "])
     async def test_single_word_name_skipped(self, name):
-        with patch.object(encore_client, "with_cursor") as spy:
+        with patch.object(encore_client, "with_connection") as spy:
             outcome = await resolve_recruiter(name, NOW, FIONA_EMAIL)
         assert isinstance(outcome, Skipped)
         assert outcome.reason == "single_word_name"
@@ -290,23 +290,23 @@ class TestPrefixMatching:
         """The classifier-extracted name lands in the SQL params verbatim + '%'."""
         captured: dict = {}
 
-        def fake_with_cursor(fn):
+        def fake_with_connection(fn):
             # fn is the lambda that calls queries.get_recent_candidate_activity.
-            # Substitute a fake cursor that captures the kwargs the query was called with.
-            class FakeCur:
+            # Substitute a fake connection that captures the kwargs the query was called with.
+            class FakeConn:
                 def __init__(self):
                     self.captured = captured
 
-            cur = FakeCur()
+            conn = FakeConn()
             from api.encore import queries as q_mod
 
             with patch.object(q_mod.queries, "get_recent_candidate_activity") as mock_q:
                 mock_q.return_value = []
-                fn(cur)
+                fn(conn)
                 captured.update(mock_q.call_args.kwargs)
             return []
 
-        with patch.object(encore_client, "with_cursor", side_effect=fake_with_cursor):
+        with patch.object(encore_client, "with_connection", side_effect=fake_with_connection):
             await resolve_recruiter("Dan Smith", NOW, FIONA_EMAIL)
 
         assert captured["last_name"] == "Smith"
