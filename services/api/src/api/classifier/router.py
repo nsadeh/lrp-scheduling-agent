@@ -144,19 +144,4 @@ class EmailRouter:
             )
             return
 
-        # 4. Off-thread filter — the coordinator (watched-mailbox owner) is not
-        # addressed on the trigger message. The message arrived via mailbox-level
-        # forwarding (personal Gmail filter or Workspace routing) and must not
-        # create a new scheduling loop. Logged at INFO to keep a baseline metric
-        # of how often the rule fires without a separate metric pipeline.
-        if not _coordinator_on_trigger(msg, event.coordinator_email):
-            logger.info(
-                "skipping off-thread message id=%s thread=%s coordinator=%s from=%s",
-                msg.id,
-                msg.thread_id,
-                event.coordinator_email,
-                msg.from_.email,
-            )
-            return
-
         await self._classifier.classify(event, arq_pool=arq_pool)
