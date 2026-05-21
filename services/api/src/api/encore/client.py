@@ -1,9 +1,10 @@
 """pymssql connection lifecycle for the Encore resolver.
 
 Single shared connection per process, opened lazily on first use. pymssql
-connections are not coroutine-safe, so callers wrap `with_cursor` in
-`asyncio.to_thread` and a `threading.Lock` serializes cursor access. Reset
-on OperationalError so transient network blips don't kill the worker.
+connections are not coroutine-safe, so callers wrap `with_connection` in
+`asyncio.to_thread` and a `threading.Lock` serializes access. The callback
+receives the connection — aiosql opens and closes its own cursor inside.
+Reset on OperationalError so transient network blips don't kill the worker.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pymssql
 
@@ -71,19 +72,20 @@ def _reset_connection() -> None:
     _conn = None
 
 
-def with_cursor[T](fn: Callable[[Any], T]) -> T:
-    """Run a sync callable with a pymssql cursor under the module lock.
+def with_connection[T](fn: Callable[[pymssql.Connection], T]) -> T:
+    """Run a sync callable with the shared pymssql connection under the module lock.
 
-    Wrap this in `asyncio.to_thread` from the caller. On OperationalError
-    we reset the connection so the next call reconnects cleanly.
+    Wrap this in `asyncio.to_thread` from the caller. The callback receives the
+    connection itself — aiosql query helpers expect a connection and open/close
+    their own cursor internally. On OperationalError we reset the connection so
+    the next call reconnects cleanly.
     """
     global _conn
     with _lock:
         if _conn is None:
             _conn = _open_connection()
         try:
-            with _conn.cursor() as cur:
-                return fn(cur)
+            return fn(_conn)
         except pymssql.OperationalError:
             _reset_connection()
             raise

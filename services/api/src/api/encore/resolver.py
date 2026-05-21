@@ -86,10 +86,10 @@ async def resolve_recruiter(
 
     try:
         raw_rows = await asyncio.to_thread(
-            client.with_cursor,
-            lambda cur: list(
+            client.with_connection,
+            lambda conn: list(
                 queries.get_recent_candidate_activity(
-                    cur,
+                    conn,
                     last_name=last_name,
                     first_name_like=f"{first_name}%",
                     cutoff=cutoff,
@@ -171,8 +171,8 @@ async def _ana_fallback(rows: list[_Row]) -> ResolverOutcome:
 
     try:
         lookup_rows = await asyncio.to_thread(
-            client.with_cursor,
-            lambda cur: list(queries.get_email_for_login(cur, initials=initials)),
+            client.with_connection,
+            lambda conn: list(queries.get_email_for_login(conn, initials=initials)),
         )
     except (pymssql.OperationalError, pymssql.DatabaseError, TimeoutError) as exc:
         logger.exception("encore.ana_fallback MSSQL failure on initials lookup")
