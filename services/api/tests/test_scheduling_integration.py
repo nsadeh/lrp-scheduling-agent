@@ -39,10 +39,8 @@ async def cleanup(pool):
     async with pool.connection() as conn:
         await conn.execute("DELETE FROM email_drafts")
         await conn.execute("DELETE FROM agent_suggestions")
-        await conn.execute("DELETE FROM time_slots")
         await conn.execute("DELETE FROM loop_email_threads")
         await conn.execute("DELETE FROM loop_events")
-        await conn.execute("DELETE FROM stages")
         await conn.execute("DELETE FROM loops")
         await conn.execute("DELETE FROM candidates")
         await conn.execute("DELETE FROM contacts")
@@ -184,14 +182,14 @@ class TestContacts:
         b = await svc.find_or_create_contact(name="Bob", email="bob@lrp.com", role="recruiter")
         assert a.id != b.id
 
-    async def test_find_or_create_client_contact_reuses_existing_by_email(
+    async def test_find_or_create_client_contact_reuses_on_same_email_and_company(
         self, svc: LoopService, pool
     ):
         first = await svc.find_or_create_client_contact(
             name="Jane Doe", email="jane@acme.com", company="Acme"
         )
         second = await svc.find_or_create_client_contact(
-            name="Jane D.", email="jane@acme.com", company="Different Co"
+            name="Jane D.", email="jane@acme.com", company="Acme"
         )
         assert second.id == first.id
         assert second.name == "Jane Doe"
@@ -206,6 +204,42 @@ class TestContacts:
             ).fetchone()
         assert row[0] == 1
 
+    async def test_shared_sender_with_different_company_creates_distinct_contacts(
+        self, svc: LoopService, pool
+    ):
+        # Regression: a shared/system sender (no-reply@greenhouse.io) reused
+        # across different clients must NOT collapse into one identity.
+        # Previously the second call reused the Tower row and the loop was
+        # silently attributed to the wrong client.
+        tower = await svc.find_or_create_client_contact(
+            name="Tower Research Capital LLC",
+            email="no-reply@greenhouse.io",
+            company="Tower Research Capital LLC",
+        )
+        marshall = await svc.find_or_create_client_contact(
+            name="Marshall Wace",
+            email="no-reply@greenhouse.io",
+            company="Marshall Wace",
+        )
+        assert marshall.id != tower.id
+        assert marshall.company == "Marshall Wace"
+
+        again = await svc.find_or_create_client_contact(
+            name="Marshall Wace LLP",
+            email="no-reply@greenhouse.io",
+            company="Marshall Wace",
+        )
+        assert again.id == marshall.id
+
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT count(*) FROM client_contacts WHERE email = %s",
+                    ("no-reply@greenhouse.io",),
+                )
+            ).fetchone()
+        assert row[0] == 2
+
     async def test_get_contact_by_email(self, svc: LoopService):
         created = await svc.find_or_create_contact(
             name="Alice", email="alice@lrp.com", role="recruiter"
@@ -219,14 +253,19 @@ class TestContacts:
         # Unknown email — no match.
         assert await svc.get_contact_by_email("nobody@lrp.com", role="recruiter") is None
 
-    async def test_get_client_contact_by_email(self, svc: LoopService):
+    async def test_get_client_contact_by_email_and_company(self, svc: LoopService):
         created = await svc.find_or_create_client_contact(
             name="Jane", email="jane@acme.com", company="Acme"
         )
-        found = await svc.get_client_contact_by_email("jane@acme.com")
+        found = await svc.get_client_contact_by_email_and_company("jane@acme.com", "Acme")
         assert found is not None
         assert found.id == created.id
-        assert await svc.get_client_contact_by_email("nobody@acme.com") is None
+        # Same email, different company - not a match.
+        assert (
+            await svc.get_client_contact_by_email_and_company("jane@acme.com", "Other Co") is None
+        )
+        # Unknown email - not a match.
+        assert await svc.get_client_contact_by_email_and_company("nobody@acme.com", "Acme") is None
 
 
 class TestCreateLoop:

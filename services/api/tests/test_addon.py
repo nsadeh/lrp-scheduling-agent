@@ -26,7 +26,7 @@ def mock_scheduling():
     # Default to "no existing contact" so the pre-fill override is a no-op
     # unless a test explicitly overrides these.
     svc.get_contact_by_email = AsyncMock(return_value=None)
-    svc.get_client_contact_by_email = AsyncMock(return_value=None)
+    svc.get_client_contact_by_email_and_company = AsyncMock(return_value=None)
     return svc
 
 
@@ -145,7 +145,7 @@ class TestAction:
             company=None,
             created_at=datetime.now(UTC),
         )
-        mock_scheduling.get_client_contact_by_email.return_value = ClientContact(
+        mock_scheduling.get_client_contact_by_email_and_company.return_value = ClientContact(
             id="cli_test",
             name="Jane Doe",
             email="jane@acme.com",
