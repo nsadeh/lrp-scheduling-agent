@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from api.gmail.models import Message, Thread
-from api.gmail.workers import _process_history
+from api.gmail.workers import _process_history, run_next_action_agent
 
 
 def _make_message(msg_id: str, *, labels: list[str], thread_id: str = "thread1") -> Message:
@@ -155,3 +155,38 @@ async def test_normal_sent_message_processes(_mock_queries):
     await _process_history(ctx, "adam@longridgepartners.com", "100")
 
     router.on_email.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_next_action_explicit_draft_id_falls_back():
+    """An explicit gmail_message_id pointing at a draft must not be the trigger.
+
+    Falls back to the latest non-draft message in the thread.
+    """
+    ctx, gmail, _token_store, router = _build_ctx()
+    gmail.get_message.return_value = _make_message("draft1", labels=["DRAFT"])
+    gmail.get_thread.return_value = Thread(
+        id="thread1", messages=[_make_message("sent1", labels=["SENT"])]
+    )
+
+    await run_next_action_agent(ctx, "adam@longridgepartners.com", "draft1", "thread1")
+
+    router.on_email.assert_awaited_once()
+    triggered = router.on_email.await_args.args[0]
+    assert triggered.message.id == "sent1"
+
+
+@pytest.mark.asyncio
+async def test_next_action_explicit_nondraft_id_used():
+    """A non-draft explicit gmail_message_id is used directly as the trigger."""
+    ctx, gmail, _token_store, router = _build_ctx()
+    gmail.get_message.return_value = _make_message("sent1", labels=["SENT"])
+    gmail.get_thread.return_value = Thread(
+        id="thread1", messages=[_make_message("sent1", labels=["SENT"])]
+    )
+
+    await run_next_action_agent(ctx, "adam@longridgepartners.com", "sent1", "thread1")
+
+    router.on_email.assert_awaited_once()
+    triggered = router.on_email.await_args.args[0]
+    assert triggered.message.id == "sent1"

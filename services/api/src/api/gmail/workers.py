@@ -427,9 +427,15 @@ async def run_next_action_agent(
     gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
+        message = None
         if gmail_message_id:
-            message = await gmail.get_message(coordinator_email, gmail_message_id)
-        else:
+            fetched = await gmail.get_message(coordinator_email, gmail_message_id)
+            # The explicit id can point at a draft (e.g. the addon creating a
+            # loop while the coordinator's own reply is still an open draft).
+            # Never let a draft be the trigger — fall back to the thread.
+            if DRAFT_LABEL not in fetched.label_ids:
+                message = fetched
+        if message is None:
             thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
             message = _latest_non_draft(thread.messages)
             if message is None:
