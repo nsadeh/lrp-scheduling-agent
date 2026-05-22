@@ -34,6 +34,12 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "")
 DEBOUNCE_TTL = 60  # seconds
 
+# Gmail fires messageAdded history events for draft auto-saves, not just
+# sent/received mail. A draft is a half-typed message with this label; the
+# agent must never process one — it would run on partial bodies. The final
+# sent message arrives later as its own messageAdded event with the full body.
+DRAFT_LABEL = "DRAFT"
+
 
 async def startup(ctx: dict) -> None:
     """Initialize shared resources for all worker jobs.
@@ -234,6 +240,19 @@ async def cleanup_processed_messages(ctx: dict) -> None:
 # --- Internal helpers ---
 
 
+def _latest_non_draft(messages: list) -> object | None:
+    """Return the most recent message that isn't a draft, or None.
+
+    Thread fetches can include the coordinator's in-progress draft as the last
+    message. Acting on a draft means running on a half-typed body, so we pick
+    the latest real message instead.
+    """
+    for msg in reversed(messages):
+        if DRAFT_LABEL not in msg.label_ids:
+            return msg
+    return None
+
+
 async def _establish_baseline(ctx: dict, coordinator_email: str) -> None:
     """Set the initial history cursor for a coordinator without processing old emails."""
     gmail: GmailClient = ctx["gmail"]
@@ -280,13 +299,20 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
         await _establish_baseline(ctx, coordinator_email)
         return
 
-    # Extract new message IDs from history
+    # Extract new message IDs from history, skipping drafts. The history
+    # stub carries labelIds, so we can drop draft auto-saves without fetching
+    # them — and crucially without marking their IDs processed.
     new_message_ids: list[str] = []
     for entry in history_response.get("history", []):
         for msg_added in entry.get("messagesAdded", []):
-            msg_id = msg_added.get("message", {}).get("id")
-            if msg_id:
-                new_message_ids.append(msg_id)
+            msg = msg_added.get("message", {})
+            msg_id = msg.get("id")
+            if not msg_id:
+                continue
+            if DRAFT_LABEL in msg.get("labelIds", []):
+                logger.debug("skipping draft message %s for %s", msg_id, coordinator_email)
+                continue
+            new_message_ids.append(msg_id)
 
     if not new_message_ids:
         # Advance cursor even if no new messages
@@ -325,6 +351,13 @@ async def _process_history(ctx: dict, coordinator_email: str, start_history_id: 
         try:
             # Fetch full message
             message = await gmail.get_message(coordinator_email, msg_id)
+
+            # Backstop: drop drafts whose history stub lacked labelIds.
+            if DRAFT_LABEL in message.label_ids:
+                logger.info(
+                    "skipping draft message %s post-fetch for %s", msg_id, coordinator_email
+                )
+                continue
 
             # Fetch thread for forward detection (cached per thread)
             thread_id = message.thread_id
@@ -394,14 +427,23 @@ async def run_next_action_agent(
     gen_token = await claim_generation(redis, gmail_thread_id)
 
     try:
+        message = None
         if gmail_message_id:
-            message = await gmail.get_message(coordinator_email, gmail_message_id)
-        else:
+            fetched = await gmail.get_message(coordinator_email, gmail_message_id)
+            # The explicit id can point at a draft (e.g. the addon creating a
+            # loop while the coordinator's own reply is still an open draft).
+            # Never let a draft be the trigger — fall back to the thread.
+            if DRAFT_LABEL not in fetched.label_ids:
+                message = fetched
+        if message is None:
             thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
-            if not thread.messages:
-                logger.warning("empty thread %s — skipping next action agent", gmail_thread_id)
+            message = _latest_non_draft(thread.messages)
+            if message is None:
+                logger.warning(
+                    "no non-draft message in thread %s — skipping next action agent",
+                    gmail_thread_id,
+                )
                 return
-            message = thread.messages[-1]
 
         thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
         thread_messages = thread.messages
@@ -469,14 +511,16 @@ async def process_coordinator_response(
         originating = await suggestion_svc.get_suggestion(suggestion_id)
 
         thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
-        if not thread.messages:
-            logger.warning("empty thread %s — cannot process coordinator response", gmail_thread_id)
+        message = _latest_non_draft(thread.messages)
+        if message is None:
+            logger.warning(
+                "no non-draft message in thread %s — cannot process coordinator response",
+                gmail_thread_id,
+            )
             await suggestion_svc.unresolve(
                 suggestion_id, "Thread has no messages — please review manually."
             )
             return
-
-        message = thread.messages[-1]
 
         direction = classify_direction(message, coordinator_email)
         prior_messages = [
@@ -571,15 +615,14 @@ async def process_rejection_response(
             return
 
         thread = await gmail.get_thread(coordinator_email, gmail_thread_id)
-        if not thread.messages:
+        message = _latest_non_draft(thread.messages)
+        if message is None:
             logger.warning(
-                "empty thread %s — cannot run rejection re-run for suggestion %s",
+                "no non-draft message in thread %s — cannot run rejection re-run for suggestion %s",
                 gmail_thread_id,
                 rejected_suggestion_id,
             )
             return
-
-        message = thread.messages[-1]
 
         direction = classify_direction(message, coordinator_email)
         prior_messages = [
