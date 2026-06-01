@@ -27,7 +27,7 @@ from api.gmail.auth import TokenStore  # noqa: E402
 from api.gmail.client import GmailClient  # noqa: E402
 from api.gmail.webhook import webhook_router  # noqa: E402
 from api.observability import RequestIdMiddleware, init_sentry  # noqa: E402
-from api.scheduling.service import LoopService  # noqa: E402
+from api.scheduling.service import LoopService, ScheduledInterviewService  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +83,14 @@ async def lifespan(app: FastAPI):
         suggestion_service=suggestion_service,
         loop_service=app.state.scheduling,
     )
+    interview_service = ScheduledInterviewService(db_pool=pool)
+    app.state.interviews = interview_service
     agent = NextActionAgent(
         llm=llm_service,
         langfuse=langfuse,
         suggestion_service=suggestion_service,
         loop_service=app.state.scheduling,
+        interview_service=interview_service,
         draft_service=draft_service,
     )
     app.state.email_router = EmailRouter(

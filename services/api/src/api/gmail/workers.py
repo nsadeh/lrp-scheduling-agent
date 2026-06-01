@@ -68,7 +68,7 @@ async def startup(ctx: dict) -> None:
     from api.classifier.sender_blacklist import load_blacklist
     from api.classifier.service import SuggestionService
     from api.drafts.service import DraftService
-    from api.scheduling.service import LoopService
+    from api.scheduling.service import LoopService, ScheduledInterviewService
 
     langfuse = init_langfuse()
     llm = init_llm_service()
@@ -86,11 +86,13 @@ async def startup(ctx: dict) -> None:
         suggestion_service=suggestion_service,
         loop_service=loop_service,
     )
+    interview_service = ScheduledInterviewService(db_pool=pool)
     agent = NextActionAgent(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=suggestion_service,
         loop_service=loop_service,
+        interview_service=interview_service,
         draft_service=draft_service,
     )
     ctx["router"] = EmailRouter(

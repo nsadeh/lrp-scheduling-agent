@@ -136,6 +136,19 @@ class Loop(BaseModel):
         return NEXT_ACTIONS[self.state]
 
 
+class ScheduledInterview(BaseModel):
+    """A booked interview attached to a loop. Persisted to scheduled_interviews."""
+
+    id: str
+    loop_id: str
+    interview_start_time: datetime
+    interview_duration: int
+    interview_notes: str = ""
+    is_canceled: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
 class LoopSummary(BaseModel):
     """Lightweight loop info for the status board."""
 

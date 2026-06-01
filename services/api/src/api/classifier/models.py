@@ -16,7 +16,7 @@ from datetime import datetime  # noqa: TC003
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.scheduling.models import StageState  # noqa: TC001 — needed at runtime
 
@@ -40,6 +40,7 @@ class SuggestedAction(StrEnum):
     ASK_COORDINATOR = "ask_coordinator"
     EXPIRE_SUGGESTION = "expire_suggestion"
     UPDATE_ACTOR = "update_actor"
+    SCHEDULE_INTERVIEW = "schedule_interview"
     NO_ACTION = "no_action"
 
 
@@ -110,6 +111,44 @@ class LinkThreadData(BaseModel):
     client_company: str
 
 
+class ScheduleInterviewData(BaseModel):
+    """Action data for SCHEDULE_INTERVIEW — book, reschedule, or cancel an interview
+    against a specific loop. The agent must always specify which loop; for update
+    and cancel it must also reference an existing interview_id."""
+
+    interview_op: Literal["schedule", "update", "cancel"]
+    loop_id: str
+    interview_id: str | None = None
+    interview_start_time: datetime | None = None
+    interview_duration: int | None = None
+    interview_notes: str = ""
+
+    @model_validator(mode="after")
+    def _check_op_nullability(self) -> ScheduleInterviewData:
+        op = self.interview_op
+        if op == "schedule":
+            if self.interview_id is not None:
+                raise ValueError(
+                    "schedule op must not include interview_id (it references a "
+                    "record that does not exist yet)"
+                )
+            if self.interview_start_time is None:
+                raise ValueError("schedule op requires interview_start_time")
+            if self.interview_duration is None:
+                raise ValueError("schedule op requires interview_duration")
+        elif op == "update":
+            if self.interview_id is None:
+                raise ValueError("update op requires interview_id")
+            if self.interview_start_time is None:
+                raise ValueError("update op requires interview_start_time")
+            if self.interview_duration is None:
+                raise ValueError("update op requires interview_duration")
+        elif op == "cancel":
+            if self.interview_id is None:
+                raise ValueError("cancel op requires interview_id")
+        return self
+
+
 class CreateLoopExtraction(BaseModel):
     """Typed payload for CREATE_LOOP action_data.
 
@@ -141,6 +180,7 @@ ACTION_DATA_MODELS: dict[SuggestedAction, type[BaseModel]] = {
     SuggestedAction.CREATE_LOOP: CreateLoopExtraction,
     SuggestedAction.EXPIRE_SUGGESTION: ExpireSuggestionData,
     SuggestedAction.UPDATE_ACTOR: UpdateActorData,
+    SuggestedAction.SCHEDULE_INTERVIEW: ScheduleInterviewData,
 }
 
 

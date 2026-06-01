@@ -15,6 +15,9 @@ original card builders for these actions are kept so:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
 from api.addon.contact_inputs import build_client_inputs, build_recruiter_inputs
 from api.addon.models import (
     Button,
@@ -656,6 +659,120 @@ def _escape_html_for_widget(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# SCHEDULE_INTERVIEW
+# ---------------------------------------------------------------------------
+
+_SIDEBAR_TZ = ZoneInfo("America/New_York")
+
+
+def _format_sidebar_datetime(dt: datetime) -> str:
+    """Render ``May 12, 2026, 3:00 PM ET`` for sidebar display."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    local = dt.astimezone(_SIDEBAR_TZ)
+    hour_12 = local.hour % 12 or 12
+    return local.strftime(f"%B {local.day}, {local.year}, {hour_12}:%M %p ET")
+
+
+def _format_duration(minutes: int) -> str:
+    return f"{minutes} minutes"
+
+
+def _build_schedule_interview_suggestion(view: SuggestionView) -> list[Widget]:
+    """SCHEDULE_INTERVIEW — schedule / update / cancel an interview for a loop.
+
+    Not auto-resolved. Coordinator must Accept or Dismiss every interview op.
+    """
+    sug = view.suggestion
+    data = sug.action_data or {}
+    op = (data.get("interview_op") or "").strip()
+
+    candidate = view.candidate_name or "candidate"
+    client = view.client_company or "client"
+
+    if op == "schedule":
+        header_verb = "Schedule"
+        icon = "📅 Schedule"
+    elif op == "update":
+        header_verb = "Update"
+        icon = "✏️ Update"
+    elif op == "cancel":
+        header_verb = "Cancel"
+        icon = "✕ Cancel"
+    else:
+        op_html = _escape_html_for_widget(op)
+        return [
+            _text(f"<i>Unknown interview op <code>{op_html}</code> — please dismiss.</i>"),
+            _buttons(_dismiss_button(sug.id)),
+        ]
+
+    header = f"{header_verb} interview for {candidate} with {client}"
+    widgets: list[Widget] = [_decorated(header, icon)]
+
+    new_start_raw = data.get("interview_start_time")
+    new_start: datetime | None = None
+    if new_start_raw:
+        try:
+            new_start = datetime.fromisoformat(str(new_start_raw))
+        except ValueError:
+            new_start = None
+    new_duration = data.get("interview_duration")
+    new_notes = (data.get("interview_notes") or "").strip()
+    existing = view.existing_interview
+
+    if op == "schedule":
+        if new_start is not None:
+            widgets.append(_text(f"<b>Time:</b> {_format_sidebar_datetime(new_start)}"))
+        if isinstance(new_duration, int):
+            widgets.append(_text(f"<b>Duration:</b> {_format_duration(new_duration)}"))
+        if new_notes:
+            widgets.append(_text(f"<b>Notes:</b> {_escape_html_for_widget(new_notes)}"))
+
+    elif op == "update":
+        if existing is None:
+            widgets.append(
+                _text("<i>Existing interview record not found — please dismiss and retry.</i>")
+            )
+        else:
+            if new_start is not None and new_start != existing.interview_start_time:
+                old = _format_sidebar_datetime(existing.interview_start_time)
+                new = _format_sidebar_datetime(new_start)
+                widgets.append(_text(f"<b>Time:</b> {old} → {new}"))
+            if isinstance(new_duration, int) and new_duration != existing.interview_duration:
+                old_dur = _format_duration(existing.interview_duration)
+                new_dur = _format_duration(new_duration)
+                widgets.append(_text(f"<b>Duration:</b> {old_dur} → {new_dur}"))
+            existing_notes = (existing.interview_notes or "").strip()
+            if new_notes != existing_notes:
+                old_label = (
+                    _escape_html_for_widget(existing_notes) if existing_notes else "<i>(none)</i>"
+                )
+                new_label = _escape_html_for_widget(new_notes) if new_notes else "<i>(none)</i>"
+                widgets.append(_text(f"<b>Notes:</b> {old_label} → {new_label}"))
+
+    elif op == "cancel":
+        if existing is None:
+            widgets.append(
+                _text("<i>Existing interview record not found — please dismiss and retry.</i>")
+            )
+        else:
+            widgets.append(
+                _text(f"<b>Time:</b> {_format_sidebar_datetime(existing.interview_start_time)}")
+            )
+            widgets.append(
+                _text(f"<b>Duration:</b> {_format_duration(existing.interview_duration)}")
+            )
+
+    widgets.append(
+        _buttons(
+            _button("Accept", "accept_suggestion", suggestion_id=sug.id),
+            _dismiss_button(sug.id),
+        )
+    )
+    return widgets
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -670,6 +787,7 @@ _SUGGESTION_BUILDERS = {
     SuggestedAction.LINK_THREAD: _build_link_thread_suggestion,
     SuggestedAction.ASK_COORDINATOR: _build_ask_suggestion,
     SuggestedAction.UPDATE_ACTOR: _build_update_actor_suggestion,
+    SuggestedAction.SCHEDULE_INTERVIEW: _build_schedule_interview_suggestion,
 }
 
 
