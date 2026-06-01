@@ -83,6 +83,7 @@ _AGENT_ALLOWED_ACTIONS = frozenset(
         SuggestedAction.ASK_COORDINATOR,
         SuggestedAction.EXPIRE_SUGGESTION,
         SuggestedAction.UPDATE_ACTOR,
+        SuggestedAction.SCHEDULE_INTERVIEW,
         SuggestedAction.NO_ACTION,
     }
 )
