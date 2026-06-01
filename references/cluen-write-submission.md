@@ -1,11 +1,5 @@
 # Write Query Submission: Interview Activity Logging
 
-**Project:** LRP / Kinematic Labs scheduling agent
-**Requester:** Kinematic Labs (Nim Sadeh)
-**Database:** LonRi92218
-**Date:** 2026-06-01
-**Version:** 1.0
-
 ## 1. Summary
 
 Three SQL workflows for logging scheduled interviews to Encore as Activities:
@@ -20,23 +14,11 @@ Each workflow runs in a single transaction. On any failure, the whole thing roll
 
 A distinct SQL user with write access, separate from the existing read-only credential. Same IP whitelist.
 
-Rationale:
-
-- The read credential is exposed to the agent runtime, which is LLM-driven. The write credential is exposed only to a narrow, deterministic code path that constructs these specific parameterized statements. Splitting the credentials keeps that boundary enforceable.
-- Independent audit and rotation.
-- Write access can be revoked surgically without disrupting the read integration that is live in production.
-
-Grant scope, nothing more:
-
-- INSERT on `tGenie`, `tGenieLink`, `tBackfill`.
-- UPDATE on `tGenie`.
-- No DELETE. No DDL. No SELECT. All GUIDs (user, type, label, link targets) are resolved via the existing read credential before any write runs.
+The write workflows are separated from read-workflows and are isolated to a small subset that is heavily checked, whereas LLMs may run read workflows at will. Hence the reason for separate credentials.
 
 ## 3. Runner and parameterization
 
 - Driver: `pymssql` (Microsoft SQL Server driver, libtds underneath).
-- Layer above: `aiosql`. The named-parameter form in our query files is rewritten to the driver's bind placeholders. The driver sends statement text and parameter values to SQL Server as separate fields. No string interpolation in the code path.
-- The SQL in sections 4 through 6 uses T-SQL `@name` syntax for readability. Query files use `:name`, which aiosql translates one-to-one.
 - Every input value is bound. The free-text fields are `@interview_description` and `@cancellation_note`, both landing in `GenieNotes`.
 
 ## 4. Workflow: insert a scheduled interview
@@ -128,7 +110,7 @@ END CATCH;
 
 The activity is retained. `GenieTypeGUID` is swapped to LRP's "Cancelled Interview" variant in `tGenieType` (resolved from the same config map used for `@interview_type_guid` on insert) and a cancellation note is written to `GenieNotes`. Time fields and links are not touched. `tBackfill` is written with `IsNew = 0`.
 
-Open question: if LRP does not have a "Cancelled Interview" variant in `tGenieType`, or if the dev team prefers a different cancellation mechanism (flipping `Done`, a status column not visible to us, or anything else), please direct us to the correct pattern.
+There is currently no "Cancelled Interview" Genie Type. I'd like to configure one for LRP's instance. I think it's cleaner than trying to delete all the records.
 
 ```sql
 BEGIN TRY
@@ -187,7 +169,3 @@ END CATCH;
 | `IsNew` | `1` on insert, `0` on update and cancel. |
 | `DateCompleted` | Omitted, per dev team note. |
 
-## 8. Open questions
-
-1. Cancellation mechanism: confirm soft-cancel via `GenieTypeGUID` swap, or direct us to LRP's preferred pattern.
-2. Confirm LRP's `tGenieType` includes a "Cancelled Interview" variant. If not, we will request one be configured.
