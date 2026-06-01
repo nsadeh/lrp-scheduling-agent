@@ -429,7 +429,7 @@ def _format_scheduled_interviews_xml(
         start_time = _escape(format_llm_datetime(iv.interview_start_time))
         notes = _escape((iv.interview_notes or "").strip())
         children.append(
-            f"    <interview id=\"{_escape(iv.id)}\">\n"
+            f'    <interview id="{_escape(iv.id)}">\n'
             f"      <candidate>{_escape(candidate_name or '')}</candidate>\n"
             f"      <start-time>{start_time}</start-time>\n"
             f"      <duration>{iv.interview_duration} minutes</duration>\n"
