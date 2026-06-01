@@ -717,7 +717,13 @@ def _build_schedule_interview_suggestion(view: SuggestionView) -> list[Widget]:
         except ValueError:
             new_start = None
     new_duration = data.get("interview_duration")
-    new_notes = (data.get("interview_notes") or "").strip()
+    # For update ops, preserve the None-vs-empty-string distinction:
+    #   None  -> agent omitted notes; do not touch existing notes.
+    #   ""    -> agent wants to clear notes.
+    #   "..." -> agent wants to set notes to this value.
+    raw_notes = data.get("interview_notes")
+    new_notes_provided = raw_notes is not None
+    new_notes = raw_notes.strip() if isinstance(raw_notes, str) else ""
     existing = view.existing_interview
 
     if op == "schedule":
@@ -743,7 +749,7 @@ def _build_schedule_interview_suggestion(view: SuggestionView) -> list[Widget]:
                 new_dur = _format_duration(new_duration)
                 widgets.append(_text(f"<b>Duration:</b> {old_dur} → {new_dur}"))
             existing_notes = (existing.interview_notes or "").strip()
-            if new_notes != existing_notes:
+            if new_notes_provided and new_notes != existing_notes:
                 old_label = (
                     _escape_html_for_widget(existing_notes) if existing_notes else "<i>(none)</i>"
                 )

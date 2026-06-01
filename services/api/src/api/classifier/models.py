@@ -114,14 +114,18 @@ class LinkThreadData(BaseModel):
 class ScheduleInterviewData(BaseModel):
     """Action data for SCHEDULE_INTERVIEW — book, reschedule, or cancel an interview
     against a specific loop. The agent must always specify which loop; for update
-    and cancel it must also reference an existing interview_id."""
+    and cancel it must also reference an existing interview_id.
+
+    ``update`` uses PATCH semantics: any of start_time / duration / notes may be
+    null, meaning "leave this field as-is." The SQL update path COALESCEs nulls
+    against existing column values."""
 
     interview_op: Literal["schedule", "update", "cancel"]
     loop_id: str
     interview_id: str | None = None
     interview_start_time: datetime | None = None
     interview_duration: int | None = None
-    interview_notes: str = ""
+    interview_notes: str | None = None
 
     @model_validator(mode="after")
     def _check_op_nullability(self) -> ScheduleInterviewData:
@@ -139,10 +143,9 @@ class ScheduleInterviewData(BaseModel):
         elif op == "update":
             if self.interview_id is None:
                 raise ValueError("update op requires interview_id")
-            if self.interview_start_time is None:
-                raise ValueError("update op requires interview_start_time")
-            if self.interview_duration is None:
-                raise ValueError("update op requires interview_duration")
+            # start_time / duration / notes are intentionally optional on update —
+            # null means "leave existing value." See SQL COALESCE in
+            # update_scheduled_interview.
         elif op == "cancel":
             if self.interview_id is None:
                 raise ValueError("cancel op requires interview_id")

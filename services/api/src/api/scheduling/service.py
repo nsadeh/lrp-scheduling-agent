@@ -812,7 +812,7 @@ class ScheduledInterviewService:
         loop_id: str,
         start_time: datetime,
         duration: int,
-        notes: str = "",
+        notes: str | None = None,
     ) -> ScheduledInterview:
         async with self._pool.connection() as conn, conn.transaction():
             row = await _fetch_dict_one(
@@ -822,7 +822,7 @@ class ScheduledInterviewService:
                 loop_id=loop_id,
                 interview_start_time=start_time,
                 interview_duration=duration,
-                interview_notes=notes,
+                interview_notes=notes or "",
             )
         assert row is not None
         return _row_to_scheduled_interview(row)
@@ -831,10 +831,12 @@ class ScheduledInterviewService:
         self,
         *,
         interview_id: str,
-        start_time: datetime,
-        duration: int,
-        notes: str = "",
+        start_time: datetime | None = None,
+        duration: int | None = None,
+        notes: str | None = None,
     ) -> ScheduledInterview:
+        """Partial update — any None param leaves the existing column value alone
+        (enforced by COALESCE in update_scheduled_interview)."""
         async with self._pool.connection() as conn, conn.transaction():
             await queries.update_scheduled_interview(
                 conn,

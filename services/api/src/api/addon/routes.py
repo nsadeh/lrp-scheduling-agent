@@ -1631,6 +1631,7 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
         data = ScheduleInterviewData.model_validate(suggestion.action_data or {})
         interview_svc = ScheduledInterviewService(db_pool=svc._pool)
         if data.interview_op == "schedule":
+            # Validator guarantees start_time + duration are non-null for schedule.
             assert data.interview_start_time is not None
             assert data.interview_duration is not None
             await interview_svc.create(
@@ -1640,9 +1641,8 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
                 notes=data.interview_notes,
             )
         elif data.interview_op == "update":
+            # PATCH semantics: any None param leaves the existing value alone.
             assert data.interview_id is not None
-            assert data.interview_start_time is not None
-            assert data.interview_duration is not None
             await interview_svc.update(
                 interview_id=data.interview_id,
                 start_time=data.interview_start_time,

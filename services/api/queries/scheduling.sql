@@ -411,10 +411,12 @@ WHERE loop_id = :loop_id AND is_canceled = false
 ORDER BY interview_start_time;
 
 -- name: update_scheduled_interview!
+-- PATCH semantics: any bound param that is NULL means "leave the existing value
+-- alone." Lets the agent send only the fields it wants to change.
 UPDATE scheduled_interviews
-SET interview_start_time = :interview_start_time,
-    interview_duration   = :interview_duration,
-    interview_notes      = :interview_notes,
+SET interview_start_time = COALESCE(:interview_start_time, interview_start_time),
+    interview_duration   = COALESCE(:interview_duration, interview_duration),
+    interview_notes      = COALESCE(:interview_notes, interview_notes),
     updated_at           = now()
 WHERE id = :id;
 
