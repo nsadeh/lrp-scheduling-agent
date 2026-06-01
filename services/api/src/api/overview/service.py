@@ -14,6 +14,7 @@ from api.classifier.models import SuggestedAction, Suggestion
 from api.classifier.queries import queries
 from api.drafts.models import DraftStatus, EmailDraft
 from api.overview.models import LoopSuggestionGroup, SuggestionView
+from api.scheduling.service import ScheduledInterviewService
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
@@ -145,9 +146,24 @@ def group_by_loop(views: list[SuggestionView]) -> list[LoopSuggestionGroup]:
     return sorted(groups.values(), key=lambda g: g.oldest_created_at)
 
 
+async def _attach_existing_interviews(
+    views: list[SuggestionView], interview_svc: ScheduledInterviewService
+) -> None:
+    """For SCHEDULE_INTERVIEW views referencing an existing interview_id,
+    fetch the row and attach it so the card can diff old vs. new fields."""
+    for v in views:
+        if v.suggestion.action != SuggestedAction.SCHEDULE_INTERVIEW:
+            continue
+        interview_id = (v.suggestion.action_data or {}).get("interview_id")
+        if not interview_id:
+            continue
+        v.existing_interview = await interview_svc.get(interview_id)
+
+
 class OverviewService:
     def __init__(self, db_pool: AsyncConnectionPool):
         self._pool = db_pool
+        self._interviews = ScheduledInterviewService(db_pool=db_pool)
 
     async def get_overview_data(self, coordinator_email: str) -> list[LoopSuggestionGroup]:
         """Fetch all pending suggestions with context, grouped by loop."""
@@ -158,6 +174,7 @@ class OverviewService:
                 )
             )
         views = [_row_to_suggestion_view(r) for r in rows]
+        await _attach_existing_interviews(views, self._interviews)
         return group_by_loop(views)
 
     async def get_thread_overview_data(
@@ -173,4 +190,5 @@ class OverviewService:
                 )
             )
         views = [_row_to_suggestion_view(r) for r in rows]
+        await _attach_existing_interviews(views, self._interviews)
         return group_by_loop(views)

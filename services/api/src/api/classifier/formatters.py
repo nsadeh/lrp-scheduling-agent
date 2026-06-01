@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     from api.classifier.models import Suggestion
     from api.gmail.models import Message
-    from api.scheduling.models import Loop, LoopEvent
+    from api.scheduling.models import Loop, LoopEvent, ScheduledInterview
 
 # Default thread history budget: ~3000 tokens x 4 chars/token = 12000 chars
 DEFAULT_THREAD_CHAR_BUDGET = 12_000
@@ -418,7 +418,33 @@ def _format_pending_suggestions_xml(pending: list[Suggestion]) -> str:
     return f"<pending-suggestions>\n{inner}\n  </pending-suggestions>"
 
 
-def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
+def _format_scheduled_interviews_xml(
+    interviews: list[ScheduledInterview], candidate_name: str | None
+) -> str:
+    """Render a loop's active (non-canceled) scheduled interviews."""
+    if not interviews:
+        return "<scheduled-interviews>No scheduled interviews</scheduled-interviews>"
+    children: list[str] = []
+    for iv in interviews:
+        start_time = _escape(format_llm_datetime(iv.interview_start_time))
+        notes = _escape((iv.interview_notes or "").strip())
+        children.append(
+            f'    <interview id="{_escape(iv.id)}">\n'
+            f"      <candidate>{_escape(candidate_name or '')}</candidate>\n"
+            f"      <start-time>{start_time}</start-time>\n"
+            f"      <duration>{iv.interview_duration} minutes</duration>\n"
+            f"      <notes>{notes}</notes>\n"
+            f"    </interview>"
+        )
+    inner = "\n".join(children)
+    return f"<scheduled-interviews>\n{inner}\n  </scheduled-interviews>"
+
+
+def format_loop_xml(
+    loop: Loop,
+    pending_for_loop: list[Suggestion],
+    interviews_for_loop: list[ScheduledInterview] | None = None,
+) -> str:
     """Render a single loop as a <loop> XML block."""
     coordinator = loop.coordinator
     recruiter = loop.recruiter
@@ -446,6 +472,12 @@ def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
     # Indent the pending block by two spaces so it aligns with siblings.
     pending_block_indented = "\n".join("  " + line for line in pending_block.split("\n"))
 
+    interviews_block = _format_scheduled_interviews_xml(
+        interviews_for_loop or [],
+        candidate.name if candidate else None,
+    )
+    interviews_block_indented = "\n".join("  " + line for line in interviews_block.split("\n"))
+
     lines = [
         f"<loop id='{_escape(loop.id)}'>",
         f"  <stage>{_escape(loop.state.value)}</stage>",
@@ -457,6 +489,7 @@ def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
         f"    {candidate_tag}",
         "  </actors>",
         pending_block_indented,
+        interviews_block_indented,
         "</loop>",
     ]
     return "\n".join(lines)
@@ -465,11 +498,20 @@ def format_loop_xml(loop: Loop, pending_for_loop: list[Suggestion]) -> str:
 def format_loops_xml(
     loops: list[Loop],
     pending_by_loop: dict[str, list[Suggestion]],
+    interviews_by_loop: dict[str, list[ScheduledInterview]] | None = None,
 ) -> str:
     """Render all loops linked to the thread as concatenated <loop> blocks."""
     if not loops:
         return "<!-- No loops linked to this thread -->"
-    return "\n".join(format_loop_xml(lp, pending_by_loop.get(lp.id, [])) for lp in loops)
+    interviews_by_loop = interviews_by_loop or {}
+    return "\n".join(
+        format_loop_xml(
+            lp,
+            pending_by_loop.get(lp.id, []),
+            interviews_by_loop.get(lp.id, []),
+        )
+        for lp in loops
+    )
 
 
 # ---------------------------------------------------------------------------

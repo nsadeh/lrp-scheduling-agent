@@ -64,8 +64,8 @@ if TYPE_CHECKING:
     from api.drafts.service import DraftService
     from api.gmail.hooks import EmailEvent
     from api.gmail.models import Message
-    from api.scheduling.models import Loop
-    from api.scheduling.service import LoopService
+    from api.scheduling.models import Loop, ScheduledInterview
+    from api.scheduling.service import LoopService, ScheduledInterviewService
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ _AGENT_ALLOWED_ACTIONS = frozenset(
         SuggestedAction.ASK_COORDINATOR,
         SuggestedAction.EXPIRE_SUGGESTION,
         SuggestedAction.UPDATE_ACTOR,
+        SuggestedAction.SCHEDULE_INTERVIEW,
         SuggestedAction.NO_ACTION,
     }
 )
@@ -127,12 +128,14 @@ class NextActionAgent:
         langfuse: Langfuse,
         suggestion_service: SuggestionService,
         loop_service: LoopService,
+        interview_service: ScheduledInterviewService,
         draft_service: DraftService | None = None,
     ):
         self._llm = llm
         self._langfuse = langfuse
         self._suggestions = suggestion_service
         self._loops = loop_service
+        self._interviews = interview_service
         self._draft_service = draft_service
         self._resolver_registry = build_agent_registry()
 
@@ -614,17 +617,19 @@ class NextActionAgent:
 
         all_pending: list[Suggestion] = []
         pending_by_loop: dict[str, list[Suggestion]] = {}
+        interviews_by_loop: dict[str, list[ScheduledInterview]] = {}
         for lp in linked_loops:
             loop_pending = await self._suggestions.get_pending_for_loop(lp.id)
             pending_by_loop[lp.id] = loop_pending
             all_pending.extend(loop_pending)
+            interviews_by_loop[lp.id] = await self._interviews.list_active_for_loop(lp.id)
 
         return (
             NextActionInput(
                 date=date_str,
                 thread_history=thread_history_xml,
                 email=format_email_xml(msg, event.direction.value),
-                loops=format_loops_xml(linked_loops, pending_by_loop),
+                loops=format_loops_xml(linked_loops, pending_by_loop, interviews_by_loop),
             ),
             all_pending,
         )

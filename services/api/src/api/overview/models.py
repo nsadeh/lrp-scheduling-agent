@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from api.classifier.models import Suggestion  # noqa: TC001
 from api.drafts.models import EmailDraft  # noqa: TC001
+from api.scheduling.models import ScheduledInterview  # noqa: TC001
 
 
 class SuggestionView(BaseModel):
@@ -32,6 +33,9 @@ class SuggestionView(BaseModel):
     recruiter_email: str | None = None
     client_manager_name: str | None = None
     client_manager_email: str | None = None
+    # Populated for SCHEDULE_INTERVIEW suggestions with an interview_id
+    # (update/cancel ops) — lets the card render a diff against existing state.
+    existing_interview: ScheduledInterview | None = None
 
 
 class LoopSuggestionGroup(BaseModel):

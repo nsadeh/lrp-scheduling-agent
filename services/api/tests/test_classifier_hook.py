@@ -179,11 +179,15 @@ def _make_agent():
     loop_service.get_coordinator_by_email = AsyncMock(return_value=None)
     loop_service.get_events = AsyncMock(return_value=[])
 
+    interview_service = MagicMock()
+    interview_service.list_active_for_loop = AsyncMock(return_value=[])
+
     agent = NextActionAgent(
         llm=llm,
         langfuse=langfuse,
         suggestion_service=suggestion_service,
         loop_service=loop_service,
+        interview_service=interview_service,
     )
     return agent, suggestion_service
 

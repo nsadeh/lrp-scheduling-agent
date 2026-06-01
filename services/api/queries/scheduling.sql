@@ -383,3 +383,45 @@ SELECT id, loop_id, gmail_thread_id, subject, linked_at
 FROM loop_email_threads
 WHERE loop_id = ANY(:loop_ids)
 ORDER BY loop_id, linked_at;
+
+-- ============================================================
+-- Scheduled interviews
+-- ============================================================
+
+-- name: create_scheduled_interview^
+INSERT INTO scheduled_interviews (
+    id, loop_id, interview_start_time, interview_duration, interview_notes
+)
+VALUES (:id, :loop_id, :interview_start_time, :interview_duration, :interview_notes)
+RETURNING id, loop_id, interview_start_time, interview_duration, interview_notes,
+          is_canceled, created_at, updated_at;
+
+-- name: get_scheduled_interview^
+SELECT id, loop_id, interview_start_time, interview_duration, interview_notes,
+       is_canceled, created_at, updated_at
+FROM scheduled_interviews
+WHERE id = :id;
+
+-- name: get_active_interviews_for_loop
+-- Non-canceled interviews for a loop, earliest first.
+SELECT id, loop_id, interview_start_time, interview_duration, interview_notes,
+       is_canceled, created_at, updated_at
+FROM scheduled_interviews
+WHERE loop_id = :loop_id AND is_canceled = false
+ORDER BY interview_start_time;
+
+-- name: update_scheduled_interview!
+-- PATCH semantics: any bound param that is NULL means "leave the existing value
+-- alone." Lets the agent send only the fields it wants to change.
+UPDATE scheduled_interviews
+SET interview_start_time = COALESCE(:interview_start_time, interview_start_time),
+    interview_duration   = COALESCE(:interview_duration, interview_duration),
+    interview_notes      = COALESCE(:interview_notes, interview_notes),
+    updated_at           = now()
+WHERE id = :id;
+
+-- name: cancel_scheduled_interview!
+UPDATE scheduled_interviews
+SET is_canceled = true,
+    updated_at  = now()
+WHERE id = :id;

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime  # noqa: TC003
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
@@ -25,6 +26,7 @@ from api.scheduling.models import (
     Loop,
     LoopEvent,
     LoopSummary,
+    ScheduledInterview,
     StageState,
     StatusBoard,
 )
@@ -783,6 +785,90 @@ def _row_to_email_thread(row: tuple) -> EmailThread:
         subject=row[3],
         linked_at=row[4],
     )
+
+
+def _row_to_scheduled_interview(row: dict) -> ScheduledInterview:
+    return ScheduledInterview(
+        id=row["id"],
+        loop_id=row["loop_id"],
+        interview_start_time=row["interview_start_time"],
+        interview_duration=row["interview_duration"],
+        interview_notes=row["interview_notes"] or "",
+        is_canceled=row["is_canceled"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+class ScheduledInterviewService:
+    """CRUD for scheduled interviews. One row per booked (or canceled) interview."""
+
+    def __init__(self, db_pool: AsyncConnectionPool):
+        self._pool = db_pool
+
+    async def create(
+        self,
+        *,
+        loop_id: str,
+        start_time: datetime,
+        duration: int,
+        notes: str | None = None,
+    ) -> ScheduledInterview:
+        async with self._pool.connection() as conn, conn.transaction():
+            row = await _fetch_dict_one(
+                conn,
+                queries.create_scheduled_interview,
+                id=make_id("int"),
+                loop_id=loop_id,
+                interview_start_time=start_time,
+                interview_duration=duration,
+                interview_notes=notes or "",
+            )
+        assert row is not None
+        return _row_to_scheduled_interview(row)
+
+    async def update(
+        self,
+        *,
+        interview_id: str,
+        start_time: datetime | None = None,
+        duration: int | None = None,
+        notes: str | None = None,
+    ) -> ScheduledInterview:
+        """Partial update — any None param leaves the existing column value alone
+        (enforced by COALESCE in update_scheduled_interview)."""
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.update_scheduled_interview(
+                conn,
+                id=interview_id,
+                interview_start_time=start_time,
+                interview_duration=duration,
+                interview_notes=notes,
+            )
+            row = await _fetch_dict_one(conn, queries.get_scheduled_interview, id=interview_id)
+        if row is None:
+            raise ValueError(f"scheduled_interview {interview_id} not found after update")
+        return _row_to_scheduled_interview(row)
+
+    async def cancel(self, interview_id: str) -> ScheduledInterview:
+        async with self._pool.connection() as conn, conn.transaction():
+            await queries.cancel_scheduled_interview(conn, id=interview_id)
+            row = await _fetch_dict_one(conn, queries.get_scheduled_interview, id=interview_id)
+        if row is None:
+            raise ValueError(f"scheduled_interview {interview_id} not found after cancel")
+        return _row_to_scheduled_interview(row)
+
+    async def get(self, interview_id: str) -> ScheduledInterview | None:
+        async with self._pool.connection() as conn:
+            row = await _fetch_dict_one(conn, queries.get_scheduled_interview, id=interview_id)
+        if row is None:
+            return None
+        return _row_to_scheduled_interview(row)
+
+    async def list_active_for_loop(self, loop_id: str) -> list[ScheduledInterview]:
+        async with self._pool.connection() as conn:
+            rows = await _fetch_dicts(conn, queries.get_active_interviews_for_loop, loop_id=loop_id)
+        return [_row_to_scheduled_interview(r) for r in rows]
 
 
 def _loop_to_summary(loop: Loop) -> LoopSummary:

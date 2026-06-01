@@ -1624,6 +1624,34 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
             await svc.link_thread(suggestion.loop_id, suggestion.gmail_thread_id, None, email)
         else:
             logger.warning("LINK_THREAD suggestion %s missing loop_id or thread_id", suggestion_id)
+    elif suggestion.action == SuggestedAction.SCHEDULE_INTERVIEW:
+        from api.classifier.models import ScheduleInterviewData
+        from api.scheduling.service import ScheduledInterviewService
+
+        data = ScheduleInterviewData.model_validate(suggestion.action_data or {})
+        interview_svc = ScheduledInterviewService(db_pool=svc._pool)
+        if data.interview_op == "schedule":
+            # Validator guarantees start_time + duration are non-null for schedule.
+            assert data.interview_start_time is not None
+            assert data.interview_duration is not None
+            await interview_svc.create(
+                loop_id=data.loop_id,
+                start_time=data.interview_start_time,
+                duration=data.interview_duration,
+                notes=data.interview_notes,
+            )
+        elif data.interview_op == "update":
+            # PATCH semantics: any None param leaves the existing value alone.
+            assert data.interview_id is not None
+            await interview_svc.update(
+                interview_id=data.interview_id,
+                start_time=data.interview_start_time,
+                duration=data.interview_duration,
+                notes=data.interview_notes,
+            )
+        elif data.interview_op == "cancel":
+            assert data.interview_id is not None
+            await interview_svc.cancel(data.interview_id)
     else:
         logger.warning(
             "accept_suggestion called for unsupported action %s (suggestion %s) — ignoring",
