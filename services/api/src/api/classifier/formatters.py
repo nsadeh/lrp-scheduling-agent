@@ -127,7 +127,7 @@ def format_loop_state(loop: Loop | None) -> str:
     if loop.candidate:
         lines.append(f"Candidate: {loop.candidate.name}")
     if loop.client_contact:
-        company = loop.client_contact.company or "Unknown"
+        company = loop.client_company_display or "Unknown"
         lines.append(f"Client: {loop.client_contact.name} ({company})")
     if loop.recruiter:
         lines.append(f"Recruiter: {loop.recruiter.name} <{loop.recruiter.email}>")
@@ -178,11 +178,7 @@ def format_active_loops(
 
     for i, loop in enumerate(loops):
         candidate_name = loop.candidate.name if loop.candidate else "Unknown"
-        client_company = (
-            loop.client_contact.company
-            if loop.client_contact and loop.client_contact.company
-            else "Unknown"
-        )
+        client_company = loop.client_company_display or "Unknown"
         line = (
             f"  - {loop.title} (ID: {loop.id}): "
             f"Candidate={candidate_name}, Client={client_company}, "
@@ -630,11 +626,7 @@ def format_active_loops_xml(
         candidate_name = (
             loop.candidate.name if loop.candidate and loop.candidate.name else "Unknown"
         )
-        client_company = (
-            loop.client_contact.company
-            if loop.client_contact and loop.client_contact.company
-            else "Unknown"
-        )
+        client_company = loop.client_company_display or "Unknown"
         block = (
             f'<loop id="{_escape(loop.id)}">\n'
             f"  <client-company>{_escape(client_company)}</client-company>\n"

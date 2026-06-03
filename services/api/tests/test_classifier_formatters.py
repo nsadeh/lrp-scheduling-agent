@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from api.classifier.formatters import (
     format_active_loops,
+    format_active_loops_xml,
     format_email,
     format_events,
     format_llm_datetime,
@@ -143,6 +144,29 @@ class TestFormatLoopState:
         assert "awaiting_candidate" in result
 
 
+def _loop_no_client_contact(
+    loop_id: str = "lop_ats",
+    title: str = "John Doe, Big Bank",
+) -> Loop:
+    """ATS-created loop: company is known and lives in the title, but there's
+    no named client contact (common for Greenhouse-style stage updates)."""
+    return Loop(
+        id=loop_id,
+        coordinator_id="crd_1",
+        client_contact_id=None,
+        recruiter_id=None,
+        candidate_id="can_2",
+        title=title,
+        state=StageState.NEW,
+        created_at=datetime(2026, 4, 10, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 10, tzinfo=UTC),
+        candidate=Candidate(
+            id="can_2", name="John Doe", created_at=datetime(2026, 4, 10, tzinfo=UTC)
+        ),
+        client_contact=None,
+    )
+
+
 class TestFormatActiveLoops:
     def test_no_loops(self):
         result = format_active_loops([])
@@ -153,6 +177,30 @@ class TestFormatActiveLoops:
         assert "Round 1 - John Smith" in result
         assert "John Smith" in result
         assert "Hedge Fund Co" in result
+
+    def test_falls_back_to_title_company_when_no_client_contact(self):
+        result = format_active_loops([_loop_no_client_contact()])
+        assert "Client=Big Bank" in result
+        assert "Unknown" not in result
+
+
+class TestFormatActiveLoopsXml:
+    def test_no_loops(self):
+        assert "No active loops" in format_active_loops_xml([])
+
+    def test_renders_client_company_from_contact(self):
+        result = format_active_loops_xml([_loop()])
+        assert "<client-company>Hedge Fund Co</client-company>" in result
+        assert "<candidate>John Smith</candidate>" in result
+
+    def test_falls_back_to_title_company_when_no_client_contact(self):
+        """The bug: ATS-created loops have client_contact=None but the company
+        IS in the title. Without the fallback, the classifier sees 'Unknown'
+        and over-creates loops instead of LINK_THREAD-ing to this one.
+        """
+        result = format_active_loops_xml([_loop_no_client_contact()])
+        assert "<client-company>Big Bank</client-company>" in result
+        assert "Unknown" not in result
 
 
 class TestFormatEvents:

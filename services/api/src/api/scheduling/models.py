@@ -132,6 +132,22 @@ class Loop(BaseModel):
         return self.state == StageState.NEW
 
     @property
+    def client_company_display(self) -> str | None:
+        """Best-effort client company name for rendering / classifier context.
+
+        Prefers the joined client_contact.company. Falls back to parsing the
+        title, which `_build_title` formats as "{candidate}, {company}" — this
+        covers ATS-created loops where no named client contact exists but the
+        company was captured at creation. rsplit handles candidate names that
+        themselves contain a comma (e.g. "Smith, Jr., Big Bank" -> "Big Bank").
+        """
+        if self.client_contact and self.client_contact.company:
+            return self.client_contact.company
+        if self.title and ", " in self.title:
+            return self.title.rsplit(", ", 1)[1].strip() or None
+        return None
+
+    @property
     def next_action(self) -> str:
         return NEXT_ACTIONS[self.state]
 

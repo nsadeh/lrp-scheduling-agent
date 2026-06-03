@@ -872,14 +872,11 @@ class ScheduledInterviewService:
 
 
 def _loop_to_summary(loop: Loop) -> LoopSummary:
-    client_company = "Unknown"
-    if loop.client_contact and loop.client_contact.company:
-        client_company = loop.client_contact.company
     return LoopSummary(
         loop_id=loop.id,
         title=loop.title,
         candidate_name=loop.candidate.name if loop.candidate else "Unknown",
-        client_company=client_company,
+        client_company=loop.client_company_display or "Unknown",
         state=loop.state,
         next_action=loop.next_action,
     )
