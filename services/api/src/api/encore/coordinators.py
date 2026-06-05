@@ -10,7 +10,8 @@ ANA_EMAIL = "acooke@longridgepartners.com"
 FIONA_EMAIL = "fcampbell@longridgepartners.com"
 SARA_EMAIL = "scampoli@longridgepartners.com"
 MARISSA_EMAIL = "mbradley@longridgepartners.com"
+JESSICA_EMAIL = "jkalish@longridgepartners.com"
 
 COORDINATOR_EMAILS: frozenset[str] = frozenset(
-    {ADAM_EMAIL, ANA_EMAIL, FIONA_EMAIL, SARA_EMAIL, MARISSA_EMAIL}
+    {ADAM_EMAIL, ANA_EMAIL, FIONA_EMAIL, SARA_EMAIL, MARISSA_EMAIL, JESSICA_EMAIL}
 )
