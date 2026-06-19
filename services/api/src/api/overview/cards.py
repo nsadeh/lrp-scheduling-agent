@@ -716,7 +716,6 @@ def _build_schedule_interview_suggestion(view: SuggestionView) -> list[Widget]:
             new_start = datetime.fromisoformat(str(new_start_raw))
         except ValueError:
             new_start = None
-    new_duration = data.get("interview_duration")
     # For update ops, preserve the None-vs-empty-string distinction:
     #   None  -> agent omitted notes; do not touch existing notes.
     #   ""    -> agent wants to clear notes.
@@ -729,8 +728,7 @@ def _build_schedule_interview_suggestion(view: SuggestionView) -> list[Widget]:
     if op == "schedule":
         if new_start is not None:
             widgets.append(_text(f"<b>Time:</b> {_format_sidebar_datetime(new_start)}"))
-        if isinstance(new_duration, int):
-            widgets.append(_text(f"<b>Duration:</b> {_format_duration(new_duration)}"))
+        widgets.append(_text(f"<b>Duration:</b> {_format_duration(30)}"))
         if new_notes:
             widgets.append(_text(f"<b>Notes:</b> {_escape_html_for_widget(new_notes)}"))
 
@@ -744,10 +742,6 @@ def _build_schedule_interview_suggestion(view: SuggestionView) -> list[Widget]:
                 old = _format_sidebar_datetime(existing.interview_start_time)
                 new = _format_sidebar_datetime(new_start)
                 widgets.append(_text(f"<b>Time:</b> {old} → {new}"))
-            if isinstance(new_duration, int) and new_duration != existing.interview_duration:
-                old_dur = _format_duration(existing.interview_duration)
-                new_dur = _format_duration(new_duration)
-                widgets.append(_text(f"<b>Duration:</b> {old_dur} → {new_dur}"))
             existing_notes = (existing.interview_notes or "").strip()
             if new_notes_provided and new_notes != existing_notes:
                 old_label = (

@@ -116,15 +116,18 @@ class ScheduleInterviewData(BaseModel):
     against a specific loop. The agent must always specify which loop; for update
     and cancel it must also reference an existing interview_id.
 
-    ``update`` uses PATCH semantics: any of start_time / duration / notes may be
-    null, meaning "leave this field as-is." The SQL update path COALESCEs nulls
+    Interview duration is not modeled here — every interview on the main LRP
+    calendar is 30 minutes regardless of actual length, hardcoded at the
+    persistence boundary.
+
+    ``update`` uses PATCH semantics: any of start_time / notes may be null,
+    meaning "leave this field as-is." The SQL update path COALESCEs nulls
     against existing column values."""
 
     interview_op: Literal["schedule", "update", "cancel"]
     loop_id: str
     interview_id: str | None = None
     interview_start_time: datetime | None = None
-    interview_duration: int | None = None
     interview_notes: str | None = None
 
     @model_validator(mode="after")
@@ -138,12 +141,10 @@ class ScheduleInterviewData(BaseModel):
                 )
             if self.interview_start_time is None:
                 raise ValueError("schedule op requires interview_start_time")
-            if self.interview_duration is None:
-                raise ValueError("schedule op requires interview_duration")
         elif op == "update":
             if self.interview_id is None:
                 raise ValueError("update op requires interview_id")
-            # start_time / duration / notes are intentionally optional on update —
+            # start_time / notes are intentionally optional on update —
             # null means "leave existing value." See SQL COALESCE in
             # update_scheduled_interview.
         elif op == "cancel":

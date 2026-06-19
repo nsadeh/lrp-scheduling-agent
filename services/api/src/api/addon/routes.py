@@ -1631,22 +1631,22 @@ async def _handle_accept_suggestion(body: AddonRequest, svc: LoopService, email:
         data = ScheduleInterviewData.model_validate(suggestion.action_data or {})
         interview_svc = ScheduledInterviewService(db_pool=svc._pool)
         if data.interview_op == "schedule":
-            # Validator guarantees start_time + duration are non-null for schedule.
+            # Validator guarantees start_time is non-null for schedule.
+            # All LRP-calendar interviews are 30 minutes regardless of actual length.
             assert data.interview_start_time is not None
-            assert data.interview_duration is not None
             await interview_svc.create(
                 loop_id=data.loop_id,
                 start_time=data.interview_start_time,
-                duration=data.interview_duration,
+                duration=30,
                 notes=data.interview_notes,
             )
         elif data.interview_op == "update":
             # PATCH semantics: any None param leaves the existing value alone.
+            # Duration is never updated — it's a fixed 30 min on the LRP calendar.
             assert data.interview_id is not None
             await interview_svc.update(
                 interview_id=data.interview_id,
                 start_time=data.interview_start_time,
-                duration=data.interview_duration,
                 notes=data.interview_notes,
             )
         elif data.interview_op == "cancel":
