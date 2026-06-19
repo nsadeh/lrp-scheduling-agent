@@ -138,9 +138,14 @@ class ScheduleInterviewData(BaseModel):
                 )
             if self.interview_start_time is None:
                 raise ValueError("schedule op requires interview_start_time")
-            if self.interview_duration is None:
-                raise ValueError("schedule op requires interview_duration")
+            # All interviews on the main LRP calendar are 30 minutes, regardless of
+            # the actual interview length. The LLM occasionally hallucinates values
+            # (e.g. 300 minutes) — clamp here so DB + UI + future calendar event
+            # always see 30.
+            self.interview_duration = 30
         elif op == "update":
+            if self.interview_duration is not None:
+                self.interview_duration = 30
             if self.interview_id is None:
                 raise ValueError("update op requires interview_id")
             # start_time / duration / notes are intentionally optional on update —
