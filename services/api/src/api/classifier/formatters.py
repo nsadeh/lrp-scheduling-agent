@@ -93,12 +93,21 @@ def format_thread_history(
 
     for msg in prior:
         from_str = f"{msg.from_.name} <{msg.from_.email}>" if msg.from_.name else msg.from_.email
-        block = (
-            f"--- Message ({msg.date.strftime('%Y-%m-%d %H:%M')}) ---\n"
-            f"From: {from_str}\n"
-            f"Subject: {msg.subject}\n\n"
-            f"{msg.body_text.strip()}\n"
-        )
+        to_str = ", ".join(f"{a.name} <{a.email}>" if a.name else a.email for a in msg.to)
+        cc_str = ", ".join(f"{a.name} <{a.email}>" if a.name else a.email for a in msg.cc)
+
+        lines = [
+            f"--- Message ({msg.date.strftime('%Y-%m-%d %H:%M')}) ---",
+            f"From: {from_str}",
+        ]
+        if to_str:
+            lines.append(f"To: {to_str}")
+        if cc_str:
+            lines.append(f"CC: {cc_str}")
+        lines.append(f"Subject: {msg.subject}")
+        lines.append("")
+        lines.append(msg.body_text.strip())
+        block = "\n".join(lines) + "\n"
 
         if total_chars + len(block) > char_budget and formatted_parts:
             truncated_count = len(prior) - len(formatted_parts)
@@ -198,6 +207,21 @@ def format_active_loops(
     return "\n".join(lines)
 
 
+def _event_detail(evt: LoopEvent) -> str:
+    """Extract a human-readable detail suffix from an event's data dict."""
+    data = evt.data or {}
+    from_s = data.get("from_state")
+    to_s = data.get("to_state")
+    if from_s and to_s:
+        return f" {from_s} → {to_s}"
+    if to_s:
+        return f" → {to_s}"
+    reason = data.get("reason")
+    if reason:
+        return f" ({reason})"
+    return ""
+
+
 def format_events(events: list[LoopEvent], limit: int = 10) -> str:
     """Format recent loop events for context."""
     if not events:
@@ -206,9 +230,10 @@ def format_events(events: list[LoopEvent], limit: int = 10) -> str:
     recent = events[-limit:]
     lines = ["Recent events:"]
     for evt in recent:
+        detail = _event_detail(evt)
         lines.append(
             f"  - [{evt.occurred_at.strftime('%Y-%m-%d %H:%M')}] "
-            f"{evt.event_type.value} by {evt.actor_email}"
+            f"{evt.event_type.value}{detail} by {evt.actor_email}"
         )
 
     if len(events) > limit:

@@ -130,6 +130,23 @@ class TestFormatThreadHistory:
         result = format_thread_history(msgs, "msg1", char_budget=11_000)
         assert "truncated" in result
 
+    def test_includes_to_and_cc_in_prior_messages(self):
+        msgs = [
+            _msg("msg1"),
+            _msg("msg2", body="Prior message", date=datetime(2026, 4, 15, 9, 0, tzinfo=UTC)),
+        ]
+        result = format_thread_history(msgs, "msg1")
+        assert "To: Bob <bob@example.com>" in result
+        assert "CC: cc@example.com" in result
+
+    def test_omits_empty_to_and_cc(self):
+        msg = _msg("msg2", body="Prior message", date=datetime(2026, 4, 15, 9, 0, tzinfo=UTC))
+        msg.to = []
+        msg.cc = []
+        result = format_thread_history([_msg("msg1"), msg], "msg1")
+        assert "To:" not in result
+        assert "CC:" not in result
+
 
 class TestFormatLoopState:
     def test_no_loop(self):
@@ -222,6 +239,34 @@ class TestFormatEvents:
         result = format_events(events)
         assert "state_advanced" in result
         assert "alice@lrp.com" in result
+
+    def test_state_advanced_shows_transition(self):
+        events = [
+            LoopEvent(
+                id="evt_1",
+                loop_id="lop_1",
+                event_type=EventType.STATE_ADVANCED,
+                data={"from_state": "new", "to_state": "awaiting_candidate"},
+                actor_email="alice@lrp.com",
+                occurred_at=datetime(2026, 4, 14, 10, 0, tzinfo=UTC),
+            )
+        ]
+        result = format_events(events)
+        assert "new → awaiting_candidate" in result
+
+    def test_cold_event_shows_reason(self):
+        events = [
+            LoopEvent(
+                id="evt_2",
+                loop_id="lop_1",
+                event_type=EventType.LOOP_MARKED_COLD,
+                data={"reason": "candidate withdrew"},
+                actor_email="alice@lrp.com",
+                occurred_at=datetime(2026, 4, 14, 10, 0, tzinfo=UTC),
+            )
+        ]
+        result = format_events(events)
+        assert "(candidate withdrew)" in result
 
 
 class TestFormatStaticContent:
